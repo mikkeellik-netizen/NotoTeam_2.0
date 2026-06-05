@@ -1,0 +1,9 @@
+# Keep user data out of source control and app builds.
+database/*.json
+database/*.db
+backups/
+files/
+temp/
+
+!database/migrations/
+!database/migrations/README.md

@@ -1,0 +1,392 @@
+
+<style>
+:root{--tg-bg:#ffffff;--tg-secondary:#f1f1f1;--tg-text:#000000;--tg-hint:#999999;--tg-btn:#2481cc;--tg-btn-text:#ffffff;--tg-link:#2481cc;}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+.phone-wrap{display:flex;justify-content:center;padding:16px 0;}
+.phone{width:340px;height:660px;background:var(--tg-bg);border-radius:32px;border:2px solid var(--color-border-secondary);overflow:hidden;position:relative;box-shadow:0 8px 32px rgba(0,0,0,0.12);}
+.screen{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--tg-bg);transition:transform .25s ease,opacity .25s ease;}
+.screen.hidden{transform:translateX(100%);opacity:0;pointer-events:none;}
+.screen.slide-back.hidden{transform:translateX(-40%);}
+.topbar{display:flex;align-items:center;gap:8px;padding:12px 14px 8px;border-bottom:1px solid var(--tg-secondary);}
+.topbar-title{flex:1;font-size:15px;font-weight:600;color:var(--tg-text);}
+.back-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;color:var(--tg-link);cursor:pointer;border-radius:50%;}
+.back-btn:active{background:var(--tg-secondary);}
+.icon-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;color:var(--tg-hint);cursor:pointer;border-radius:50%;}
+.scroll{flex:1;overflow-y:auto;padding:10px 12px;}
+.scroll::-webkit-scrollbar{width:3px;}
+.scroll::-webkit-scrollbar-thumb{background:var(--tg-hint);border-radius:2px;}
+/* Projects */
+.proj-card{background:var(--tg-secondary);border-radius:12px;padding:12px;margin-bottom:8px;cursor:pointer;transition:transform .1s;}
+.proj-card:active{transform:scale(0.97);}
+.proj-name{font-size:14px;font-weight:600;color:var(--tg-text);margin-bottom:4px;}
+.proj-desc{font-size:12px;color:var(--tg-hint);margin-bottom:8px;}
+.proj-meta{display:flex;align-items:center;gap:8px;}
+.badge{font-size:11px;color:var(--tg-hint);}
+.badge.red{color:#ef4444;}
+.avatars{display:flex;margin-left:auto;}
+.av{width:20px;height:20px;border-radius:50%;background:var(--tg-btn);color:var(--tg-btn-text);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--tg-secondary);margin-left:-4px;}
+.btn-primary{width:100%;padding:12px;border-radius:12px;background:var(--tg-btn);color:var(--tg-btn-text);font-size:14px;font-weight:600;border:none;cursor:pointer;margin-top:4px;}
+.btn-primary:active{opacity:.85;}
+/* Board */
+.tab-bar{display:flex;border-bottom:1px solid var(--tg-secondary);}
+.tab{flex:1;padding:8px;font-size:11px;font-weight:500;text-align:center;border-bottom:2px solid transparent;color:var(--tg-hint);cursor:pointer;}
+.tab.active{color:var(--tg-btn);border-bottom-color:var(--tg-btn);}
+.columns-wrap{flex:1;display:flex;gap:10px;overflow-x:auto;padding:10px 12px;scroll-snap-type:x mandatory;}
+.columns-wrap::-webkit-scrollbar{display:none;}
+.col{min-width:180px;scroll-snap-align:start;}
+.col-head{display:flex;align-items:center;gap:6px;margin-bottom:8px;}
+.col-title{font-size:12px;font-weight:600;color:var(--tg-text);}
+.col-count{font-size:11px;background:var(--tg-secondary);color:var(--tg-hint);padding:1px 6px;border-radius:10px;}
+.col-body{background:var(--tg-secondary);border-radius:12px;padding:8px;min-height:80px;}
+.task-card{background:var(--tg-bg);border-radius:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;transition:transform .1s;}
+.task-card:active{transform:scale(0.97);}
+.task-color{height:3px;border-radius:2px;margin:-8px -10px 6px;border-radius:8px 8px 0 0;}
+.task-title{font-size:12px;font-weight:500;color:var(--tg-text);line-height:1.3;margin-bottom:6px;}
+.task-footer{display:flex;align-items:center;gap:6px;}
+.dot{width:6px;height:6px;border-radius:50%;}
+.dl{font-size:10px;}
+.sub-prog{font-size:10px;color:var(--tg-hint);margin-left:auto;display:flex;align-items:center;gap:3px;}
+.assignee-av{width:18px;height:18px;border-radius:50%;background:var(--tg-btn);color:var(--tg-btn-text);font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+.fab{position:absolute;bottom:16px;right:12px;width:48px;height:48px;border-radius:50%;background:var(--tg-btn);color:var(--tg-btn-text);font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(36,129,204,0.4);}
+.fab:active{transform:scale(0.92);}
+/* Task modal */
+.modal-handle{display:flex;justify-content:center;padding:10px 0 6px;}
+.handle{width:36px;height:4px;border-radius:2px;background:var(--tg-secondary);}
+.color-bar{height:4px;margin:0 16px;border-radius:3px;}
+.modal-scroll{flex:1;overflow-y:auto;padding:12px 16px;}
+.task-big-title{font-size:17px;font-weight:700;color:var(--tg-text);margin-bottom:12px;line-height:1.3;}
+.meta-pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+.pill{font-size:11px;padding:3px 10px;border-radius:20px;font-weight:500;}
+.field-label{font-size:11px;color:var(--tg-hint);font-weight:500;margin-bottom:4px;}
+.field-val{font-size:13px;background:var(--tg-secondary);border-radius:8px;padding:8px 10px;color:var(--tg-text);margin-bottom:10px;}
+.sub-section{margin-bottom:4px;}
+.sub-head{display:flex;justify-content:space-between;margin-bottom:6px;}
+.prog-bar-wrap{height:4px;background:var(--tg-secondary);border-radius:2px;overflow:hidden;margin-bottom:8px;}
+.prog-bar-fill{height:100%;border-radius:2px;background:var(--tg-btn);}
+.subtask-row{display:flex;align-items:center;gap:8px;padding:5px 0;}
+.checkbox{width:18px;height:18px;border-radius:4px;border:2px solid var(--tg-hint);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;}
+.checkbox.done{background:#22c55e;border-color:#22c55e;}
+.sub-text{font-size:12px;color:var(--tg-text);}
+.sub-text.done{text-decoration:line-through;color:var(--tg-hint);}
+.modal-footer{padding:10px 16px 16px;border-top:1px solid var(--tg-secondary);}
+.btn-close{width:100%;padding:11px;border-radius:11px;background:var(--tg-secondary);color:var(--tg-text);font-size:13px;font-weight:500;border:none;cursor:pointer;margin-bottom:6px;}
+.btn-done{width:100%;padding:11px;border-radius:11px;background:#22c55e;color:#fff;font-size:13px;font-weight:600;border:none;cursor:pointer;}
+/* My tasks */
+.zone-head{font-size:11px;font-weight:600;margin-bottom:6px;margin-top:14px;}
+.my-task-row{background:var(--tg-secondary);border-radius:10px;padding:10px;margin-bottom:6px;cursor:pointer;}
+.my-task-row:active{transform:scale(0.98);}
+.mt-title{font-size:13px;font-weight:500;color:var(--tg-text);}
+.mt-meta{display:flex;gap:8px;margin-top:3px;}
+.mt-meta span{font-size:11px;color:var(--tg-hint);}
+.progress-card{background:var(--tg-secondary);border-radius:12px;padding:12px;margin-bottom:4px;}
+.prog-label{display:flex;justify-content:space-between;font-size:12px;color:var(--tg-text);margin-bottom:6px;}
+/* Bot screen */
+.bot-wrap{flex:1;display:flex;flex-direction:column;padding:10px 12px;gap:8px;overflow-y:auto;}
+.bubble{max-width:80%;padding:10px 12px;border-radius:16px;font-size:12px;line-height:1.5;color:var(--tg-text);}
+.bubble.from-bot{background:var(--tg-secondary);border-bottom-left-radius:4px;align-self:flex-start;}
+.bubble.from-user{background:var(--tg-btn);color:#fff;border-bottom-right-radius:4px;align-self:flex-end;}
+.inline-kbd{display:flex;flex-direction:column;gap:4px;margin-top:6px;}
+.ikb-btn{background:var(--tg-btn);color:#fff;border:none;border-radius:10px;padding:8px 12px;font-size:12px;font-weight:500;cursor:pointer;text-align:center;}
+.ikb-btn.outline{background:transparent;border:1px solid var(--tg-btn);color:var(--tg-btn);}
+/* Nav */
+.bottom-nav{display:flex;border-top:1px solid var(--tg-secondary);background:var(--tg-bg);}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;cursor:pointer;color:var(--tg-hint);font-size:9px;font-weight:500;}
+.nav-item.active{color:var(--tg-btn);}
+.nav-item svg{width:18px;height:18px;}
+/* Nav screen selector */
+.screen-nav{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;padding:8px 12px 4px;}
+.snav-btn{font-size:11px;padding:5px 10px;border-radius:20px;border:1px solid var(--color-border-secondary);background:var(--color-background-secondary);color:var(--color-text-secondary);cursor:pointer;}
+.snav-btn.active{background:var(--tg-btn);color:#fff;border-color:var(--tg-btn);}
+</style>
+
+<h2 class="sr-only">Интерактивный превью Telegram Kanban Mini App</h2>
+
+<div class="screen-nav">
+  <button class="snav-btn active" onclick="showScreen('projects')">Проекты</button>
+  <button class="snav-btn" onclick="showScreen('board')">Доска</button>
+  <button class="snav-btn" onclick="showScreen('task')">Задача</button>
+  <button class="snav-btn" onclick="showScreen('mytasks')">Мои задачи</button>
+  <button class="snav-btn" onclick="showScreen('bot')">Бот</button>
+</div>
+
+<div class="phone-wrap">
+<div class="phone">
+
+<!-- SCREEN: Projects -->
+<div class="screen" id="sc-projects">
+  <div class="topbar">
+    <span class="topbar-title">Мои проекты</span>
+    <button class="icon-btn" onclick="showScreen('mytasks')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2"/></svg>
+    </button>
+  </div>
+  <div class="scroll">
+    <div class="proj-card" onclick="showScreen('board')">
+      <div class="proj-name">Молодёжка 2025</div>
+      <div class="proj-desc">Командный проект по развитию молодёжного движения</div>
+      <div class="proj-meta">
+        <span class="badge">📋 12 задач</span>
+        <span class="badge red">🔴 3 просрочено</span>
+        <div class="avatars"><div class="av">И</div><div class="av">А</div><div class="av">С</div></div>
+      </div>
+    </div>
+    <div class="proj-card" onclick="showScreen('board')">
+      <div class="proj-name">Редизайн сайта</div>
+      <div class="proj-desc">Обновление визуала и UX для корпоративного сайта</div>
+      <div class="proj-meta">
+        <span class="badge">📋 7 задач</span>
+        <div class="avatars"><div class="av">М</div><div class="av">Д</div></div>
+      </div>
+    </div>
+    <div class="proj-card" onclick="showScreen('board')">
+      <div class="proj-name">Маркетинг Q3</div>
+      <div class="proj-desc">Рекламные кампании и контент-план</div>
+      <div class="proj-meta">
+        <span class="badge">📋 5 задач</span>
+        <span class="badge red">🔴 1 просрочено</span>
+        <div class="avatars"><div class="av">К</div><div class="av">Е</div><div class="av">Н</div><div class="av">+2</div></div>
+      </div>
+    </div>
+  </div>
+  <div style="padding:8px 12px 16px">
+    <button class="btn-primary">+ Создать проект</button>
+  </div>
+</div>
+
+<!-- SCREEN: Board -->
+<div class="screen hidden slide-back" id="sc-board">
+  <div class="topbar">
+    <button class="back-btn" onclick="showScreen('projects')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M15 19l-7-7 7-7"/></svg>
+    </button>
+    <span class="topbar-title">Молодёжка 2025</span>
+    <button class="icon-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+    </button>
+    <button class="icon-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
+  </div>
+  <div class="tab-bar">
+    <div class="tab active">Доска</div>
+    <div class="tab">Участники</div>
+    <div class="tab">Архив</div>
+  </div>
+  <div class="columns-wrap">
+    <div class="col">
+      <div class="col-head"><span class="col-title">Идея</span><span class="col-count">2</span></div>
+      <div class="col-body">
+        <div class="task-card" onclick="showScreen('task')">
+          <div class="task-title">Запуск Telegram-канала</div>
+          <div class="task-footer"><div class="dot" style="background:#6b7280"></div><span class="dl" style="color:#6b7280">Низкий</span><div class="assignee-av" style="margin-left:auto">К</div></div>
+        </div>
+        <div class="task-card" onclick="showScreen('task')">
+          <div class="task-title">Партнёрство с вузами</div>
+          <div class="task-footer"><div class="dot" style="background:#f59e0b"></div><span class="dl" style="color:#f59e0b">Средний</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-head"><span class="col-title">В работе</span><span class="col-count">4</span></div>
+      <div class="col-body">
+        <div class="task-card" onclick="showScreen('task')">
+          <div class="task-color" style="background:#ef4444"></div>
+          <div class="task-title">Подготовить презентацию</div>
+          <div class="task-footer"><div class="dot" style="background:#ef4444"></div><span class="dl" style="color:#ef4444">15 июл</span><div class="sub-prog"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10"/></svg>3/5</div><div class="assignee-av">И</div></div>
+        </div>
+        <div class="task-card" onclick="showScreen('task')">
+          <div class="task-color" style="background:#3b82f6"></div>
+          <div class="task-title">Разработка лендинга</div>
+          <div class="task-footer"><div class="dot" style="background:#ef4444"></div><span class="dl" style="color:#f59e0b">18 июл</span><div class="assignee-av" style="margin-left:auto">А</div></div>
+        </div>
+        <div class="task-card" onclick="showScreen('task')">
+          <div class="task-title">Сбор базы контактов</div>
+          <div class="task-footer"><div class="dot" style="background:#f59e0b"></div><span class="dl" style="color:#22c55e">25 июл</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-head"><span class="col-title">Готово</span><span class="col-count">3</span></div>
+      <div class="col-body">
+        <div class="task-card">
+          <div class="task-title" style="color:var(--tg-hint);text-decoration:line-through">Логотип проекта</div>
+          <div class="task-footer"><div class="dot" style="background:#22c55e"></div><span style="font-size:10px;color:#22c55e">✓ Готово</span></div>
+        </div>
+        <div class="task-card">
+          <div class="task-title" style="color:var(--tg-hint);text-decoration:line-through">Устав организации</div>
+          <div class="task-footer"><div class="dot" style="background:#22c55e"></div><span style="font-size:10px;color:#22c55e">✓ Готово</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="fab" onclick="showScreen('task')">+</div>
+</div>
+
+<!-- SCREEN: Task Modal -->
+<div class="screen hidden" id="sc-task" style="background:rgba(0,0,0,0.5);">
+  <div style="flex:1;cursor:pointer" onclick="showScreen('board')"></div>
+  <div style="background:var(--tg-bg);border-radius:20px 20px 0 0;max-height:88%;display:flex;flex-direction:column;">
+    <div class="modal-handle"><div class="handle"></div></div>
+    <div class="color-bar" style="background:#ef4444;margin-bottom:8px"></div>
+    <div class="modal-scroll">
+      <div class="task-big-title">Подготовить презентацию для совета</div>
+      <div class="meta-pills">
+        <span class="pill" style="background:#ef444420;color:#ef4444">Высокий</span>
+        <span class="pill" style="background:#ef444420;color:#ef4444">📅 15 июл, 18:00</span>
+        <span class="pill" style="background:#2481cc20;color:#2481cc">Илья</span>
+      </div>
+      <div class="field-label">Описание</div>
+      <div class="field-val">Подготовить слайды с результатами работы за квартал. Включить статистику и планы.</div>
+      <div class="sub-section">
+        <div class="sub-head">
+          <span class="field-label" style="margin-bottom:0">Подзадачи</span>
+          <span style="font-size:11px;color:var(--tg-hint)">3/5</span>
+        </div>
+        <div class="prog-bar-wrap"><div class="prog-bar-fill" style="width:60%"></div></div>
+        <div class="subtask-row"><div class="checkbox done"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg></div><span class="sub-text done">Собрать данные за квартал</span></div>
+        <div class="subtask-row"><div class="checkbox done"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg></div><span class="sub-text done">Создать шаблон слайдов</span></div>
+        <div class="subtask-row"><div class="checkbox done"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg></div><span class="sub-text done">Написать тезисы</span></div>
+        <div class="subtask-row"><div class="checkbox"></div><span class="sub-text">Добавить графики и диаграммы</span></div>
+        <div class="subtask-row"><div class="checkbox"></div><span class="sub-text">Согласовать с руководителем</span></div>
+        <div style="font-size:12px;color:var(--tg-link);padding:6px 0;cursor:pointer">+ Добавить подзадачу</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-close" onclick="showScreen('board')">Закрыть</button>
+      <button class="btn-done">✅ Завершить задачу</button>
+    </div>
+  </div>
+</div>
+
+<!-- SCREEN: My Tasks -->
+<div class="screen hidden slide-back" id="sc-mytasks">
+  <div class="topbar">
+    <button class="back-btn" onclick="showScreen('projects')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M15 19l-7-7 7-7"/></svg>
+    </button>
+    <span class="topbar-title">Мои задачи</span>
+  </div>
+  <div class="scroll">
+    <div class="progress-card">
+      <div class="prog-label"><span>Прогресс</span><span>7/10</span></div>
+      <div class="prog-bar-wrap" style="height:6px"><div class="prog-bar-fill" style="width:70%"></div></div>
+      <div style="text-align:right;font-size:11px;color:var(--tg-hint);margin-top:2px">70%</div>
+    </div>
+    <div class="zone-head" style="color:#ef4444">🔴 Срочно (2)</div>
+    <div class="my-task-row" onclick="showScreen('task')">
+      <div class="mt-title">Подготовить презентацию</div>
+      <div class="mt-meta"><span>Молодёжка 2025</span><span>· 15 июл 18:00</span><span style="color:#ef4444;margin-left:auto">Высокий</span></div>
+    </div>
+    <div class="my-task-row" onclick="showScreen('task')">
+      <div class="mt-title">Финансовый отчёт</div>
+      <div class="mt-meta"><span>Маркетинг Q3</span><span>· 15 июл 12:00</span><span style="color:#ef4444;margin-left:auto">Критический</span></div>
+    </div>
+    <div class="zone-head" style="color:#f59e0b">🟡 Скоро (3)</div>
+    <div class="my-task-row" onclick="showScreen('task')">
+      <div class="mt-title">Разработка лендинга</div>
+      <div class="mt-meta"><span>Молодёжка 2025</span><span>· 18 июл</span><span style="color:#f59e0b;margin-left:auto">Высокий</span></div>
+    </div>
+    <div class="my-task-row" onclick="showScreen('task')">
+      <div class="mt-title">Контент-план на август</div>
+      <div class="mt-meta"><span>Маркетинг Q3</span><span>· 20 июл</span></div>
+    </div>
+    <div class="zone-head" style="color:#22c55e">🟢 Впереди (5)</div>
+    <div class="my-task-row" onclick="showScreen('task')">
+      <div class="mt-title">Сбор базы контактов</div>
+      <div class="mt-meta"><span>Молодёжка 2025</span><span>· 25 июл</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- SCREEN: Bot -->
+<div class="screen hidden slide-back" id="sc-bot">
+  <div class="topbar">
+    <div class="av" style="width:28px;height:28px;font-size:13px;margin-right:2px">🤖</div>
+    <div>
+      <div style="font-size:13px;font-weight:600;color:var(--tg-text)">KanbanBot</div>
+      <div style="font-size:10px;color:var(--tg-hint)">бот</div>
+    </div>
+  </div>
+  <div class="bot-wrap">
+    <div class="bubble from-bot">
+      👋 Привет, <b>Илья</b>!<br><br>Я твой командный помощник для управления задачами.<br><br>Что делаем?
+      <div class="inline-kbd">
+        <button class="ikb-btn" onclick="showScreen('board')">📋 Открыть доску</button>
+        <button class="ikb-btn outline" onclick="showScreen('mytasks')">✅ Мои задачи</button>
+        <button class="ikb-btn outline" id="new-task-btn">➕ Создать задачу</button>
+      </div>
+    </div>
+    <div class="bubble from-user hidden" id="user-msg">/new</div>
+    <div class="bubble from-bot hidden" id="bot-reply">
+      📂 Проект: <b>Молодёжка 2025</b><br><br>Напиши задачу в свободной форме:<br><i>Например: Поставь Илье задачу подготовить отчёт до пятницы 18:00</i>
+    </div>
+    <div class="bubble from-user hidden" id="user-msg2">Поставь Алексею задачу согласовать смету до среды 14:00</div>
+    <div class="bubble from-bot hidden" id="bot-reply2">
+      <b>Создать задачу?</b><br><br>
+      📂 Проект: Молодёжка 2025<br>
+      📌 Название: Согласовать смету<br>
+      👤 Исполнитель: Алексей<br>
+      📅 Дедлайн: 17.07, 14:00 МСК<br>
+      ⚡ Приоритет: Средний
+      <div class="inline-kbd" style="margin-top:8px">
+        <button class="ikb-btn" onclick="showBotDone()">✅ Создать</button>
+        <button class="ikb-btn outline">✏️ Изменить</button>
+      </div>
+    </div>
+    <div class="bubble from-bot hidden" id="bot-done">✅ Задача создана!</div>
+  </div>
+  <div style="padding:8px 12px;border-top:1px solid var(--tg-secondary);display:flex;gap:8px;align-items:center">
+    <div style="flex:1;background:var(--tg-secondary);border-radius:20px;padding:7px 12px;font-size:12px;color:var(--tg-hint)">Сообщение...</div>
+    <div style="color:var(--tg-btn)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></div>
+  </div>
+</div>
+
+</div>
+</div>
+
+<script>
+const screens = {
+  projects: 'sc-projects',
+  board: 'sc-board',
+  task: 'sc-task',
+  mytasks: 'sc-mytasks',
+  bot: 'sc-bot'
+};
+const navBtns = document.querySelectorAll('.snav-btn');
+let current = 'projects';
+
+function showScreen(name) {
+  document.getElementById(screens[current]).classList.add('hidden');
+  current = name;
+  document.getElementById(screens[current]).classList.remove('hidden');
+  navBtns.forEach(b => {
+    b.classList.toggle('active', b.textContent.toLowerCase().includes(
+      name === 'projects' ? 'проект' :
+      name === 'board' ? 'доск' :
+      name === 'task' ? 'задач' :
+      name === 'mytasks' ? 'мои' : 'бот'
+    ));
+  });
+}
+
+document.getElementById('new-task-btn').addEventListener('click', () => {
+  let step = 0;
+  const els = ['user-msg','bot-reply','user-msg2','bot-reply2'];
+  function next() {
+    if(step < els.length) {
+      document.getElementById(els[step]).classList.remove('hidden');
+      step++;
+    }
+  }
+  next();
+  setTimeout(next, 600);
+  setTimeout(next, 1400);
+  setTimeout(next, 2400);
+});
+
+function showBotDone() {
+  document.getElementById('bot-done').classList.remove('hidden');
+  document.getElementById('bot-reply2').querySelector('.inline-kbd').style.display='none';
+}
+</script>

@@ -1,0 +1,347 @@
+// ============================================================
+// Prisma Schema — Telegram Kanban Mini App
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ПОЛЬЗОВАТЕЛИ
+// ============================================================
+
+model User {
+  id         Int      @id @default(autoincrement())
+  telegramId String   @unique @map("telegram_id")
+  username   String?
+  firstName  String?  @map("first_name")
+  lastName   String?  @map("last_name")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // Связи
+  ownedProjects   Project[]       @relation("ProjectOwner")
+  projectMembers  ProjectMember[]
+  assignedTasks   Task[]          @relation("TaskAssignee")
+  createdTasks    Task[]          @relation("TaskCreator")
+  notifications   Notification[]
+  completedSubtasks Subtask[]     @relation("SubtaskCompletedBy")
+  taskHistory     TaskHistory[]
+
+  @@map("users")
+}
+
+// ============================================================
+// ПРОЕКТЫ
+// ============================================================
+
+model Project {
+  id              Int      @id @default(autoincrement())
+  ownerId         Int      @map("owner_id")
+  title           String
+  description     String?
+  notifySettings  Json     @default("{}") @map("notify_settings")
+  aiToneStyle     AiTone   @default(FRIENDLY) @map("ai_tone_style")
+  isArchived      Boolean  @default(false) @map("is_archived")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Связи
+  owner    User            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  members  ProjectMember[]
+  roles    Role[]
+  columns  Column[]
+  tasks    Task[]
+  tags     Tag[]
+  pages    PageNode[]
+
+  @@map("projects")
+}
+
+enum AiTone {
+  FRIENDLY      // дружелюбный
+  MINIMAL       // минималистичный
+  BUSINESS      // деловой
+  YOUTH         // молодёжный
+  STRICT        // строгий
+  PASTORAL      // пасторско-наставнический
+}
+
+// ============================================================
+// РОЛИ И УЧАСТНИКИ
+// ============================================================
+
+model Role {
+  id          Int     @id @default(autoincrement())
+  projectId   Int     @map("project_id")
+  name        String
+  permissions Json    @default("{}") // { createTask, deleteTask, manageColumns, manageMembers, viewAnalytics, manageProject }
+
+  // Связи
+  project  Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  members  ProjectMember[]
+
+  @@map("roles")
+}
+
+model ProjectMember {
+  id        Int      @id @default(autoincrement())
+  projectId Int      @map("project_id")
+  userId    Int      @map("user_id")
+  roleId    Int?     @map("role_id")
+  joinedAt  DateTime @default(now()) @map("joined_at")
+
+  // Связи
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role    Role?   @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+// ============================================================
+// КОЛОНКИ KANBAN
+// ============================================================
+
+model Column {
+  id         Int      @id @default(autoincrement())
+  projectId  Int      @map("project_id")
+  pageId     String?  @map("page_id")
+  title      String
+  position   Int      @default(0)
+  isDefault  Boolean  @default(false) @map("is_default")
+  isArchive  Boolean  @default(false) @map("is_archive")
+  isHidden   Boolean  @default(false) @map("is_hidden")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  // Связи
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  page    PageNode? @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  tasks   Task[]
+
+  @@map("columns")
+}
+
+// ============================================================
+// ЗАДАЧИ
+// ============================================================
+
+model Task {
+  id          Int          @id @default(autoincrement())
+  projectId   Int          @map("project_id")
+  pageId      String?      @map("page_id")
+  columnId    Int          @map("column_id")
+  creatorId   Int          @map("creator_id")
+  assigneeId  Int?         @map("assignee_id")
+  title       String
+  description String?
+  priority    Priority     @default(MEDIUM)
+  deadlineAt  DateTime?    @map("deadline_at")
+  colorLabel  String?      @map("color_label")  // hex цвет
+  isRepeating Boolean      @default(false) @map("is_repeating")
+  repeatRule  String?      @map("repeat_rule")  // cron-строка
+  position    Int          @default(0)
+  isArchived  Boolean      @default(false) @map("is_archived")
+  archivedAt  DateTime?    @map("archived_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  // Связи
+  project       Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  page          PageNode?     @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  column        Column        @relation(fields: [columnId], references: [id])
+  creator       User          @relation("TaskCreator", fields: [creatorId], references: [id])
+  assignee      User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  subtasks      Subtask[]
+  tags          TaskTag[]
+  notifications Notification[]
+  history       TaskHistory[]
+
+  @@index([projectId])
+  @@index([pageId])
+  @@index([assigneeId])
+  @@index([columnId])
+  @@index([deadlineAt])
+  @@map("tasks")
+}
+
+// ============================================================
+// СТРАНИЦЫ И БЛОКИ MINI-NOTION
+// ============================================================
+
+model PageNode {
+  id        String       @id @default(cuid())
+  projectId Int         @map("project_id")
+  parentId  String?     @map("parent_id")
+  type      PageNodeType
+  title     String
+  icon      String      @default("📝")
+  order     Int         @default(0)
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  // Связи
+  project  Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent   PageNode?  @relation("PageTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children PageNode[] @relation("PageTree")
+  blocks   Block[]
+  columns  Column[]
+  tasks    Task[]
+
+  @@index([projectId])
+  @@index([parentId])
+  @@map("page_nodes")
+}
+
+enum PageNodeType {
+  PAGE
+  FOLDER
+  KANBAN
+}
+
+model Block {
+  id        String    @id @default(cuid())
+  pageId    String    @map("page_id")
+  type      BlockType
+  content   Json      @default("{}")
+  order     Int       @default(0)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  // Связи
+  page PageNode @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([pageId])
+  @@map("blocks")
+}
+
+enum BlockType {
+  PARAGRAPH
+  HEADING_1
+  HEADING_2
+  HEADING_3
+  TODO
+  BULLETED_LIST
+  NUMBERED_LIST
+  SIMPLE_TABLE
+  CODE
+  LINK_TO_PAGE
+  KANBAN_EMBED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// ============================================================
+// ПОДЗАДАЧИ
+// ============================================================
+
+model Subtask {
+  id            Int       @id @default(autoincrement())
+  taskId        Int       @map("task_id")
+  title         String
+  isCompleted   Boolean   @default(false) @map("is_completed")
+  completedAt   DateTime? @map("completed_at")
+  completedById Int?      @map("completed_by_id")
+  position      Int       @default(0)
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  // Связи
+  task        Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  completedBy User? @relation("SubtaskCompletedBy", fields: [completedById], references: [id])
+
+  @@index([taskId])
+  @@map("subtasks")
+}
+
+// ============================================================
+// ТЕГИ
+// ============================================================
+
+model Tag {
+  id        Int    @id @default(autoincrement())
+  projectId Int    @map("project_id")
+  title     String
+  color     String @default("#6B7280") // hex
+
+  // Связи
+  project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   TaskTag[]
+
+  @@map("tags")
+}
+
+model TaskTag {
+  taskId Int @map("task_id")
+  tagId  Int @map("tag_id")
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, tagId])
+  @@map("task_tags")
+}
+
+// ============================================================
+// УВЕДОМЛЕНИЯ
+// ============================================================
+
+model Notification {
+  id          Int              @id @default(autoincrement())
+  taskId      Int              @map("task_id")
+  userId      Int              @map("user_id")
+  type        NotificationType
+  scheduledAt DateTime         @map("scheduled_at")
+  sentAt      DateTime?        @map("sent_at")
+  isSent      Boolean          @default(false) @map("is_sent")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  // Связи
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([scheduledAt, isSent])
+  @@index([userId])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  TASK_ASSIGNED      // новая задача назначена
+  HALF_TIME          // половина срока прошла
+  HOURS_15           // осталось 15 часов
+  HOURS_2            // осталось 2 часа
+  DEADLINE_REACHED   // дедлайн наступил
+  OVERDUE            // просрочено
+  TASK_COMPLETED     // задача завершена
+}
+
+// ============================================================
+// ИСТОРИЯ ИЗМЕНЕНИЙ ЗАДАЧИ
+// ============================================================
+
+model TaskHistory {
+  id        Int      @id @default(autoincrement())
+  taskId    Int      @map("task_id")
+  userId    Int      @map("user_id")
+  action    String   // "moved", "edited", "assigned", "completed" и т.д.
+  oldValue  Json?    @map("old_value")
+  newValue  Json?    @map("new_value")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Связи
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([taskId])
+  @@map("task_history")
+}

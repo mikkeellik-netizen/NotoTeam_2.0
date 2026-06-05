@@ -1,0 +1,73 @@
+import type { ProjectBotSettings } from '../types';
+import { apiRequest, useWorkspaceBackend } from './httpClient';
+
+export const defaultProjectBotSettings: ProjectBotSettings = {
+  timezone: 'Europe/Moscow',
+  taskDeadlineNotificationsEnabled: true,
+  mentionNotificationsEnabled: true,
+  dutyNotificationsEnabled: true,
+  kanbanReminderTone: 'soft',
+  kanbanReminderPoints: [
+    { id: 'on_assign', enabled: true, kind: 'on_assign', label: 'Новая задача' },
+    { id: 'before_15h', enabled: true, kind: 'before_deadline', offsetMinutes: 900, label: 'За 15 часов' },
+    { id: 'before_2h', enabled: true, kind: 'before_deadline', offsetMinutes: 120, label: 'За 2 часа' },
+    { id: 'at_deadline', enabled: true, kind: 'at_deadline', label: 'В момент дедлайна' },
+  ],
+  reports: {
+    weekly: {
+      enabled: true,
+      recipientUserIds: [],
+      weekdays: [2],
+      time: '19:00',
+      skipEmpty: true,
+      sendOnlyIfChanged: false,
+      sections: {
+        createdTasks: true,
+        completedTasks: true,
+        overdueTasks: true,
+        approachingDeadlines: true,
+        inactiveUsers: true,
+        userActivity: true,
+        kanbanMovement: true,
+        mentions: true,
+        recommendations: true,
+      },
+    },
+    overdue: {
+      enabled: true,
+      recipientUserIds: [],
+      weekdays: [4],
+      time: '20:00',
+      skipEmpty: true,
+      sendOnlyIfChanged: true,
+      sections: {
+        createdTasks: false,
+        completedTasks: false,
+        overdueTasks: true,
+        approachingDeadlines: false,
+        inactiveUsers: false,
+        userActivity: false,
+        kanbanMovement: false,
+        mentions: false,
+        recommendations: true,
+      },
+    },
+  },
+};
+
+export const botSettingsApi = {
+  enabled: useWorkspaceBackend,
+
+  async get(projectId: number) {
+    if (!useWorkspaceBackend) return defaultProjectBotSettings;
+    return apiRequest<ProjectBotSettings>(`/projects/${projectId}/bot-settings`);
+  },
+
+  async update(projectId: number, settings: ProjectBotSettings) {
+    if (!useWorkspaceBackend) return settings;
+    return apiRequest<ProjectBotSettings>(`/projects/${projectId}/bot-settings`, {
+      method: 'PATCH',
+      body: settings,
+    });
+  },
+};
