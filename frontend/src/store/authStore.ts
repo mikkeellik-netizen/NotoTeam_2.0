@@ -46,6 +46,15 @@ export const useAuthStore = create<AuthState>((set) => ({
       setAuthHeader(`tma ${initData}`);
       try {
         const user = await authApi.me();
+
+        // Проверяем: если пользователь сменился (переключение аккаунта в Telegram),
+        // перезагружаем страницу чтобы гарантированно сбросить все кэшированные данные.
+        const prevUser = useAuthStore.getState().user;
+        if (prevUser && String(prevUser.id) !== String(user.id)) {
+          window.location.reload();
+          return;
+        }
+
         set({ user, isAuthed: true, isLoading: false, inTelegram: true, needsWebLogin: false });
       } catch (error) {
         set({
