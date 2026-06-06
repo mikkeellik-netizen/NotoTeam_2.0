@@ -25,6 +25,17 @@ export function setSessionToken(token: string | undefined) {
   }
 }
 
+// Определяет актуальный заголовок авторизации для каждого запроса.
+// В Telegram Mini App — ВСЕГДА читаем initData заново (защита от shared localStorage).
+// В браузере — используем сохранённый session token.
+function getEffectiveAuthHeader(): string | undefined {
+  const initData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined;
+  if (initData && initData.length > 0) return `tma ${initData}`;
+  const token = getStoredSessionToken();
+  if (token) return `Bearer ${token}`;
+  return authHeader;
+}
+
 export function getStoredSessionToken(): string | undefined {
   return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? undefined;
 }
@@ -41,7 +52,8 @@ export async function apiRequest<T>(path: string, options: { method?: string; bo
 
   const headers: Record<string, string> = {};
   if (options.body) headers['Content-Type'] = 'application/json';
-  if (authHeader) headers['Authorization'] = authHeader;
+  const effectiveAuth = getEffectiveAuthHeader();
+  if (effectiveAuth) headers['Authorization'] = effectiveAuth;
 
   const response = await fetch(`${API_URL}${path}`, {
     method: options.method ?? 'GET',

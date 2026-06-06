@@ -95,6 +95,8 @@ function upsertTelegramUser(db, tgUser) {
     user = { id: idFor(db.users), ...tgUser, createdAt: now(), updatedAt: now() };
     db.users.push(user);
     db._dirty = true;
+    // При первой регистрации реального пользователя — переносим проекты от local-dev
+    migrateLocalDevProjects(db, user);
   } else {
     const before = JSON.stringify(user);
     Object.assign(user, {
@@ -107,6 +109,43 @@ function upsertTelegramUser(db, tgUser) {
     if (JSON.stringify(user) !== before) db._dirty = true;
   }
   return user;
+}
+
+// Когда первый реальный Telegram-пользователь регистрируется,
+// переносим к нему проекты от системного local-dev пользователя.
+// Это одноразовый перенос при первом входе нового пользователя.
+function migrateLocalDevProjects(db, newUser) {
+  const localDevUser = db.users.find((u) => u.telegramId === "local-dev");
+  if (!localDevUser) return;
+
+  // Считаем реальных пользователей (без local-dev и без только что созданного)
+  const realUsers = db.users.filter((u) => u.telegramId !== "local-dev" && u.id !== newUser.id);
+  // Миграцию делаем только для первого реального пользователя
+  if (realUsers.length > 0) return;
+
+  const localId = String(localDevUser.id);
+  const newId = String(newUser.id);
+  let migrated = 0;
+
+  for (const project of db.projects) {
+    if (String(project.ownerId) === localId) {
+      project.ownerId = newId;
+      migrated++;
+    }
+    for (const member of (project.members ?? [])) {
+      if (String(member.userId) === localId) member.userId = newId;
+    }
+  }
+  for (const item of db.columns) { if (String(item.userId) === localId) item.userId = newId; }
+  for (const item of db.tasks) {
+    if (String(item.creatorId) === localId) item.creatorId = newId;
+    if (String(item.assigneeId) === localId) item.assigneeId = newId;
+  }
+
+  if (migrated > 0) {
+    console.log(`Migrated ${migrated} project(s) from local-dev to user ${newId}`);
+    db._dirty = true;
+  }
 }
 
 function pushOutbox(db, telegramId, text) {
@@ -373,19 +412,6 @@ async function handle(req, res) {
     // ===== ПУБЛИЧНЫЕ ЭНДПОИНТЫ (без авторизации) =====
     if (method === "GET" && pathname === "/health") return send(res, 200, { ok: true, time: now() });
 
-    // Временная диагностика заголовка авторизации (без раскрытия секрета)
-    if (method === "GET" && pathname === "/auth/debug") {
-      const header = parseAuthHeader(req);
-      const fp = (value) => (value ? crypto.createHash("sha256").update(value).digest("hex").slice(0, 12) : null);
-      return send(res, 200, {
-        hasAuthorizationHeader: typeof req.headers["authorization"] === "string",
-        scheme: header?.scheme ?? null,
-        valueLen: header?.value?.length ?? 0,
-        headerValueFp: fp(header?.value),
-        configuredFp: fp(INTERNAL_API_TOKEN),
-        matchesInternal: Boolean(header && header.scheme === "bot" && INTERNAL_API_TOKEN && header.value === INTERNAL_API_TOKEN),
-      });
-    }
 
     // Шаг 1 веб-входа: запросить код. Пользователь должен сначала запустить бота.
     if (method === "POST" && pathname === "/auth/request-code") {
@@ -2467,9 +2493,5 @@ function syncBlocksFromSpaces(spaces) {
 http.createServer(handle).listen(PORT, "0.0.0.0", () => {
   console.log(`Telegram Workspace API listening on http://127.0.0.1:${PORT}`);
   console.log(`INTERNAL_API_TOKEN configured: ${INTERNAL_API_TOKEN ? "yes (len " + INTERNAL_API_TOKEN.length + ")" : "NO"}`);
-  if (INTERNAL_API_TOKEN) {
-    const fp = crypto.createHash("sha256").update(INTERNAL_API_TOKEN).digest("hex").slice(0, 12);
-    console.log(`INTERNAL_API_TOKEN sha256[:12]: ${fp}`);
-  }
   console.log(`APP_OWNER_TELEGRAM_IDS: ${[...APP_OWNER_TELEGRAM_IDS].join(",") || "(none)"}`);
 });
