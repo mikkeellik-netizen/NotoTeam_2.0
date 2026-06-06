@@ -148,6 +148,21 @@ function migrateLocalDevProjects(db, newUser) {
   }
 }
 
+// Удаляет local-dev пользователя если у него больше нет проектов
+// (то есть после миграции или если его никогда и не было).
+function purgeLocalDevUser(db) {
+  const localDev = db.users.find((u) => u.telegramId === "local-dev");
+  if (!localDev) return false;
+  const hasProjects = db.projects.some(
+    (p) => String(p.ownerId) === String(localDev.id) ||
+           (p.members ?? []).some((m) => String(m.userId) === String(localDev.id)),
+  );
+  if (hasProjects) return false; // ещё есть данные — не трогаем
+  db.users = db.users.filter((u) => u.telegramId !== "local-dev");
+  console.log("Removed orphaned local-dev user from database");
+  return true;
+}
+
 function pushOutbox(db, telegramId, text) {
   db.outbox.push({
     id: randomToken(8),
@@ -230,30 +245,10 @@ const defaultBotSettings = {
 const dataRepository = createDataRepository({ createDefaultDb });
 
 function createDefaultDb() {
-  const user = {
-    id: "1",
-    telegramId: "local-dev",
-    username: "local_user",
-    firstName: "Local",
-    lastName: "User",
-  };
   return {
-    users: [user],
-    projects: [
-      {
-        id: "1",
-        title: "Командный проект",
-        ownerId: "1",
-        members: [{ userId: "1", role: "owner" }],
-        botSettings: defaultBotSettings,
-        calendarCategories: [],
-      },
-    ],
-    columns: [
-      { id: "1", projectId: "1", title: "Идея", position: 0 },
-      { id: "2", projectId: "1", title: "В работе", position: 1 },
-      { id: "3", projectId: "1", title: "Готово", position: 2 },
-    ],
+    users: [],
+    projects: [],
+    columns: [],
     tasks: [],
     subtasks: [],
     blocks: [],
@@ -286,7 +281,8 @@ async function readJson() {
   db.authCodes ??= [];
   db.outbox ??= [];
   const repairedTasks = normalizeDatabaseIds(db);
-  if (repairedTasks > 0) {
+  const removedLocalDev = purgeLocalDevUser(db);
+  if (repairedTasks > 0 || removedLocalDev) {
     await dataRepository.write(db);
   }
   return db;
