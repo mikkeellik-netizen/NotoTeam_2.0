@@ -371,6 +371,19 @@ async function handle(req, res) {
     // ===== ПУБЛИЧНЫЕ ЭНДПОИНТЫ (без авторизации) =====
     if (method === "GET" && pathname === "/health") return send(res, 200, { ok: true, time: now() });
 
+    // Временная диагностика заголовка авторизации (без раскрытия секрета)
+    if (method === "GET" && pathname === "/auth/debug") {
+      const rawHeaderNames = Object.keys(req.headers);
+      const header = parseAuthHeader(req);
+      return send(res, 200, {
+        hasAuthorizationHeader: typeof req.headers["authorization"] === "string",
+        scheme: header?.scheme ?? null,
+        valueLen: header?.value?.length ?? 0,
+        matchesInternal: Boolean(header && header.scheme === "bot" && INTERNAL_API_TOKEN && header.value === INTERNAL_API_TOKEN),
+        headerNames: rawHeaderNames,
+      });
+    }
+
     // Шаг 1 веб-входа: запросить код. Пользователь должен сначала запустить бота.
     if (method === "POST" && pathname === "/auth/request-code") {
       const body = await parseBody(req);
