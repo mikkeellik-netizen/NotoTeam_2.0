@@ -1,4 +1,4 @@
-import type { WorkspaceRepository } from "./ports.js";
+import type { BotMessenger, WorkspaceRepository } from "./ports.js";
 import { NotificationService } from "./services/notificationService.js";
 import { ReportService } from "./services/reportService.js";
 
@@ -6,11 +6,13 @@ export class BotScheduler {
   private notificationTimer?: NodeJS.Timeout;
   private reportTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
+  private outboxTimer?: NodeJS.Timeout;
 
   constructor(
     private repo: WorkspaceRepository,
     private notifications: NotificationService,
     private reports: ReportService,
+    private messenger?: BotMessenger,
   ) {}
 
   start() {
@@ -18,6 +20,11 @@ export class BotScheduler {
       void this.notifications.deliverDueNotifications();
       void this.notifications.deliverDueReminders();
     }, 60_000);
+
+    // Доставка кодов входа и прочих служебных сообщений — раз в 5 секунд
+    this.outboxTimer = setInterval(() => {
+      void this.runOutboxTick();
+    }, 5_000);
 
     this.reportTimer = setInterval(() => {
       void this.runReportTick();
@@ -31,12 +38,32 @@ export class BotScheduler {
     void this.notifications.deliverDueReminders();
     void this.runReportTick();
     void this.runSyncTick();
+    void this.runOutboxTick();
   }
 
   stop() {
     if (this.notificationTimer) clearInterval(this.notificationTimer);
     if (this.reportTimer) clearInterval(this.reportTimer);
     if (this.syncTimer) clearInterval(this.syncTimer);
+    if (this.outboxTimer) clearInterval(this.outboxTimer);
+  }
+
+  private async runOutboxTick() {
+    if (!this.messenger) return;
+    try {
+      const messages = await this.repo.fetchPendingOutbox();
+      for (const message of messages) {
+        try {
+          await this.messenger.sendMessage(message.telegramId, message.text);
+        } catch (error) {
+          console.error("Outbox send failed", error instanceof Error ? error.message : error);
+        } finally {
+          await this.repo.markOutboxSent(message.id);
+        }
+      }
+    } catch (error) {
+      console.error("Outbox tick failed", error instanceof Error ? error.message : error);
+    }
   }
 
   private async runSyncTick() {

@@ -1,103 +1,105 @@
 import { create } from 'zustand';
 import type { User } from '../types';
-import { authApi, type TelegramUserInput } from '../api/auth';
+import { authApi } from '../api/auth';
+import {
+  setAuthHeader,
+  setSessionToken,
+  getStoredSessionToken,
+} from '../api/httpClient';
 
 interface AuthState {
   user: User | null;
-  token: string | null;
   isAuthed: boolean;
   isLoading: boolean;
+  /** Запущено ли приложение внутри Telegram (Mini App) */
+  inTelegram: boolean;
   error: string | null;
-  login: (initData?: string) => Promise<void>;
-  logout: () => void;
+  /** true, если в браузере нужно показать форму входа по коду */
+  needsWebLogin: boolean;
+  init: () => Promise<void>;
+  requestCode: (username: string) => Promise<{ ok: boolean; message: string }>;
+  verifyCode: (username: string, code: string) => Promise<void>;
+  logout: () => Promise<void>;
 }
 
-const mockUser: User = {
-  id: 1,
-  telegramId: 'local-dev',
-  username: 'local_user',
-  firstName: 'Local',
-};
+function getTelegramInitData(): string | undefined {
+  const initData = window.Telegram?.WebApp?.initData;
+  return initData && initData.length > 0 ? initData : undefined;
+}
 
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
-  token: null,
   isAuthed: false,
-  isLoading: false,
+  isLoading: true,
+  inTelegram: Boolean(getTelegramInitData()),
   error: null,
+  needsWebLogin: false,
 
-  login: async (initData?: string) => {
+  // Определяет способ авторизации при запуске приложения
+  init: async () => {
+    set({ isLoading: true, error: null });
+
+    const initData = getTelegramInitData();
+
+    // 1) Telegram Mini App — авторизация автоматическая по подписанному initData
+    if (initData) {
+      setAuthHeader(`tma ${initData}`);
+      try {
+        const user = await authApi.me();
+        set({ user, isAuthed: true, isLoading: false, inTelegram: true, needsWebLogin: false });
+      } catch (error) {
+        set({
+          user: null,
+          isAuthed: false,
+          isLoading: false,
+          inTelegram: true,
+          error: error instanceof Error ? error.message : 'Не удалось авторизоваться через Telegram',
+        });
+      }
+      return;
+    }
+
+    // 2) Браузер с сохранённой сессией
+    const token = getStoredSessionToken();
+    if (token) {
+      setAuthHeader(`Bearer ${token}`);
+      try {
+        const user = await authApi.me();
+        set({ user, isAuthed: true, isLoading: false, inTelegram: false, needsWebLogin: false });
+        return;
+      } catch {
+        // токен истёк/недействителен — очищаем и показываем форму входа
+        setSessionToken(undefined);
+      }
+    }
+
+    // 3) Браузер без сессии — нужна форма входа по коду
+    set({ user: null, isAuthed: false, isLoading: false, inTelegram: false, needsWebLogin: true });
+  },
+
+  requestCode: async (username: string) => {
+    return authApi.requestCode(username);
+  },
+
+  verifyCode: async (username: string, code: string) => {
     set({ isLoading: true, error: null });
     try {
-      // Проверяем что приложение открыто в Telegram
-      const isInTelegram = !!window.Telegram?.WebApp?.initData;
-      if (!isInTelegram && !initData) {
-        set({
-          user: null,
-          token: null,
-          isAuthed: false,
-          isLoading: false,
-          error: 'Это приложение работает только внутри Telegram. Откройте его через бота.',
-        });
-        return;
-      }
-
-      const telegramUser = getTelegramUser(initData);
-      if (!telegramUser) {
-        set({
-          user: null,
-          token: null,
-          isAuthed: false,
-          isLoading: false,
-          error: 'Не удалось получить данные Telegram. Откройте приложение через бота.',
-        });
-        return;
-      }
-
-      const user = await authApi.loginWithTelegram({ ...telegramUser, initData });
-      set({ user, token: initData || 'dev-token', isAuthed: true, isLoading: false, error: null });
+      const { token, user } = await authApi.verifyCode(username, code);
+      setSessionToken(token);
+      set({ user, isAuthed: true, isLoading: false, needsWebLogin: false, error: null });
     } catch (error) {
-      set({
-        user: null,
-        token: null,
-        isAuthed: false,
-        isLoading: false,
-        error: error instanceof Error ? error.message : 'Не удалось авторизоваться',
-      });
+      set({ isLoading: false, error: error instanceof Error ? error.message : 'Не удалось войти' });
+      throw error;
     }
   },
 
-  logout: () => set({ user: null, token: null, isAuthed: false, isLoading: false, error: null }),
+  logout: async () => {
+    try {
+      await authApi.logout();
+    } catch {
+      // игнорируем ошибки сети при выходе
+    }
+    setSessionToken(undefined);
+    set({ user: null, isAuthed: false, isLoading: false, needsWebLogin: true });
+  },
 }));
-
-function getTelegramUser(initData?: string): TelegramUserInput | undefined {
-  const unsafeUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-  if (unsafeUser?.id) {
-      return {
-      telegramId: String(unsafeUser.id),
-      username: unsafeUser.username,
-      firstName: unsafeUser.first_name,
-      lastName: unsafeUser.last_name,
-      photoUrl: unsafeUser.photo_url,
-    };
-  }
-
-  if (!initData) return undefined;
-
-  try {
-    const params = new URLSearchParams(initData);
-    const rawUser = params.get('user');
-    if (!rawUser) return undefined;
-    const parsed = JSON.parse(rawUser);
-    if (!parsed?.id) return undefined;
-    return {
-      telegramId: String(parsed.id),
-      username: parsed.username,
-      firstName: parsed.first_name,
-      lastName: parsed.last_name,
-      photoUrl: parsed.photo_url,
-    };
-  } catch {
-    return undefined;
-  }
-}

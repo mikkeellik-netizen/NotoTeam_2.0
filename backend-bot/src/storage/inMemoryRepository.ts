@@ -264,6 +264,14 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     return reminder;
   }
 
+  async fetchPendingOutbox() {
+    return [] as Array<{ id: string; telegramId: string; text: string }>;
+  }
+
+  async markOutboxSent(_id: string) {
+    // нет хранилища в памяти
+  }
+
   async createNotification(event: Omit<NotificationEvent, "id" | "status">) {
     const notification: NotificationEvent = {
       ...event,

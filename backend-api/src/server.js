@@ -16,7 +16,106 @@ const APP_OWNER_TELEGRAM_IDS = new Set(
     .filter(Boolean),
 );
 
+const INTERNAL_API_TOKEN = String(process.env.INTERNAL_API_TOKEN ?? "").trim();
+const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 дней
+const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 минут
+const AUTH_CODE_MAX_ATTEMPTS = 5;
+
 const now = () => new Date().toISOString();
+
+function randomToken(bytes = 32) {
+  return crypto.randomBytes(bytes).toString("hex");
+}
+
+function generateAuthCode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+}
+
+// Разбирает заголовок Authorization. Поддерживает:
+//   "Bot <token>"  — доверенный сервис (бот)
+//   "tma <initData>" — Telegram Mini App
+//   "Bearer <token>" — веб-сессия
+function parseAuthHeader(req) {
+  const raw = req.headers["authorization"];
+  if (!raw || typeof raw !== "string") return undefined;
+  const index = raw.indexOf(" ");
+  if (index === -1) return undefined;
+  const scheme = raw.slice(0, index).trim().toLowerCase();
+  const value = raw.slice(index + 1).trim();
+  if (!value) return undefined;
+  return { scheme, value };
+}
+
+// Определяет, кто делает запрос. Возвращает:
+//   { kind: "bot" }                — доверенный бот
+//   { kind: "user", user }         — конкретный пользователь
+//   undefined                      — не аутентифицирован
+function resolveAuth(req, db, url) {
+  const header = parseAuthHeader(req);
+
+  // Бот по внутреннему токену
+  if (header?.scheme === "bot") {
+    if (INTERNAL_API_TOKEN && header.value === INTERNAL_API_TOKEN) {
+      return { kind: "bot" };
+    }
+    return undefined;
+  }
+
+  // Telegram Mini App initData
+  if (header?.scheme === "tma") {
+    const tgUser = parseTelegramInitData(header.value);
+    if (!tgUser) return undefined;
+    const user = upsertTelegramUser(db, tgUser);
+    if (!user || user.isBlocked) return undefined;
+    return { kind: "user", user };
+  }
+
+  // Веб-сессия по Bearer-токену (или ?token= для скачивания файлов)
+  const sessionToken =
+    header?.scheme === "bearer" ? header.value : url?.searchParams.get("token") ?? undefined;
+  if (sessionToken) {
+    const session = db.sessions.find((item) => item.token === sessionToken);
+    if (!session) return undefined;
+    if (new Date(session.expiresAt).getTime() < Date.now()) return undefined;
+    const user = db.users.find((item) => item.id === session.userId);
+    if (!user || user.isBlocked) return undefined;
+    session.lastSeenAt = now();
+    return { kind: "user", user };
+  }
+
+  return undefined;
+}
+
+// Создаёт/обновляет пользователя по данным Telegram (без записи на диск — вызывающий пишет сам при необходимости)
+function upsertTelegramUser(db, tgUser) {
+  let user = db.users.find((item) => item.telegramId === tgUser.telegramId);
+  if (!user) {
+    user = { id: idFor(db.users), ...tgUser, createdAt: now(), updatedAt: now() };
+    db.users.push(user);
+    db._dirty = true;
+  } else {
+    const before = JSON.stringify(user);
+    Object.assign(user, {
+      username: tgUser.username ?? user.username,
+      firstName: tgUser.firstName ?? user.firstName,
+      lastName: tgUser.lastName ?? user.lastName,
+      photoUrl: tgUser.photoUrl ?? user.photoUrl,
+      updatedAt: now(),
+    });
+    if (JSON.stringify(user) !== before) db._dirty = true;
+  }
+  return user;
+}
+
+function pushOutbox(db, telegramId, text) {
+  db.outbox.push({
+    id: randomToken(8),
+    telegramId: String(telegramId),
+    text,
+    status: "pending",
+    createdAt: now(),
+  });
+}
 
 function loadDotEnv() {
   const envPath = path.resolve(process.cwd(), ".env");
@@ -142,6 +241,9 @@ async function readJson() {
   db.activity ??= [];
   db.notifications ??= [];
   db.joinRequests ??= [];
+  db.sessions ??= [];
+  db.authCodes ??= [];
+  db.outbox ??= [];
   const repairedTasks = normalizeDatabaseIds(db);
   if (repairedTasks > 0) {
     await dataRepository.write(db);
@@ -200,6 +302,22 @@ function resolveTelegramUser(body) {
   return parsed;
 }
 
+// Доверенный путь (только для бота): данные Telegram берутся как есть.
+function resolveTelegramUserTrusted(body) {
+  if (body.initData) {
+    const parsed = parseTelegramInitData(String(body.initData));
+    if (parsed) return parsed;
+  }
+  if (!body.telegramId) return undefined;
+  return {
+    telegramId: String(body.telegramId),
+    username: body.username,
+    firstName: body.firstName,
+    lastName: body.lastName,
+    photoUrl: body.photoUrl,
+  };
+}
+
 function parseTelegramInitData(initData) {
   const params = new URLSearchParams(initData);
   const hash = params.get("hash");
@@ -250,7 +368,123 @@ async function handle(req, res) {
   try {
     const db = await readJson();
 
+    // ===== ПУБЛИЧНЫЕ ЭНДПОИНТЫ (без авторизации) =====
     if (method === "GET" && pathname === "/health") return send(res, 200, { ok: true, time: now() });
+
+    // Шаг 1 веб-входа: запросить код. Пользователь должен сначала запустить бота.
+    if (method === "POST" && pathname === "/auth/request-code") {
+      const body = await parseBody(req);
+      const username = String(body.username ?? "").trim().replace(/^@/, "").toLowerCase();
+      if (!username) return send(res, 400, { error: "Укажите Telegram-ник" });
+
+      const user = db.users.find((item) => item.username?.toLowerCase() === username);
+      // Намеренно отвечаем одинаково, чтобы не раскрывать, кто зарегистрирован.
+      const genericOk = { ok: true, message: "Если такой пользователь запускал бота, код отправлен в Telegram." };
+      if (!user || !user.telegramId || user.isBlocked) return send(res, 200, genericOk);
+
+      // Лимит: не больше 3 активных кодов за последнюю минуту
+      const minuteAgo = Date.now() - 60 * 1000;
+      const recent = db.authCodes.filter(
+        (item) => item.userId === user.id && new Date(item.createdAt).getTime() > minuteAgo,
+      );
+      if (recent.length >= 3) return send(res, 429, { error: "Слишком много запросов. Попробуйте через минуту." });
+
+      // Удаляем прежние коды этого пользователя
+      db.authCodes = db.authCodes.filter((item) => item.userId !== user.id);
+      const code = generateAuthCode();
+      db.authCodes.push({
+        id: randomToken(8),
+        userId: user.id,
+        telegramId: String(user.telegramId),
+        code,
+        attempts: 0,
+        expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS).toISOString(),
+        createdAt: now(),
+      });
+      pushOutbox(
+        db,
+        user.telegramId,
+        `Код для входа на сайт: ${code}\n\nКод действует 10 минут. Если вы не запрашивали вход — игнорируйте это сообщение.`,
+      );
+      await writeJson(db);
+      return send(res, 200, genericOk);
+    }
+
+    // Шаг 2 веб-входа: проверить код, выдать сессию.
+    if (method === "POST" && pathname === "/auth/verify-code") {
+      const body = await parseBody(req);
+      const username = String(body.username ?? "").trim().replace(/^@/, "").toLowerCase();
+      const code = String(body.code ?? "").trim();
+      const user = db.users.find((item) => item.username?.toLowerCase() === username);
+      const record = user ? db.authCodes.find((item) => item.userId === user.id) : undefined;
+      if (!user || !record) return send(res, 400, { error: "Неверный код или он истёк" });
+
+      if (new Date(record.expiresAt).getTime() < Date.now()) {
+        db.authCodes = db.authCodes.filter((item) => item.id !== record.id);
+        await writeJson(db);
+        return send(res, 400, { error: "Код истёк. Запросите новый." });
+      }
+      if (record.attempts >= AUTH_CODE_MAX_ATTEMPTS) {
+        db.authCodes = db.authCodes.filter((item) => item.id !== record.id);
+        await writeJson(db);
+        return send(res, 429, { error: "Слишком много попыток. Запросите новый код." });
+      }
+      if (record.code !== code) {
+        record.attempts += 1;
+        await writeJson(db);
+        return send(res, 400, { error: "Неверный код" });
+      }
+
+      // Успех: удаляем код, создаём сессию
+      db.authCodes = db.authCodes.filter((item) => item.id !== record.id);
+      const token = randomToken(32);
+      db.sessions.push({
+        token,
+        userId: user.id,
+        createdAt: now(),
+        lastSeenAt: now(),
+        expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+      });
+      await writeJson(db);
+      return send(res, 200, { token, user });
+    }
+
+    // ===== АУТЕНТИФИКАЦИЯ =====
+    const auth = resolveAuth(req, db, url);
+    if (db._dirty) {
+      delete db._dirty;
+      await writeJson(db);
+    }
+    if (!auth) return send(res, 401, { error: "Unauthorized" });
+
+    // Текущий пользователь
+    if (method === "GET" && pathname === "/auth/me") return send(res, 200, auth.user ?? null);
+    if (method === "POST" && pathname === "/auth/logout") {
+      const header = parseAuthHeader(req);
+      if (header?.scheme === "bearer") {
+        db.sessions = db.sessions.filter((item) => item.token !== header.value);
+        await writeJson(db);
+      }
+      return send(res, 200, { ok: true });
+    }
+
+    // Outbox для бота: забрать ожидающие сообщения и пометить отправленными
+    if (method === "GET" && pathname === "/outbox/pending") {
+      return send(res, 200, db.outbox.filter((item) => item.status === "pending"));
+    }
+    {
+      const sentParams = route(method, pathname, { method: "POST", path: /^\/outbox\/(?<id>[^/]+)\/sent$/ });
+      if (sentParams) {
+        db.outbox = db.outbox.filter((item) => item.id !== sentParams.id);
+        await writeJson(db);
+        return send(res, 200, { ok: true });
+      }
+    }
+
+    // ===== АВТОРИЗАЦИЯ ДОСТУПА К РЕСУРСАМ =====
+    const denied = authorizeRequest(auth, method, pathname, db);
+    if (denied) return send(res, denied.status, { error: denied.error });
+
     if (method === "GET" && pathname === "/projects") return send(res, 200, db.projects.filter((project) => !project.isDeleted));
 
     if (method === "GET" && pathname === "/link-preview") {
@@ -262,7 +496,7 @@ async function handle(req, res) {
     let params = route(method, pathname, { method: "POST", path: /^\/projects$/ });
     if (params) {
       const body = await parseBody(req);
-      const ownerId = asRef(body.ownerId ?? body.actorUserId ?? "1");
+      const ownerId = actorFor(auth, body.ownerId ?? body.actorUserId);
       const owner = db.users.find((user) => user.id === ownerId) ?? db.users[0];
       const project = {
         id: idFor(db.projects),
@@ -290,7 +524,9 @@ async function handle(req, res) {
     params = route(method, pathname, { method: "POST", path: /^\/telegram\/users$/ });
     if (params) {
       const body = await parseBody(req);
-      const telegramUser = resolveTelegramUser(body);
+      // Бот (доверенный сервис) может передавать telegramId напрямую.
+      // Веб/Mini App — только через подписанный initData.
+      const telegramUser = auth.kind === "bot" ? resolveTelegramUserTrusted(body) : resolveTelegramUser(body);
       if (!telegramUser) return send(res, 401, { error: "Invalid Telegram authorization" });
 
       let user = db.users.find((item) => item.telegramId === telegramUser.telegramId);
@@ -319,8 +555,12 @@ async function handle(req, res) {
       const code = String(body.code ?? "").trim().toUpperCase();
       const project = db.projects.find((item) => item.inviteCode === code || item.id === code);
       if (!project) return send(res, 404, { error: "Project not found" });
-      const userId = body.userId ? asRef(body.userId) : undefined;
-      const username = String(body.username ?? "").replace(/^@/, "");
+      // Для веб/Mini App заявку создаёт сам аутентифицированный пользователь.
+      const userId = auth.kind === "user" ? auth.user.id : body.userId ? asRef(body.userId) : undefined;
+      const username =
+        auth.kind === "user"
+          ? String(auth.user.username ?? "").replace(/^@/, "")
+          : String(body.username ?? "").replace(/^@/, "");
       const existingUser = userId
         ? db.users.find((item) => item.id === userId)
         : db.users.find((item) => item.username?.toLowerCase() === username.toLowerCase());
@@ -360,7 +600,7 @@ async function handle(req, res) {
       const project = db.projects.find((item) => item.id === params.projectId);
       const request = db.joinRequests.find((item) => item.id === params.requestId);
       if (!project || !request) return send(res, 404, { error: "Join request not found" });
-      const actorUserId = asRef(body.actorUserId ?? "1");
+      const actorUserId = actorFor(auth, body.actorUserId);
       if (!canManageProjectAccess(project, actorUserId)) return send(res, 403, { error: "Access denied" });
       let user = request.userId
         ? db.users.find((item) => item.id === request.userId)
@@ -385,7 +625,7 @@ async function handle(req, res) {
       const project = db.projects.find((item) => item.id === params.projectId);
       const request = db.joinRequests.find((item) => item.id === params.requestId);
       if (!project || !request) return send(res, 404, { error: "Join request not found" });
-      const actorUserId = asRef(body.actorUserId ?? "1");
+      const actorUserId = actorFor(auth, body.actorUserId);
       if (!canManageProjectAccess(project, actorUserId)) return send(res, 403, { error: "Access denied" });
       request.status = "rejected";
       request.resolvedAt = now();
@@ -439,27 +679,27 @@ async function handle(req, res) {
     }
 
     if (method === "GET" && pathname === "/system/access") {
-      return send(res, 200, { isOwner: isSystemOwnerRequest(db, url) });
+      return send(res, 200, { isOwner: isSystemOwner(auth, db) });
     }
 
     if (method === "GET" && pathname === "/system/stats") {
-      if (!isSystemOwnerRequest(db, url)) return send(res, 403, { error: "Forbidden" });
+      if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
       return send(res, 200, createSystemStats(db));
     }
 
     if (method === "GET" && pathname === "/system/users/export.json") {
-      if (!isSystemOwnerRequest(db, url)) return send(res, 403, { error: "Forbidden" });
+      if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
       return sendRaw(res, 200, JSON.stringify(createSystemUserExport(db), null, 2), "application/json; charset=utf-8");
     }
 
     if (method === "GET" && pathname === "/system/users/export.csv") {
-      if (!isSystemOwnerRequest(db, url)) return send(res, 403, { error: "Forbidden" });
+      if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
       return sendRaw(res, 200, toCsv(createSystemUserExport(db)), "text/csv; charset=utf-8");
     }
 
     params = route(method, pathname, { method: "POST", path: /^\/system\/users\/(?<id>[^/]+)\/block$/ });
     if (params) {
-      if (!isSystemOwnerRequest(db, url)) return send(res, 403, { error: "Forbidden" });
+      if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
       const user = db.users.find((item) => item.id === params.id);
       if (!user) return send(res, 404, { error: "User not found" });
       if (APP_OWNER_TELEGRAM_IDS.has(String(user.telegramId))) {
@@ -468,7 +708,7 @@ async function handle(req, res) {
       const body = await parseBody(req);
       user.isBlocked = true;
       user.blockedAt = now();
-      user.blockedByUserId = asRef(url.searchParams.get("actorUserId") ?? body.actorUserId ?? "");
+      user.blockedByUserId = auth.user?.id ?? "";
       user.blockReason = String(body.reason ?? "").trim();
       await writeJson(db);
       return send(res, 200, publicSystemUser(user, db));
@@ -476,7 +716,7 @@ async function handle(req, res) {
 
     params = route(method, pathname, { method: "POST", path: /^\/system\/users\/(?<id>[^/]+)\/unblock$/ });
     if (params) {
-      if (!isSystemOwnerRequest(db, url)) return send(res, 403, { error: "Forbidden" });
+      if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
       const user = db.users.find((item) => item.id === params.id);
       if (!user) return send(res, 404, { error: "User not found" });
       user.isBlocked = false;
@@ -489,7 +729,7 @@ async function handle(req, res) {
 
     params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<projectId>[^/]+)\/join-requests$/ });
     if (params) {
-      const actorUserId = asRef(url.searchParams.get("actorUserId") ?? "1");
+      const actorUserId = actorFor(auth, url.searchParams.get("actorUserId"));
       const project = db.projects.find((item) => item.id === params.projectId);
       if (!project) return send(res, 404, { error: "Project not found" });
       if (!canManageProjectAccess(project, actorUserId)) return send(res, 403, { error: "Access denied" });
@@ -507,7 +747,7 @@ async function handle(req, res) {
 
     params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/invite-code$/ });
     if (params) {
-      const actorUserId = asRef(url.searchParams.get("actorUserId") ?? "1");
+      const actorUserId = actorFor(auth, url.searchParams.get("actorUserId"));
       const project = db.projects.find((item) => item.id === params.id);
       if (!project) return send(res, 404, { error: "Project not found" });
       if (!canManageProjectAccess(project, actorUserId)) return send(res, 403, { error: "Access denied" });
@@ -519,7 +759,7 @@ async function handle(req, res) {
     params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<id>[^/]+)\/invite-code\/rotate$/ });
     if (params) {
       const body = await parseBody(req);
-      const actorUserId = asRef(body.actorUserId ?? "1");
+      const actorUserId = actorFor(auth, body.actorUserId);
       const project = db.projects.find((item) => item.id === params.id);
       if (!project) return send(res, 404, { error: "Project not found" });
       if (!canManageProjectAccess(project, actorUserId)) return send(res, 403, { error: "Access denied" });
@@ -609,7 +849,7 @@ async function handle(req, res) {
     params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<projectId>[^/]+)\/members\/(?<memberId>[^/]+)\/admin$/ });
     if (params) {
       const body = await parseBody(req);
-      const actorUserId = asRef(body.actorUserId ?? "1");
+      const actorUserId = actorFor(auth, body.actorUserId);
       const project = db.projects.find((item) => item.id === params.projectId);
       if (!project) return send(res, 404, { error: "Project not found" });
       if (project.ownerId !== actorUserId) return send(res, 403, { error: "Only project owner can manage admins" });
@@ -626,7 +866,11 @@ async function handle(req, res) {
       const body = await parseBody(req);
       const project = db.projects.find((item) => item.id === params.id);
       if (!project) return send(res, 404, { error: "Project not found" });
-      project.members = project.members.filter((member) => member.userId !== String(body.actorUserId ?? "1"));
+      const actorUserId = actorFor(auth, body.actorUserId);
+      if (project.ownerId === actorUserId) {
+        return send(res, 400, { error: "Owner cannot leave. Transfer ownership first." });
+      }
+      project.members = project.members.filter((member) => member.userId !== actorUserId);
       await writeJson(db);
       return send(res, 200, { success: true });
     }
@@ -636,6 +880,9 @@ async function handle(req, res) {
       const body = await parseBody(req);
       const project = db.projects.find((item) => item.id === params.id);
       if (!project) return send(res, 404, { error: "Project not found" });
+      if (project.ownerId !== actorFor(auth, body.actorUserId)) {
+        return send(res, 403, { error: "Only project owner can transfer ownership" });
+      }
       const member = project.members.find((item) => item.id === String(body.memberId));
       if (!member) return send(res, 404, { error: "Member not found" });
       project.ownerId = member.userId;
@@ -997,6 +1244,9 @@ async function handle(req, res) {
     if (params) {
       const body = await parseBody(req);
       const projectId = String(body.projectId);
+      if (auth.kind === "user" && !isProjectMember(db, projectId, auth.user.id)) {
+        return send(res, 403, { error: "Access denied" });
+      }
       const pageId = body.pageId ? String(body.pageId) : undefined;
       const firstColumn = db.columns
         .filter((column) => column.projectId === projectId && sameBoard(column.pageId, pageId) && !column.isHidden)
@@ -1009,7 +1259,7 @@ async function handle(req, res) {
         projectId,
         pageId,
         columnId,
-        creatorId: body.creatorId !== undefined ? String(body.creatorId) : undefined,
+        creatorId: auth.kind === "user" ? auth.user.id : body.creatorId !== undefined ? String(body.creatorId) : undefined,
         assigneeId: body.assigneeId !== undefined ? String(body.assigneeId) : undefined,
         title: body.title || "Новая задача",
         description: body.description,
@@ -1425,13 +1675,84 @@ function canManageProjectAccess(project, userId) {
   return project.ownerId === userId || (project.members ?? []).some((member) => member.userId === userId && member.role === "admin");
 }
 
-function isSystemOwnerRequest(db, url) {
+// Владелец приложения определяется ТОЛЬКО по telegramId аутентифицированного пользователя.
+function isSystemOwner(auth, db) {
   if (!APP_OWNER_TELEGRAM_IDS.size) return false;
-  const actorUserId = asRef(url.searchParams.get("actorUserId") ?? "");
-  const actorTelegramId = String(url.searchParams.get("actorTelegramId") ?? "").trim();
-  const user = actorUserId ? db.users.find((item) => item.id === actorUserId) : undefined;
-  const telegramId = actorTelegramId || user?.telegramId;
+  if (auth.kind === "bot") return true;
+  const telegramId = auth.user?.telegramId;
   return Boolean(telegramId && APP_OWNER_TELEGRAM_IDS.has(String(telegramId)));
+}
+
+// Возвращает id того, кто реально выполняет действие.
+// Для веб/Mini App — это всегда аутентифицированный пользователь (тело запроса игнорируется).
+// Для бота (доверенный сервис) — берётся переданное значение.
+function actorFor(auth, provided) {
+  if (auth.kind === "user") return auth.user.id;
+  return asRef(provided);
+}
+
+function isProjectMember(db, projectId, userId) {
+  const project = db.projects.find((item) => item.id === projectId);
+  if (!project) return true; // проект не найден — пусть эндпоинт вернёт 404
+  return project.ownerId === userId || (project.members ?? []).some((member) => member.userId === userId);
+}
+
+// Извлекает projectId из пути, если маршрут привязан к проекту.
+//   null      — маршрут не про конкретный проект (проверка членства не нужна)
+//   undefined — сущность не найдена (пусть эндпоинт вернёт 404)
+//   string    — id проекта
+function resolveProjectIdFromPath(pathname, db) {
+  if (pathname === "/join-requests") return null; // вступление по коду — членство ещё не требуется
+
+  let m = pathname.match(/^\/projects\/([^/]+)(?:\/|$)/);
+  if (m) return m[1];
+
+  m = pathname.match(/^\/tasks\/([^/]+)(?:\/|$)/);
+  if (m) return db.tasks.find((task) => task.id === m[1])?.projectId;
+
+  m = pathname.match(/^\/columns\/([^/]+)(?:\/|$)/);
+  if (m) return db.columns.find((column) => column.id === m[1])?.projectId;
+
+  m = pathname.match(/^\/calendar-events\/([^/]+)(?:\/|$)/);
+  if (m) return db.calendarEvents.find((event) => event.id === m[1])?.projectId;
+
+  m = pathname.match(/^\/reminders\/([^/]+)(?:\/|$)/);
+  if (m) {
+    if (m[1] === "due") return null;
+    return db.reminders.find((reminder) => reminder.id === m[1])?.projectId;
+  }
+
+  return null;
+}
+
+// Центральный guard доступа. Бот доверенный. Пользователь ограничен своими данными и проектами.
+function authorizeRequest(auth, method, pathname, db) {
+  if (auth.kind === "bot") return undefined;
+  const userId = auth.user.id;
+
+  // Личные маршруты — только про себя
+  const selfOnly = pathname.match(/^\/users\/([^/]+)\/(projects|assigned-tasks|bot-preferences)$/);
+  if (selfOnly) {
+    if (selfOnly[1] !== userId) return { status: 403, error: "Access denied" };
+    return undefined;
+  }
+
+  // Список всех проектов и outbox — только для бота
+  if (method === "GET" && pathname === "/projects") return { status: 403, error: "Access denied" };
+  if (pathname.startsWith("/outbox")) return { status: 403, error: "Access denied" };
+
+  // Системная админка — только владелец приложения
+  if (pathname.startsWith("/system/")) {
+    if (!isSystemOwner(auth, db)) return { status: 403, error: "Forbidden" };
+    return undefined;
+  }
+
+  // Проектно-ограниченные маршруты — нужно быть участником проекта
+  const projectId = resolveProjectIdFromPath(pathname, db);
+  if (projectId && !isProjectMember(db, projectId, userId)) {
+    return { status: 403, error: "Access denied" };
+  }
+  return undefined;
 }
 
 function createSystemStats(db) {

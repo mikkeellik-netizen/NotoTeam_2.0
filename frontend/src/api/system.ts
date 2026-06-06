@@ -1,4 +1,4 @@
-import { apiRequest, workspaceApiUrl } from './httpClient';
+import { apiRequest, workspaceApiUrl, withSessionTokenQuery } from './httpClient';
 
 export type SystemUserRow = {
   id: string;
@@ -51,7 +51,9 @@ export const systemApi = {
   },
 
   exportUrl(actorUserId: number | string, format: 'csv' | 'json') {
-    return `${workspaceApiUrl}/system/users/export.${format}?${actorQuery(actorUserId)}`;
+    // Скачивание идёт по прямой ссылке (без заголовка Authorization),
+    // поэтому передаём сессионный токен через ?token=
+    return withSessionTokenQuery(`${workspaceApiUrl}/system/users/export.${format}?${actorQuery(actorUserId)}`);
   },
 
   blockUser(actorUserId: number | string, userId: string) {

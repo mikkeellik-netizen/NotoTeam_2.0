@@ -45,6 +45,9 @@ export interface WorkspaceRepository {
   findDueReminders(nowIso: string): Promise<Reminder[]>;
   markReminderSent(reminderId: string): Promise<Reminder>;
 
+  fetchPendingOutbox(): Promise<Array<{ id: string; telegramId: string; text: string }>>;
+  markOutboxSent(id: string): Promise<void>;
+
   createNotification(event: Omit<NotificationEvent, "id" | "status">): Promise<NotificationEvent>;
   findPendingNotifications(nowIso: string): Promise<NotificationEvent[]>;
   markNotificationSent(id: string): Promise<void>;

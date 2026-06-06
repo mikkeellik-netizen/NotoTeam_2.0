@@ -51,6 +51,7 @@ export class TelegramWorkspaceBot {
     });
     await this.bot.api.setMyCommands([
       { command: "start", description: "Запуск и регистрация" },
+      { command: "id", description: "Получить мой ID" },
       { command: "menu", description: "Главное меню" },
       { command: "new", description: "Создать задачу" },
       { command: "my", description: "Мои активные задачи" },
@@ -72,6 +73,7 @@ export class TelegramWorkspaceBot {
 
   private registerHandlers() {
     this.bot.command("start", (ctx) => this.handleStart(ctx));
+    this.bot.command("id", (ctx) => this.handleGetId(ctx));
     this.bot.command("menu", (ctx) => this.handleMenu(ctx));
     this.bot.command("help", (ctx) => this.handleHelp(ctx));
     this.bot.command("my", (ctx) => this.handleMyTasks(ctx));
@@ -87,6 +89,7 @@ export class TelegramWorkspaceBot {
     this.bot.command("newproject", (ctx) => this.askNewProjectTitle(ctx));
     this.bot.command("join", (ctx) => this.askJoinCode(ctx));
 
+    this.bot.callbackQuery("get_id", (ctx) => this.handleGetId(ctx));
     this.bot.callbackQuery("menu", (ctx) => this.handleMenu(ctx));
     this.bot.callbackQuery("my_tasks", (ctx) => this.handleMyTasks(ctx));
     this.bot.callbackQuery("week_events", (ctx) => this.handleWeekEvents(ctx));
@@ -124,9 +127,9 @@ export class TelegramWorkspaceBot {
     if (!projects.length) {
       await ctx.reply(
         [
-          `Привет, ${name}!`,
+          `Добро пожаловать, ${name}! 👋`,
+          "Я — бот для управления Kanban-досками. Управляйте задачами прямо из Telegram! 🚀",
           "",
-          "Я связал твой Telegram с Workspace.",
           "У тебя пока нет проектов. Создай проект или подключись к командному по коду.",
         ].join("\n"),
         { reply_markup: this.emptyProjectsKeyboard() },
@@ -135,7 +138,28 @@ export class TelegramWorkspaceBot {
     }
 
     await this.ensureDefaultTarget(ctx.from?.id, user.id, projects);
-    await this.showMenu(ctx, projects, this.projectsMessage(projects));
+    await this.showMenu(
+      ctx,
+      projects,
+      [`Добро пожаловать, ${name}! 👋`, "Управляйте задачами прямо из Telegram! 🚀", "", this.projectsMessage(projects)].join("\n"),
+    );
+  }
+
+  private async handleGetId(ctx: Context) {
+    if (!ctx.from) return;
+    await this.answerCallbackIfNeeded(ctx);
+    const username = ctx.from.username ? `@${ctx.from.username}` : "—";
+    await ctx.reply(
+      [
+        "Твои данные для входа на сайт:",
+        "",
+        `ID пользователя: ${ctx.from.id}`,
+        `Telegram-ник: ${username}`,
+        "",
+        "Чтобы войти на сайте, укажи свой Telegram-ник — я пришлю одноразовый код.",
+      ].join("\n"),
+      { reply_markup: this.mainKeyboard() },
+    );
   }
 
   private async handleMenu(ctx: Context) {

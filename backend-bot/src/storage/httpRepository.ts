@@ -16,7 +16,15 @@ import type {
 } from "../types.js";
 
 export class HttpWorkspaceRepository implements WorkspaceRepository {
-  constructor(private baseUrl: string) {}
+  constructor(private baseUrl: string, private internalApiToken: string = "") {}
+
+  fetchPendingOutbox() {
+    return this.request<Array<{ id: string; telegramId: string; text: string }>>("/outbox/pending");
+  }
+
+  async markOutboxSent(id: string) {
+    await this.request(`/outbox/${encodeURIComponent(id)}/sent`, { method: "POST" });
+  }
 
   findOrCreateTelegramUser(input: {
     telegramId: string;
@@ -159,9 +167,12 @@ export class HttpWorkspaceRepository implements WorkspaceRepository {
   }
 
   private async request<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (options.body) headers["Content-Type"] = "application/json";
+    if (this.internalApiToken) headers["Authorization"] = `Bot ${this.internalApiToken}`;
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: options.method ?? "GET",
-      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      headers,
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
 

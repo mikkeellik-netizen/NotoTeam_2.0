@@ -5,6 +5,7 @@ export interface BotConfig {
   botToken: string;
   webAppUrl: string;
   workspaceApiUrl: string;
+  internalApiToken: string;
   mode: "polling" | "webhook";
   timezone: "Europe/Moscow";
 }
@@ -21,10 +22,16 @@ export function loadConfig(env = process.env): BotConfig {
     throw new Error("WORKSPACE_API_URL is required so the bot uses the same backend data as the Mini App");
   }
 
+  const internalApiToken = env.INTERNAL_API_TOKEN?.trim();
+  if (!internalApiToken) {
+    throw new Error("INTERNAL_API_TOKEN is required so the bot can authenticate against backend-api");
+  }
+
   return {
     botToken,
     webAppUrl: env.WEBAPP_URL ?? "http://127.0.0.1:5174",
     workspaceApiUrl,
+    internalApiToken,
     mode: env.BOT_MODE === "webhook" ? "webhook" : "polling",
     timezone: "Europe/Moscow",
   };

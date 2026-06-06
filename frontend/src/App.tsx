@@ -13,16 +13,17 @@ import MembersPage from './pages/MembersPage';
 import SettingsPage from './pages/SettingsPage';
 import ArchivePage from './pages/ArchivePage';
 import SystemAdminPage from './pages/SystemAdminPage';
+import LoginPage from './pages/LoginPage';
 import { isWorkspaceApiConfigured } from './api/httpClient';
 
 export default function App() {
-  const { login, isAuthed, isLoading, error } = useAuthStore();
+  const { init, isAuthed, isLoading, error, inTelegram } = useAuthStore();
   const loadSettings = useSettingsStore((state) => state.loadSettings);
 
   useEffect(() => {
     loadSettings();
-    login(window.Telegram?.WebApp?.initData);
-  }, [loadSettings, login]);
+    init();
+  }, [loadSettings, init]);
 
   if (!isWorkspaceApiConfigured) {
     return (
@@ -40,14 +41,26 @@ export default function App() {
     );
   }
 
-  if (!isAuthed && error) {
+  if (isLoading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--tg-theme-button-color)] border-t-transparent" />
+          <p className="text-sm text-[var(--tg-theme-hint-color)]">Загрузка...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // В Telegram авторизация автоматическая — если не вышло, показываем ошибку с повтором
+  if (!isAuthed && inTelegram) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--tg-theme-bg-color)] px-5">
         <div className="max-w-md rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-5 text-center text-[var(--tg-theme-text-color)]">
           <h1 className="text-lg font-bold">Не удалось войти</h1>
-          <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">{error}</p>
+          <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">{error ?? 'Откройте приложение через бота.'}</p>
           <button
-            onClick={() => login(window.Telegram?.WebApp?.initData)}
+            onClick={() => init()}
             className="mt-4 rounded-[12px] bg-[var(--tg-theme-button-color)] px-5 py-3 font-semibold text-[var(--tg-theme-button-text-color)]"
           >
             Повторить
@@ -57,15 +70,9 @@ export default function App() {
     );
   }
 
-  if (!isAuthed || isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--tg-theme-button-color)] border-t-transparent" />
-          <p className="text-sm text-[var(--tg-theme-hint-color)]">Загрузка...</p>
-        </div>
-      </div>
-    );
+  // В браузере без сессии — вход по Telegram-нику и коду
+  if (!isAuthed) {
+    return <LoginPage />;
   }
 
   return (

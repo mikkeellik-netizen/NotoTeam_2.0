@@ -8,13 +8,13 @@ import { BotScheduler } from "./scheduler.js";
 
 async function main() {
   const config = loadConfig();
-  const repo = new HttpWorkspaceRepository(config.workspaceApiUrl);
+  const repo = new HttpWorkspaceRepository(config.workspaceApiUrl, config.internalApiToken);
   const bot = new TelegramWorkspaceBot(config, repo);
   const messenger = new GrammyMessenger(bot.instance);
   const notifications = new NotificationService(repo, messenger, config.webAppUrl);
   const reports = new ReportService(repo, messenger);
   bot.setNotificationService(notifications);
-  const scheduler = new BotScheduler(repo, notifications, reports);
+  const scheduler = new BotScheduler(repo, notifications, reports, messenger);
 
   scheduler.start();
   await bot.start();
