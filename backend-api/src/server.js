@@ -685,12 +685,15 @@ async function handle(req, res) {
 
     params = route(method, pathname, { method: "GET", path: /^\/users\/(?<id>[^/]+)\/projects$/ });
     if (params) {
-      const user = db.users.find((item) => item.id === params.id);
+      // Для обычного пользователя — всегда возвращаем проекты аутентифицированного юзера,
+      // игнорируя id из URL (защита от подмены чужого id).
+      const resolvedId = auth.kind === "user" ? String(auth.user.id) : String(params.id);
+      const user = db.users.find((item) => String(item.id) === resolvedId);
       if (user?.isBlocked) return send(res, 403, { error: "User is blocked" });
       return send(
         res,
         200,
-        db.projects.filter((project) => !project.isDeleted && project.members.some((member) => member.userId === params.id)).map((project) => hydrateProject(db, project)),
+        db.projects.filter((project) => !project.isDeleted && project.members.some((member) => String(member.userId) === resolvedId)).map((project) => hydrateProject(db, project)),
       );
     }
 
@@ -1708,9 +1711,10 @@ function actorFor(auth, provided) {
 }
 
 function isProjectMember(db, projectId, userId) {
-  const project = db.projects.find((item) => item.id === projectId);
+  const project = db.projects.find((item) => String(item.id) === String(projectId));
   if (!project) return true; // проект не найден — пусть эндпоинт вернёт 404
-  return project.ownerId === userId || (project.members ?? []).some((member) => member.userId === userId);
+  const uid = String(userId);
+  return String(project.ownerId) === uid || (project.members ?? []).some((member) => String(member.userId) === uid);
 }
 
 // Извлекает projectId из пути, если маршрут привязан к проекту.
@@ -1744,12 +1748,12 @@ function resolveProjectIdFromPath(pathname, db) {
 // Центральный guard доступа. Бот доверенный. Пользователь ограничен своими данными и проектами.
 function authorizeRequest(auth, method, pathname, db) {
   if (auth.kind === "bot") return undefined;
-  const userId = auth.user.id;
+  const userId = String(auth.user.id);
 
-  // Личные маршруты — только про себя
+  // Личные маршруты — только про себя (сравниваем строки чтобы избежать number vs string)
   const selfOnly = pathname.match(/^\/users\/([^/]+)\/(projects|assigned-tasks|bot-preferences)$/);
   if (selfOnly) {
-    if (selfOnly[1] !== userId) return { status: 403, error: "Access denied" };
+    if (String(selfOnly[1]) !== userId) return { status: 403, error: "Access denied" };
     return undefined;
   }
 
