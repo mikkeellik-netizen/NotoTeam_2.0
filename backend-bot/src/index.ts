@@ -20,6 +20,14 @@ async function main() {
   await bot.start();
 }
 
+// Не даём одиночным сбоям сети/тиков уронить процесс бота
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection", reason instanceof Error ? reason.message : reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception", error instanceof Error ? error.message : error);
+});
+
 main().catch((error) => {
   console.error(error);
   process.exit(1);

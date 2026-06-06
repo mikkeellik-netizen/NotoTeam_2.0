@@ -15,30 +15,37 @@ export class BotScheduler {
     private messenger?: BotMessenger,
   ) {}
 
+  // Запускает задачу, не давая ошибке уронить весь процесс бота.
+  private safe(label: string, run: () => Promise<unknown>) {
+    Promise.resolve()
+      .then(run)
+      .catch((error) => console.error(`${label} failed`, error instanceof Error ? error.message : error));
+  }
+
   start() {
     this.notificationTimer = setInterval(() => {
-      void this.notifications.deliverDueNotifications();
-      void this.notifications.deliverDueReminders();
+      this.safe("deliverDueNotifications", () => this.notifications.deliverDueNotifications());
+      this.safe("deliverDueReminders", () => this.notifications.deliverDueReminders());
     }, 60_000);
 
     // Доставка кодов входа и прочих служебных сообщений — раз в 5 секунд
     this.outboxTimer = setInterval(() => {
-      void this.runOutboxTick();
+      this.safe("outbox", () => this.runOutboxTick());
     }, 5_000);
 
     this.reportTimer = setInterval(() => {
-      void this.runReportTick();
+      this.safe("report", () => this.runReportTick());
     }, 60_000);
 
     this.syncTimer = setInterval(() => {
-      void this.runSyncTick();
+      this.safe("sync", () => this.runSyncTick());
     }, 5 * 60_000);
 
-    void this.notifications.deliverDueNotifications();
-    void this.notifications.deliverDueReminders();
-    void this.runReportTick();
-    void this.runSyncTick();
-    void this.runOutboxTick();
+    this.safe("deliverDueNotifications", () => this.notifications.deliverDueNotifications());
+    this.safe("deliverDueReminders", () => this.notifications.deliverDueReminders());
+    this.safe("report", () => this.runReportTick());
+    this.safe("sync", () => this.runSyncTick());
+    this.safe("outbox", () => this.runOutboxTick());
   }
 
   stop() {
