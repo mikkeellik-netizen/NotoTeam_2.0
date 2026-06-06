@@ -373,14 +373,15 @@ async function handle(req, res) {
 
     // Временная диагностика заголовка авторизации (без раскрытия секрета)
     if (method === "GET" && pathname === "/auth/debug") {
-      const rawHeaderNames = Object.keys(req.headers);
       const header = parseAuthHeader(req);
+      const fp = (value) => (value ? crypto.createHash("sha256").update(value).digest("hex").slice(0, 12) : null);
       return send(res, 200, {
         hasAuthorizationHeader: typeof req.headers["authorization"] === "string",
         scheme: header?.scheme ?? null,
         valueLen: header?.value?.length ?? 0,
+        headerValueFp: fp(header?.value),
+        configuredFp: fp(INTERNAL_API_TOKEN),
         matchesInternal: Boolean(header && header.scheme === "bot" && INTERNAL_API_TOKEN && header.value === INTERNAL_API_TOKEN),
-        headerNames: rawHeaderNames,
       });
     }
 
