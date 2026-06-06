@@ -29,11 +29,32 @@ export const useAuthStore = create<AuthState>((set) => ({
   login: async (initData?: string) => {
     set({ isLoading: true, error: null });
     try {
+      // Проверяем что приложение открыто в Telegram
+      const isInTelegram = !!window.Telegram?.WebApp?.initData;
+      if (!isInTelegram && !initData) {
+        set({
+          user: null,
+          token: null,
+          isAuthed: false,
+          isLoading: false,
+          error: 'Это приложение работает только внутри Telegram. Откройте его через бота.',
+        });
+        return;
+      }
+
       const telegramUser = getTelegramUser(initData);
-      const input: TelegramUserInput = telegramUser
-        ? { ...telegramUser, initData }
-        : mockUser;
-      const user = await authApi.loginWithTelegram(input);
+      if (!telegramUser) {
+        set({
+          user: null,
+          token: null,
+          isAuthed: false,
+          isLoading: false,
+          error: 'Не удалось получить данные Telegram. Откройте приложение через бота.',
+        });
+        return;
+      }
+
+      const user = await authApi.loginWithTelegram({ ...telegramUser, initData });
       set({ user, token: initData || 'dev-token', isAuthed: true, isLoading: false, error: null });
     } catch (error) {
       set({

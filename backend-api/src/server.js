@@ -192,20 +192,12 @@ function route(method, pathname, pattern) {
 }
 
 function resolveTelegramUser(body) {
-  if (body.initData) {
-    const parsed = parseTelegramInitData(String(body.initData));
-    if (!parsed) return undefined;
-    return parsed;
-  }
+  // На боевом сервере требуем валидный initData
+  if (!body.initData) return undefined;
 
-  if (!body.telegramId) return undefined;
-  return {
-    telegramId: String(body.telegramId),
-    username: body.username,
-    firstName: body.firstName,
-    lastName: body.lastName,
-    photoUrl: body.photoUrl,
-  };
+  const parsed = parseTelegramInitData(String(body.initData));
+  if (!parsed) return undefined;
+  return parsed;
 }
 
 function parseTelegramInitData(initData) {
