@@ -2446,4 +2446,6 @@ function syncBlocksFromSpaces(spaces) {
 
 http.createServer(handle).listen(PORT, "0.0.0.0", () => {
   console.log(`Telegram Workspace API listening on http://127.0.0.1:${PORT}`);
+  console.log(`INTERNAL_API_TOKEN configured: ${INTERNAL_API_TOKEN ? "yes (len " + INTERNAL_API_TOKEN.length + ")" : "NO"}`);
+  console.log(`APP_OWNER_TELEGRAM_IDS: ${[...APP_OWNER_TELEGRAM_IDS].join(",") || "(none)"}`);
 });
