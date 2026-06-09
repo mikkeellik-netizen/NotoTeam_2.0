@@ -723,6 +723,19 @@ async function handle(req, res) {
       return send(res, 200, { isOwner: isSystemOwner(auth, db) });
     }
 
+    // Полный сброс БД: удаляет всех пользователей, проекты и связанные данные.
+    // Доступно только владельцу приложения или боту (внутренний токен).
+    if (method === "POST" && pathname === "/system/reset") {
+      if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
+      const fresh = createDefaultDb();
+      fresh.sessions = [];
+      fresh.authCodes = [];
+      fresh.outbox = [];
+      await writeJson(fresh);
+      console.log("DATABASE RESET: all users, projects and accounts wiped");
+      return send(res, 200, { ok: true, message: "Database has been reset" });
+    }
+
     if (method === "GET" && pathname === "/system/stats") {
       if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
       return send(res, 200, createSystemStats(db));
