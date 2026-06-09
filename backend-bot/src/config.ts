@@ -28,9 +28,9 @@ export function loadConfig(env = process.env): BotConfig {
     throw new Error("WORKSPACE_API_URL is required so the bot uses the same backend data as the Mini App");
   }
 
-  // Если INTERNAL_API_TOKEN не задан — выводим его из BOT_TOKEN
-  // той же формулой, что и backend-api (отдельная переменная не нужна).
-  const internalApiToken = env.INTERNAL_API_TOKEN?.trim() || deriveInternalToken(botToken);
+  // Всегда выводим из BOT_TOKEN той же формулой, что и backend-api,
+  // игнорируя отдельную переменную INTERNAL_API_TOKEN (нестабильна в Railway).
+  const internalApiToken = deriveInternalToken(botToken);
 
   return {
     botToken,

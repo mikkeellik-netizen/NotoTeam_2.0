@@ -24,8 +24,9 @@ function deriveInternalToken(botToken) {
   if (!botToken) return "";
   return crypto.createHash("sha256").update(`workspace-internal:${botToken}`).digest("hex");
 }
-const INTERNAL_API_TOKEN =
-  String(process.env.INTERNAL_API_TOKEN ?? "").trim() || deriveInternalToken(TELEGRAM_BOT_TOKEN);
+// Всегда выводим из BOT_TOKEN, игнорируя отдельную переменную INTERNAL_API_TOKEN
+// (она в Railway вела себя нестабильно и вызывала рассинхрон бота и API).
+const INTERNAL_API_TOKEN = deriveInternalToken(TELEGRAM_BOT_TOKEN);
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 дней
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 минут
 const AUTH_CODE_MAX_ATTEMPTS = 5;
