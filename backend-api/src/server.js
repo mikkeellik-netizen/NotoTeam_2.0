@@ -53,11 +53,10 @@ function parseAuthHeader(req) {
 function resolveAuth(req, db, url) {
   const header = parseAuthHeader(req);
 
-  // Бот по внутреннему токену.
-  // Если INTERNAL_API_TOKEN не задан — принимаем любой bot-запрос
-  // (временно, пока переменная не применена в Railway).
+  // Бот по внутреннему токену. FAIL-CLOSED: если токен не настроен на сервере
+  // или не совпадает — доступ запрещён. Никогда не пускаем «любой» bot-запрос.
   if (header?.scheme === "bot") {
-    if (!INTERNAL_API_TOKEN || header.value === INTERNAL_API_TOKEN) {
+    if (INTERNAL_API_TOKEN && header.value === INTERNAL_API_TOKEN) {
       return { kind: "bot" };
     }
     return undefined;
