@@ -1,5 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+
+// Та же формула, что в backend-api, чтобы обе стороны получили одинаковый токен.
+function deriveInternalToken(botToken: string): string {
+  return crypto.createHash("sha256").update(`workspace-internal:${botToken}`).digest("hex");
+}
 
 export interface BotConfig {
   botToken: string;
@@ -22,10 +28,9 @@ export function loadConfig(env = process.env): BotConfig {
     throw new Error("WORKSPACE_API_URL is required so the bot uses the same backend data as the Mini App");
   }
 
-  const internalApiToken = env.INTERNAL_API_TOKEN?.trim();
-  if (!internalApiToken) {
-    throw new Error("INTERNAL_API_TOKEN is required so the bot can authenticate against backend-api");
-  }
+  // Если INTERNAL_API_TOKEN не задан — выводим его из BOT_TOKEN
+  // той же формулой, что и backend-api (отдельная переменная не нужна).
+  const internalApiToken = env.INTERNAL_API_TOKEN?.trim() || deriveInternalToken(botToken);
 
   return {
     botToken,

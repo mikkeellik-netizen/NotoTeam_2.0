@@ -16,7 +16,16 @@ const APP_OWNER_TELEGRAM_IDS = new Set(
     .filter(Boolean),
 );
 
-const INTERNAL_API_TOKEN = String(process.env.INTERNAL_API_TOKEN ?? "").trim();
+// Внутренний токен для общения бот<->API.
+// Если INTERNAL_API_TOKEN не задан — выводим его из BOT_TOKEN одинаковой
+// формулой на обеих сторонах. BOT_TOKEN надёжно есть в обоих сервисах,
+// поэтому отдельная (капризная в Railway) переменная больше не нужна.
+function deriveInternalToken(botToken) {
+  if (!botToken) return "";
+  return crypto.createHash("sha256").update(`workspace-internal:${botToken}`).digest("hex");
+}
+const INTERNAL_API_TOKEN =
+  String(process.env.INTERNAL_API_TOKEN ?? "").trim() || deriveInternalToken(TELEGRAM_BOT_TOKEN);
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 дней
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 минут
 const AUTH_CODE_MAX_ATTEMPTS = 5;
