@@ -24,16 +24,15 @@ export default function App() {
     loadSettings();
     init();
 
-    // Слушаем событие Telegram WebApp "activated" —
-    // срабатывает когда Mini App выходит на передний план
-    // (в том числе при переключении аккаунтов Telegram).
-    // Повторный вызов init() обнаружит смену пользователя и перезагрузит страницу.
-    const tg = window.Telegram?.WebApp;
-    if (tg?.onEvent) {
-      const onActivated = () => { init(); };
-      tg.onEvent('activated', onActivated);
-      return () => { tg.offEvent?.('activated', onActivated); };
-    }
+    // Когда приложение возвращается на передний план (в т.ч. при переключении
+    // аккаунта Telegram), перепроверяем пользователя. init() обнаружит смену
+    // и перезагрузит страницу для чистого состояния. visibilitychange —
+    // стандартное DOM-событие, работает во всех клиентах.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void init();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, [loadSettings, init]);
 
   if (!isWorkspaceApiConfigured) {

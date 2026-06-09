@@ -5,6 +5,7 @@ import {
   setAuthHeader,
   setSessionToken,
   getStoredSessionToken,
+  isInsideTelegram,
 } from '../api/httpClient';
 
 interface AuthState {
@@ -38,6 +39,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   // Определяет способ авторизации при запуске приложения
   init: async () => {
     set({ isLoading: true, error: null });
+
+    // Внутри Telegram удаляем сохранённый веб-токен — он мог остаться
+    // от другого аккаунта и привести к утечке данных между пользователями.
+    if (isInsideTelegram()) {
+      setSessionToken(undefined);
+    }
 
     const initData = getTelegramInitData();
 

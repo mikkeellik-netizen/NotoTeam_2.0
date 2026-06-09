@@ -25,12 +25,24 @@ export function setSessionToken(token: string | undefined) {
   }
 }
 
-// Определяет актуальный заголовок авторизации для каждого запроса.
-// В Telegram Mini App — ВСЕГДА читаем initData заново (защита от shared localStorage).
-// В браузере — используем сохранённый session token.
+// Запущены ли мы внутри Telegram Mini App (а не в обычном браузере)
+export function isInsideTelegram(): boolean {
+  return typeof window !== 'undefined' && Boolean(window.Telegram?.WebApp);
+}
+
+// Определяет актуальный заголовок авторизации для КАЖДОГО запроса.
+//
+// Внутри Telegram:
+//   - используем ТОЛЬКО initData текущего аккаунта (читаем заново каждый раз);
+//   - НИКОГДА не используем сохранённый веб-токен (он мог остаться от другого
+//     аккаунта и вызвать утечку данных между пользователями).
+// В обычном браузере:
+//   - используем сохранённый session token (Bearer).
 function getEffectiveAuthHeader(): string | undefined {
-  const initData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined;
-  if (initData && initData.length > 0) return `tma ${initData}`;
+  if (isInsideTelegram()) {
+    const initData = window.Telegram?.WebApp?.initData;
+    return initData && initData.length > 0 ? `tma ${initData}` : undefined;
+  }
   const token = getStoredSessionToken();
   if (token) return `Bearer ${token}`;
   return authHeader;

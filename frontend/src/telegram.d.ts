@@ -17,6 +17,8 @@ declare global {
         themeParams?: Record<string, string>;
         ready?: () => void;
         expand?: () => void;
+        onEvent?: (event: string, handler: () => void) => void;
+        offEvent?: (event: string, handler: () => void) => void;
       };
     };
   }
