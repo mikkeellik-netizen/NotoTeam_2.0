@@ -78,18 +78,32 @@ export function formatTaskNotification(input: {
   project?: Project;
   tone: BotTone;
 }) {
-  const intro = pickIntro(input.kind, input.tone);
-  const lines = [
-    intro,
-    "",
-    `*${escapeMarkdown(input.task.title)}*`,
-  ];
-  if (input.task.description) lines.push(`Описание: ${escapeMarkdown(input.task.description)}`);
-  lines.push(`Дедлайн: ${escapeMarkdown(formatMskDate(input.task.deadlineAt))}`);
-  if (input.project) lines.push(`Проект: ${escapeMarkdown(input.project.title)}`);
-  lines.push("");
-  lines.push("Можно начать с одного маленького следующего шага.");
+  const lines = [taskBanner(input.kind), ""];
+  lines.push(`📌 *${escapeMarkdown(input.task.title)}*`);
+  if (input.kind === "task_assigned" && input.task.description) {
+    lines.push(`📝 ${escapeMarkdown(input.task.description)}`);
+  }
+  if (input.task.deadlineAt) {
+    const label = input.kind === "task_deadline_now" ? "⏰ Срок был" : "⏰ Дедлайн";
+    lines.push(`${label}: ${escapeMarkdown(formatMskDate(input.task.deadlineAt))}`);
+  }
+  if (input.project) lines.push(`📁 Проект: ${escapeMarkdown(input.project.title)}`);
   return lines.join("\n");
+}
+
+function taskBanner(kind: string) {
+  switch (kind) {
+    case "task_assigned":
+      return "📋 *НОВАЯ ЗАДАЧА*";
+    case "task_deadline_15h":
+      return "🟡 *СКОРО ДЕДЛАЙН* — осталось около 15 часов";
+    case "task_deadline_2h":
+      return "🟠 *ГОРИТ* — до дедлайна около 2 часов";
+    case "task_deadline_now":
+      return "🔴 *ДЕДЛАЙН НАСТУПИЛ*";
+    default:
+      return "🔔 *Напоминание по задаче*";
+  }
 }
 
 export function formatMentionNotification(input: {
@@ -99,12 +113,12 @@ export function formatMentionNotification(input: {
   text: string;
 }) {
   return [
-    "🔔 Тебя упомянули",
+    "💬 *ВАС УПОМЯНУЛИ*",
     "",
-    `Проект: *${escapeMarkdown(input.project.title)}*`,
-    `Где: ${escapeMarkdown(input.sourceTitle)}`,
+    `📁 Проект: *${escapeMarkdown(input.project.title)}*`,
+    `📍 Где: ${escapeMarkdown(input.sourceTitle)}`,
     "",
-    escapeMarkdown(trimText(input.text, 500)),
+    `«${escapeMarkdown(trimText(input.text, 500))}»`,
   ].join("\n");
 }
 
@@ -159,15 +173,6 @@ function isActiveTaskForMyList(task: Task, columns: Array<{ id: string; position
   if (isCompletedTask(task, columns)) return false;
   if (task.scheduledAt && new Date(task.scheduledAt).getTime() > now) return false;
   return true;
-}
-
-function pickIntro(kind: string, tone: BotTone) {
-  if (kind === "task_assigned") return "✨ Новая задача для тебя";
-  if (kind === "task_deadline_15h") return "⏳ До дедлайна около 15 часов";
-  if (kind === "task_deadline_2h") return "⚡ До дедлайна около 2 часов";
-  if (kind === "task_deadline_now") return "🕛 Дедлайн наступил";
-  if (tone === "strict") return "Напоминание по задаче";
-  return "Мягкое напоминание по задаче";
 }
 
 function trimText(text: string, max: number) {

@@ -197,9 +197,15 @@ export class NotificationService {
 
     if (event.type === "duty_reminder") {
       const dutyDate = String(event.payload.dutyDate ?? "");
+      const dateText = new Date(dutyDate).toLocaleDateString("ru-RU", { timeZone: "Europe/Moscow" });
       await this.messenger.sendMessage(
         user.telegramId,
-        `📅 Напоминание о дежурстве\n\nДата: ${new Date(dutyDate).toLocaleDateString("ru-RU", { timeZone: "Europe/Moscow" })}\nПроект: ${project.title}`,
+        [
+          "🟣 *ДЕЖУРСТВО*",
+          "",
+          `📅 Дата: ${escapeMarkdown(dateText)}`,
+          `📁 Проект: ${escapeMarkdown(project.title)}`,
+        ].join("\n"),
         { webAppUrl: `${this.webAppUrl}/project/${project.id}/workspace` },
       );
       return;
@@ -211,14 +217,14 @@ export class NotificationService {
       const isJoinApproved = payload.action === "join_request_approved";
       const isJoinRejected = payload.action === "join_request_rejected";
       const title = isJoinRequest
-        ? "👤 Заявка на вход"
+        ? "👋 *ЗАЯВКА НА ВСТУПЛЕНИЕ*"
         : isJoinApproved
-          ? "✅ Доступ открыт"
+          ? "✅ *ДОСТУП ОТКРЫТ*"
           : isJoinRejected
-            ? "⛔ Заявка отклонена"
+            ? "⛔ *ЗАЯВКА ОТКЛОНЕНА*"
             : event.type === "voice_note"
-              ? "📝 Голосовая заметка"
-              : "🔔 Уведомление";
+              ? "🎤 *ГОЛОСОВАЯ ЗАМЕТКА*"
+              : "🔔 *УВЕДОМЛЕНИЕ*";
       const webAppUrl = isJoinRequest
         ? `${this.webAppUrl}/project/${project.id}/settings`
         : isJoinApproved
@@ -229,11 +235,11 @@ export class NotificationService {
         [
           title,
           "",
-          `Проект: ${escapeMarkdown(project.title)}`,
-          payload.title ? `Тема: ${escapeMarkdown(String(payload.title))}` : "",
+          `📁 Проект: ${escapeMarkdown(project.title)}`,
+          payload.title ? `📝 ${escapeMarkdown(String(payload.title))}` : "",
           payload.text ? escapeMarkdown(String(payload.text)) : "",
-          isJoinRequest ? "" : "",
-          isJoinRequest ? "Открой настройки проекта, чтобы принять или отклонить заявку\\." : "",
+          isJoinApproved ? "\nДобро пожаловать в команду\\! 🎉" : "",
+          isJoinRequest ? "\nОткройте настройки проекта, чтобы принять или отклонить заявку\\." : "",
         ].filter(Boolean).join("\n"),
         { webAppUrl },
       );
@@ -249,12 +255,12 @@ export class NotificationService {
     await this.messenger.sendMessage(
       user.telegramId,
       [
-        "⏰ Напоминание",
+        "⏰ *НАПОМИНАНИЕ*",
         "",
-        escapeMarkdown(reminder.title),
-        reminder.description ? `\n${escapeMarkdown(reminder.description)}` : "",
-        `\nПроект: ${escapeMarkdown(project.title)}`,
-      ].join("\n"),
+        `🔔 ${escapeMarkdown(reminder.title)}`,
+        reminder.description ? `📝 ${escapeMarkdown(reminder.description)}` : "",
+        `📁 Проект: ${escapeMarkdown(project.title)}`,
+      ].filter(Boolean).join("\n"),
       { webAppUrl: `${this.webAppUrl}/project/${project.id}/reminders` },
     );
   }

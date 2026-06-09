@@ -127,10 +127,12 @@ export class TelegramWorkspaceBot {
     if (!projects.length) {
       await ctx.reply(
         [
-          `Добро пожаловать, ${name}! 👋`,
-          "Я — бот для управления Kanban-досками. Управляйте задачами прямо из Telegram! 🚀",
+          `👋 Добро пожаловать, ${name}!`,
           "",
-          "У тебя пока нет проектов. Создай проект или подключись к командному по коду.",
+          "🧠 NotoTeam — цифровая операционная система для команд.",
+          "Храните знания, управляйте проектами, ведите задачи, стройте связи между идеями и работайте вместе в едином пространстве внутри Telegram.",
+          "",
+          "У вас пока нет проектов — создайте новый или войдите по коду.",
         ].join("\n"),
         { reply_markup: this.emptyProjectsKeyboard() },
       );
@@ -141,7 +143,7 @@ export class TelegramWorkspaceBot {
     await this.showMenu(
       ctx,
       projects,
-      [`Добро пожаловать, ${name}! 👋`, "Управляйте задачами прямо из Telegram! 🚀", "", this.projectsMessage(projects)].join("\n"),
+      [`👋 С возвращением, ${name}!`, "", "📁 Ваши проекты:", ...projects.map((p, i) => `${i + 1}. ${p.title}`)].join("\n"),
     );
   }
 
@@ -151,12 +153,12 @@ export class TelegramWorkspaceBot {
     const username = ctx.from.username ? `@${ctx.from.username}` : "—";
     await ctx.reply(
       [
-        "Твои данные для входа на сайт:",
+        "🪪 ВАШИ ДАННЫЕ ДЛЯ ВХОДА",
         "",
-        `ID пользователя: ${ctx.from.id}`,
-        `Telegram-ник: ${username}`,
+        `🆔 ID: ${ctx.from.id}`,
+        `👤 Ник: ${username}`,
         "",
-        "Чтобы войти на сайте, укажи свой Telegram-ник — я пришлю одноразовый код.",
+        "На сайте укажите ник — пришлю одноразовый код.",
       ].join("\n"),
       { reply_markup: this.mainKeyboard() },
     );
@@ -571,7 +573,7 @@ export class TelegramWorkspaceBot {
       .row()
       .text("Мои проекты", "projects");
 
-    await ctx.reply(`Проект создан: ${project.title}`, { reply_markup: keyboard });
+    await ctx.reply(["🎉 ПРОЕКТ СОЗДАН", "", `📁 ${project.title}`].join("\n"), { reply_markup: keyboard });
   }
 
   private async createInboxNote(ctx: Context, projectId: string, text: string) {
@@ -633,7 +635,7 @@ export class TelegramWorkspaceBot {
     ];
     await this.repo.saveProjectSpace(projectId, space);
     this.sessions.delete(ctx.from.id);
-    await ctx.reply("Готово. Сохранил заметку в Inbox.", {
+    await ctx.reply(["📥 ЗАМЕТКА СОХРАНЕНА", "", "Добавил в Inbox проекта."].join("\n"), {
       reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Inbox", `${this.config.webAppUrl}/project/${projectId}/inbox`)
         .text("Еще заметку", "new_inbox_note")
         .text("Меню", "menu"),
@@ -759,9 +761,10 @@ export class TelegramWorkspaceBot {
     this.sessions.delete(ctx.from.id);
     await ctx.reply(
       [
-        "Готово. Создал разовое напоминание.",
-        `Когда: ${new Date(reminder.remindAt ?? remindAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })} МСК`,
-        `Текст: ${reminder.title}`,
+        "⏰ НАПОМИНАНИЕ СОЗДАНО",
+        "",
+        `🔔 ${reminder.title}`,
+        `🗓 Когда: ${new Date(reminder.remindAt ?? remindAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })} МСК`,
       ].join("\n"),
       { reply_markup: this.mainKeyboard() },
     );
@@ -782,9 +785,10 @@ export class TelegramWorkspaceBot {
         username: user.username,
         displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username,
       });
-      await ctx.reply("Заявка отправлена владельцу проекта. Когда ее подтвердят, проект появится в Mini App.", {
-        reply_markup: this.mainKeyboard(),
-      });
+      await ctx.reply(
+        ["📨 ЗАЯВКА ОТПРАВЛЕНА", "", "Отправил владельцу проекта.", "Как одобрят — проект появится в приложении."].join("\n"),
+        { reply_markup: this.mainKeyboard() },
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (/already a member|уже/i.test(message)) {
@@ -921,8 +925,10 @@ export class TelegramWorkspaceBot {
     const board = boardPageId ? await this.getBoardById(projectId, boardPageId) : undefined;
     await ctx.reply(
       [
-        `Готово. Задача создана: ${task.title}`,
-        board ? `Доска: ${board.title}` : undefined,
+        "✅ ЗАДАЧА СОЗДАНА",
+        "",
+        `📌 ${task.title}`,
+        board ? `📋 Доска: ${board.title}` : undefined,
       ].filter(Boolean).join("\n"),
       {
         reply_markup: this.addWebAppButton(
