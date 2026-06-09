@@ -25,9 +25,13 @@ export function setSessionToken(token: string | undefined) {
   }
 }
 
-// Запущены ли мы внутри Telegram Mini App (а не в обычном браузере)
+// Запущены ли мы РЕАЛЬНО внутри Telegram Mini App.
+// Важно: скрипт telegram-web-app.js создаёт window.Telegram.WebApp и в обычном
+// браузере, но с ПУСТЫМ initData. Поэтому признак Telegram — непустой initData.
 export function isInsideTelegram(): boolean {
-  return typeof window !== 'undefined' && Boolean(window.Telegram?.WebApp);
+  if (typeof window === 'undefined') return false;
+  const initData = window.Telegram?.WebApp?.initData;
+  return Boolean(initData && initData.length > 0);
 }
 
 // Определяет актуальный заголовок авторизации для КАЖДОГО запроса.
