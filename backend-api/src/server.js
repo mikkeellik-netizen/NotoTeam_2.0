@@ -2515,8 +2515,36 @@ function syncBlocksFromSpaces(spaces) {
   }).filter((block) => block.projectId);
 }
 
+// ===== Автоматические резервные копии базы (двойная защита поверх постоянного тома) =====
+async function makeBackup() {
+  try {
+    const backupDir = dataRepository.paths?.backupDir;
+    if (!backupDir) return;
+    const db = await dataRepository.read();
+    fs.mkdirSync(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = path.join(backupDir, `backup_${stamp}.json`);
+    fs.writeFileSync(file, JSON.stringify(db, null, 2), "utf8");
+
+    // Храним последние 30 копий, остальные удаляем
+    const files = fs.readdirSync(backupDir)
+      .filter((name) => name.startsWith("backup_") && name.endsWith(".json"))
+      .sort();
+    const excess = files.length - 30;
+    for (let i = 0; i < excess; i += 1) {
+      fs.rmSync(path.join(backupDir, files[i]), { force: true });
+    }
+    console.log(`Backup saved: ${file}`);
+  } catch (error) {
+    console.error("Backup failed", error instanceof Error ? error.message : error);
+  }
+}
+
 http.createServer(handle).listen(PORT, "0.0.0.0", () => {
   console.log(`Telegram Workspace API listening on http://127.0.0.1:${PORT}`);
-  console.log(`INTERNAL_API_TOKEN configured: ${INTERNAL_API_TOKEN ? "yes (len " + INTERNAL_API_TOKEN.length + ")" : "NO"}`);
+  console.log(`APP_DATA_DIR: ${process.env.APP_DATA_DIR ?? "(default)"}`);
   console.log(`APP_OWNER_TELEGRAM_IDS: ${[...APP_OWNER_TELEGRAM_IDS].join(",") || "(none)"}`);
+  // Бэкап при старте и каждые 6 часов
+  setTimeout(makeBackup, 10_000);
+  setInterval(makeBackup, 6 * 3600 * 1000);
 });

@@ -66,7 +66,6 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState(page.title);
   const [contextBlock, setContextBlock] = useState<{ block: Block; x: number; y: number } | null>(null);
-  const longPressTimerRef = useRef<number | null>(null);
 
   const pageOptions = useMemo(
     () => nodes.filter((n) => n.type !== 'folder' && n.id !== page.id),
@@ -165,17 +164,6 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
     setContextBlock({ block, x, y });
   };
 
-  const startBlockLongPress = (block: Block, x: number, y: number) => {
-    if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = window.setTimeout(() => openBlockMenu(block, x, y), 600);
-  };
-
-  const clearBlockLongPress = () => {
-    if (!longPressTimerRef.current) return;
-    window.clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = null;
-  };
-
   const emptyPagePlaceholderBlockId = useMemo(() => {
     const textBlocks = blocks.filter(isTextInputBlock);
     if (textBlocks.length === 0) return null;
@@ -204,6 +192,14 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
             }}
             className="w-full bg-transparent text-2xl font-bold text-[var(--tg-theme-text-color)] outline-none"
           />
+          <button
+            onClick={() => copyPlainText(blocks.map(blockToPlainText).filter(Boolean).join('\n\n'))}
+            className="shrink-0 h-9 w-9 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] active:scale-90 transition-transform"
+            title="Копировать текст страницы"
+            aria-label="Копировать текст страницы"
+          >
+            ⧉
+          </button>
         </div>
 
         <div className="space-y-2 pb-24">
@@ -215,13 +211,6 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
                 if (block.type === 'simple_table') return;
                 openBlockMenu(block, event.clientX, event.clientY);
               }}
-              onPointerDown={(event) => {
-                if (block.type === 'simple_table') return;
-                startBlockLongPress(block, event.clientX, event.clientY);
-              }}
-              onPointerUp={clearBlockLongPress}
-              onPointerLeave={clearBlockLongPress}
-              onPointerCancel={clearBlockLongPress}
             >
             <BlockEditor
               block={block}
