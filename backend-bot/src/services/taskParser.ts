@@ -1,4 +1,5 @@
 import type { ParsedTask, Priority } from "../types.js";
+import { parseDateTime } from "./dateParser.js";
 
 const priorityWords: Array<[RegExp, Priority]> = [
   [/(критично|срочно|горит|asap)/i, "CRITICAL"],
@@ -30,50 +31,10 @@ export class TaskParser {
   }
 
   private parseDeadline(text: string) {
-    const lower = text.toLowerCase();
-    const now = new Date();
-    const explicitDateTime = lower.match(/(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s+(\d{1,2})[:.](\d{2})/);
-    if (explicitDateTime) {
-      const year = explicitDateTime[3] ? normalizeYear(Number(explicitDateTime[3])) : now.getFullYear();
-      const date = new Date(
-        year,
-        Number(explicitDateTime[2]) - 1,
-        Number(explicitDateTime[1]),
-        Number(explicitDateTime[4]),
-        Number(explicitDateTime[5]),
-        0,
-        0,
-      );
-      return date.toISOString();
-    }
-
-    const timeMatch = lower.match(/(?:до|в|к)\s+(\d{1,2})[:.](\d{2})/);
-    const hours = timeMatch ? Number(timeMatch[1]) : 12;
-    const minutes = timeMatch ? Number(timeMatch[2]) : 0;
-
-    if (lower.includes("завтра")) {
-      const date = new Date(now);
-      date.setDate(date.getDate() + 1);
-      date.setHours(hours, minutes, 0, 0);
-      return date.toISOString();
-    }
-
-    const inDays = lower.match(/через\s+(\d+)\s+д/);
-    if (inDays) {
-      const date = new Date(now);
-      date.setDate(date.getDate() + Number(inDays[1]));
-      date.setHours(hours, minutes, 0, 0);
-      return date.toISOString();
-    }
-
-    const dateMatch = lower.match(/(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?/);
-    if (dateMatch) {
-      const year = dateMatch[3] ? normalizeYear(Number(dateMatch[3])) : now.getFullYear();
-      const date = new Date(year, Number(dateMatch[2]) - 1, Number(dateMatch[1]), hours, minutes, 0, 0);
-      return date.toISOString();
-    }
-
-    return undefined;
+    // Единый парсер: DD.MM.YYYY / DD.MM.YY / DD.MM, время HH:MI,
+    // а также завтра/послезавтра/через N дней/сегодня. Для задач час по умолчанию — 12:00.
+    const date = parseDateTime(text, { defaultHour: 12 });
+    return date ? date.toISOString() : undefined;
   }
 
   private cleanTitle(text: string, assigneeUsername?: string) {
@@ -90,9 +51,4 @@ export class TaskParser {
     if (assigneeUsername) result = result.replace(`@${assigneeUsername}`, "").trim();
     return result;
   }
-}
-
-function normalizeYear(year: number) {
-  if (year < 100) return 2000 + year;
-  return year;
 }

@@ -5,6 +5,7 @@ import { escapeMarkdown, formatMskDate, formatMyTasksMessage } from "../services
 import { buildWeeklyReportText } from "../services/reportService.js";
 import { NotificationService } from "../services/notificationService.js";
 import { TaskParser } from "../services/taskParser.js";
+import { parseDateTime } from "../services/dateParser.js";
 import type { PageNode, Project, User } from "../types.js";
 
 type TaskTarget = {
@@ -175,19 +176,22 @@ export class TelegramWorkspaceBot {
   private async handleHelp(ctx: Context) {
     await ctx.reply(
       [
-        "Команды:",
+        "📖 КОМАНДЫ",
         "",
-        "/start - регистрация и главное меню",
-        "/projects - мои проекты",
-        "/task или /new - создать задачу текстом",
-        "/where - показать, куда бот сейчас кладет задачи",
-        "/switch - сменить проект или Kanban-доску по умолчанию",
-        "/my - мои активные задачи",
-        "/newproject - создать проект",
-        "/join - подключиться к проекту по коду",
+        "/start — главное меню",
+        "/id — мои данные для входа на сайт",
+        "/projects — мои проекты",
+        "/new — создать задачу",
+        "/my — мои активные задачи",
+        "/where — куда бот кладёт задачи",
+        "/switch — сменить проект или доску",
+        "/events — события на неделю",
+        "/weekly — еженедельный отчёт",
+        "/newproject — создать проект",
+        "/join — войти в проект по коду",
         "",
-        "Пример задачи:",
-        "@svyat сделать пригласительную до 12.01 18:00",
+        "💡 Пример задачи:",
+        "@ник сделать афишу до 01.01.2026 18:00",
       ].join("\n"),
       { reply_markup: this.mainKeyboard() },
     );
@@ -226,7 +230,7 @@ export class TelegramWorkspaceBot {
     const project = projects.find((item) => item.id === target?.projectId) ?? projects[0];
     await this.answerCallbackIfNeeded(ctx);
     if (!project) {
-      await ctx.reply("Сначала создай проект или подключись к существующему.", { reply_markup: this.emptyProjectsKeyboard() });
+      await ctx.reply("📭 Сначала создайте проект или войдите по коду.", { reply_markup: this.emptyProjectsKeyboard() });
       return;
     }
 
@@ -260,12 +264,12 @@ export class TelegramWorkspaceBot {
     const project = projects.find((item) => item.id === target?.projectId) ?? projects[0];
     await this.answerCallbackIfNeeded(ctx);
     if (!project) {
-      await ctx.reply("Сначала создай проект или подключись к существующему.", { reply_markup: this.emptyProjectsKeyboard() });
+      await ctx.reply("📭 Сначала создайте проект или войдите по коду.", { reply_markup: this.emptyProjectsKeyboard() });
       return;
     }
     const role = project.members.find((member) => member.userId === user.id)?.role;
     if (project.ownerId !== user.id && role !== "owner" && role !== "admin") {
-      await ctx.reply("Еженедельный отчет может запросить только владелец или администратор проекта.");
+      await ctx.reply("🔒 Еженедельный отчёт доступен только владельцу или администратору проекта.");
       return;
     }
 
@@ -278,7 +282,7 @@ export class TelegramWorkspaceBot {
     const projects = await this.repo.getUserProjects(user.id);
     const target = await this.ensureDefaultTarget(ctx.from.id, user.id, projects);
     if (!target) {
-      await ctx.reply("Пока некуда складывать задачи. Создай проект или введи код приглашения.", {
+      await ctx.reply("📭 Пока некуда сохранять задачи. Создайте проект или войдите по коду.", {
         reply_markup: this.emptyProjectsKeyboard(),
       });
       return;
@@ -288,10 +292,10 @@ export class TelegramWorkspaceBot {
     const board = await this.getBoardById(target.projectId, target.boardPageId);
     await ctx.reply(
       [
-        "Задачи по умолчанию будут создаваться здесь:",
+        "📍 КУДА СОХРАНЯЮТСЯ ЗАДАЧИ",
         "",
-        `Проект: ${project?.title ?? target.projectId}`,
-        `Kanban-доска: ${board?.title ?? "Основная доска"}`,
+        `📁 Проект: ${project?.title ?? target.projectId}`,
+        `📋 Доска: ${board?.title ?? "Основная доска"}`,
       ].join("\n"),
       { reply_markup: new InlineKeyboard().text("Сменить", "switch_target").row().text("Меню", "menu") },
     );
@@ -309,14 +313,14 @@ export class TelegramWorkspaceBot {
     if (!ctx.from) return;
     this.sessions.set(ctx.from.id, { mode: "new_project" });
     await this.answerCallbackIfNeeded(ctx);
-    await this.replyOrEdit(ctx, "Напиши название нового проекта.", this.cancelKeyboard());
+    await this.replyOrEdit(ctx, "✏️ Введите название нового проекта.", this.cancelKeyboard());
   }
 
   private async askJoinCode(ctx: Context) {
     if (!ctx.from) return;
     this.sessions.set(ctx.from.id, { mode: "join_project" });
     await this.answerCallbackIfNeeded(ctx);
-    await this.replyOrEdit(ctx, "Введи код проекта. Например: P1-ABC123", this.cancelKeyboard());
+    await this.replyOrEdit(ctx, "🔑 Введите код проекта. Например: P1-ABC123", this.cancelKeyboard());
   }
 
   private async handleNewTask(ctx: Context) {
@@ -325,7 +329,7 @@ export class TelegramWorkspaceBot {
     const projects = await this.repo.getUserProjects(user.id);
 
     if (!projects.length) {
-      await ctx.reply("Сначала создай проект или подключись к существующему.", {
+      await ctx.reply("📭 Сначала создайте проект или войдите по коду.", {
         reply_markup: this.emptyProjectsKeyboard(),
       });
       return;
@@ -353,7 +357,7 @@ export class TelegramWorkspaceBot {
     keyboard.text("Отмена", "cancel_session");
 
     this.sessions.set(ctx.from.id, { mode: "new_task", switching });
-    await this.replyOrEdit(ctx, "Выбери проект для задач:", keyboard);
+    await this.replyOrEdit(ctx, "📁 Выберите проект:", keyboard);
   }
 
   private async handleChooseProject(ctx: Context) {
@@ -376,7 +380,7 @@ export class TelegramWorkspaceBot {
       await this.saveDefaultTarget(ctx.from.id, user.id, target);
       if (switching) {
         this.sessions.delete(ctx.from.id);
-        await this.replyOrEdit(ctx, "Готово. Теперь задачи будут создаваться в этой Kanban-доске.", this.mainKeyboard());
+        await this.replyOrEdit(ctx, "✅ Готово. Теперь задачи создаются в этой доске.", this.mainKeyboard());
         return;
       }
       this.sessions.set(ctx.from.id, { mode: "new_task", ...target });
@@ -389,7 +393,7 @@ export class TelegramWorkspaceBot {
     keyboard.text("Отмена", "cancel_session");
 
     this.sessions.set(ctx.from.id, { mode: "new_task", projectId, switching });
-    await this.replyOrEdit(ctx, "В проекте несколько Kanban-досок. Выбери, куда создать задачу:", keyboard);
+    await this.replyOrEdit(ctx, "📋 В проекте несколько досок. Куда создать задачу?", keyboard);
   }
 
   private async handleChooseBoard(ctx: Context) {
@@ -404,7 +408,7 @@ export class TelegramWorkspaceBot {
     await ctx.answerCallbackQuery();
     if (switching) {
       this.sessions.delete(ctx.from.id);
-      await this.replyOrEdit(ctx, "Готово. Теперь задачи будут создаваться в выбранной Kanban-доске.", this.mainKeyboard());
+      await this.replyOrEdit(ctx, "✅ Готово. Теперь задачи создаются в выбранной доске.", this.mainKeyboard());
       return;
     }
     this.sessions.set(ctx.from.id, { mode: "new_task", ...target });
@@ -416,10 +420,10 @@ export class TelegramWorkspaceBot {
     await this.replyOrEdit(
       ctx,
       [
-        board ? `Kanban-доска: ${board.title}` : "Kanban-доска выбрана.",
+        board ? `📋 Доска: ${board.title}` : "📋 Доска выбрана.",
         "",
-        "Напиши задачу свободным текстом.",
-        "Например: @svyat сделать пригласительную до 12.01 18:00",
+        "📝 Опишите задачу одним сообщением.",
+        "Например: @ник сделать афишу до 01.01.2026 18:00",
       ].join("\n"),
       this.cancelKeyboard(),
     );
@@ -433,7 +437,7 @@ export class TelegramWorkspaceBot {
     if (!projectId) return;
     this.sessions.set(ctx.from.id, { mode: "inbox_note", projectId });
     await this.answerCallbackIfNeeded(ctx);
-    await this.replyOrEdit(ctx, "Напиши текст заметки. Я сохраню ее в Inbox выбранного проекта.", this.cancelKeyboard());
+    await this.replyOrEdit(ctx, "📥 Напишите текст заметки — сохраню в Inbox проекта.", this.cancelKeyboard());
   }
 
   private async handleReminder(ctx: Context) {
@@ -447,8 +451,8 @@ export class TelegramWorkspaceBot {
     await this.replyOrEdit(
       ctx,
       [
-        "Напиши, о чем напомнить.",
-        "Можно сразу с датой: написать отцу завтра 18:00",
+        "⏰ О чём напомнить?",
+        "Можно сразу с датой: «позвонить отцу 01.01.2026 18:00».",
       ].join("\n"),
       this.cancelKeyboard(),
     );
@@ -456,14 +460,14 @@ export class TelegramWorkspaceBot {
 
   private async resolveProjectForBotCapture(ctx: Context, projects: Project[], callbackPrefix: "note_project" | "reminder_project") {
     if (!projects.length) {
-      await this.replyOrEdit(ctx, "Сначала создай проект или подключись к существующему.", this.emptyProjectsKeyboard());
+      await this.replyOrEdit(ctx, "📭 Сначала создайте проект или войдите по коду.", this.emptyProjectsKeyboard());
       return undefined;
     }
     if (projects.length === 1) return projects[0].id;
     const keyboard = new InlineKeyboard();
     for (const project of projects) keyboard.text(project.title, `${callbackPrefix}:${project.id}`).row();
     keyboard.text("Отмена", "cancel_session");
-    await this.replyOrEdit(ctx, "Выбери проект, куда сохранить:", keyboard);
+    await this.replyOrEdit(ctx, "📁 Выберите проект:", keyboard);
     return undefined;
   }
 
@@ -472,7 +476,7 @@ export class TelegramWorkspaceBot {
     const projectId = String(ctx.match[1]);
     this.sessions.set(ctx.from.id, { mode: "inbox_note", projectId });
     await ctx.answerCallbackQuery();
-    await this.replyOrEdit(ctx, "Напиши текст заметки. Я сохраню ее в Inbox выбранного проекта.", this.cancelKeyboard());
+    await this.replyOrEdit(ctx, "📥 Напишите текст заметки — сохраню в Inbox проекта.", this.cancelKeyboard());
   }
 
   private async handleChooseReminderProject(ctx: Context) {
@@ -480,7 +484,7 @@ export class TelegramWorkspaceBot {
     const projectId = String(ctx.match[1]);
     this.sessions.set(ctx.from.id, { mode: "reminder_text", projectId });
     await ctx.answerCallbackQuery();
-    await this.replyOrEdit(ctx, "Напиши, о чем напомнить. Можно сразу с датой: написать отцу завтра 18:00", this.cancelKeyboard());
+    await this.replyOrEdit(ctx, "⏰ О чём напомнить? Можно сразу с датой: «позвонить отцу 01.01.2026 18:00».", this.cancelKeyboard());
   }
 
   private async handleText(ctx: Context) {
@@ -494,7 +498,7 @@ export class TelegramWorkspaceBot {
       await this.showMenu(
         ctx,
         projects,
-        "Я не понял, что нужно сделать. Выбери действие в меню или напиши /new, чтобы создать задачу.",
+        "🤔 Не понял команду. Выберите действие в меню или напишите /new, чтобы создать задачу.",
       );
       return;
     }
@@ -539,7 +543,7 @@ export class TelegramWorkspaceBot {
       if (session.step === "deadline") {
         const deadlineAt = this.parser.parse(`до ${text}`).deadlineAt;
         if (!deadlineAt) {
-          await ctx.reply("Не смог разобрать дату. Напиши в формате DD.MM.YYYY 00:00, например 12.01.2026 18:00.");
+          await ctx.reply("🗓 Не понял дату. Формат: 01.01.2026 18:00.");
           return;
         }
         session.draft.deadlineAt = deadlineAt;
@@ -549,7 +553,7 @@ export class TelegramWorkspaceBot {
       return;
     }
 
-    await ctx.reply("Не хватает проекта или Kanban-доски для задачи. Выбери место, куда ее сохранить.", {
+    await ctx.reply("📍 Не выбрано место для задачи. Укажите проект и доску.", {
       reply_markup: new InlineKeyboard().text("Выбрать место", "switch_target").row().text("Меню", "menu"),
     });
   }
@@ -558,7 +562,7 @@ export class TelegramWorkspaceBot {
     if (!ctx.from) return;
     const cleanTitle = title.trim();
     if (!cleanTitle) {
-      await ctx.reply("Название пустое. Напиши название проекта.");
+      await ctx.reply("⚠️ Название пустое. Напишите название проекта.");
       return;
     }
 
@@ -580,7 +584,7 @@ export class TelegramWorkspaceBot {
     if (!ctx.from) return;
     const cleanText = text.trim();
     if (!cleanText) {
-      await ctx.reply("Заметка пустая. Напиши текст, который нужно сохранить в Inbox.");
+      await ctx.reply("⚠️ Заметка пустая. Напишите текст для сохранения.");
       return;
     }
 
@@ -683,7 +687,7 @@ export class TelegramWorkspaceBot {
     }
 
     this.sessions.set(ctx.from.id, { mode: "reminder_date", projectId, title, targetUserId, description: cleanText });
-    await ctx.reply("Когда напомнить? Напиши дату и время. Например: завтра 18:00 или 12.01.2026 18:00.", {
+    await ctx.reply("🗓 Когда? Например: «01.01.2026 18:00».", {
       reply_markup: this.cancelKeyboard(),
     });
   }
@@ -701,8 +705,8 @@ export class TelegramWorkspaceBot {
 
     await ctx.reply(
       session.assigneeUsername
-        ? `Я не нашел пользователя @${session.assigneeUsername}. Кому поставить напоминание?`
-        : "Кому поставить напоминание?",
+        ? `👤 Не нашёл @${session.assigneeUsername}. Кому поставить напоминание?`
+        : "👤 Кому поставить напоминание?",
       { reply_markup: keyboard },
     );
   }
@@ -730,7 +734,7 @@ export class TelegramWorkspaceBot {
     });
     await this.replyOrEdit(
       ctx,
-      "Когда напомнить? Напиши дату и время. Например: завтра 18:00 или 12.01.2026 18:00.",
+      "🗓 Когда? Например: «01.01.2026 18:00».",
       this.cancelKeyboard(),
     );
   }
@@ -792,12 +796,12 @@ export class TelegramWorkspaceBot {
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (/already a member|уже/i.test(message)) {
-        await ctx.reply("Ты уже участник этого проекта. Открой Mini App, проект должен быть в списке.", {
+        await ctx.reply("✅ Вы уже участник этого проекта — он есть в приложении.", {
           reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Mini App", this.config.webAppUrl),
         });
         return;
       }
-      await ctx.reply("Не удалось отправить заявку. Проверь код проекта и попробуй еще раз.", {
+      await ctx.reply("⚠️ Не удалось отправить заявку. Проверьте код и попробуйте снова.", {
         reply_markup: new InlineKeyboard().text("Ввести код еще раз", "join_project").row().text("Меню", "menu"),
       });
     }
@@ -806,7 +810,7 @@ export class TelegramWorkspaceBot {
   private async prepareTaskDraft(ctx: Context, projectId: string, boardPageId: string | undefined, text: string) {
     if (!ctx.from) return;
     if (!boardPageId) {
-      await ctx.reply("Сначала выбери Kanban-доску, куда сохранить задачу.");
+      await ctx.reply("📋 Сначала выберите доску для задачи.");
       await this.askBoardForTask(ctx, projectId, false);
       return;
     }
@@ -815,7 +819,7 @@ export class TelegramWorkspaceBot {
     this.sessions.set(ctx.from.id, session);
 
     if (!draft.title || draft.title === "Новая задача") {
-      await ctx.reply("Я не понял название задачи. Напиши коротко, что нужно сделать.", {
+      await ctx.reply("⚠️ Не понял название. Напишите коротко, что нужно сделать.", {
         reply_markup: this.cancelKeyboard(),
       });
       return;
@@ -846,8 +850,8 @@ export class TelegramWorkspaceBot {
 
     await ctx.reply(
       username
-        ? `Я не нашел пользователя @${username}. Выбери исполнителя из списка или оставь задачу без исполнителя.`
-        : "Я не понял исполнителя. Выбери пользователя или оставь задачу без исполнителя.",
+        ? `👤 Не нашёл @${username}. Выберите исполнителя из списка или оставьте без исполнителя.`
+        : "👤 Не понял исполнителя. Выберите пользователя или оставьте без исполнителя.",
       { reply_markup: keyboard },
     );
   }
@@ -874,7 +878,7 @@ export class TelegramWorkspaceBot {
     this.sessions.set(ctx.from.id, session);
     await this.replyOrEdit(
       ctx,
-      "Я не понял дедлайн. Напиши дату и время в формате DD.MM.YYYY 00:00 или выбери “Без дедлайна”.",
+      "🗓 Не понял дедлайн. Формат: 01.01.2026 18:00 — или выберите «Без дедлайна».",
       new InlineKeyboard().text("Без дедлайна", "task_deadline:skip").row().text("Отмена", "cancel_session"),
     );
   }
@@ -947,7 +951,7 @@ export class TelegramWorkspaceBot {
   private async cancelSession(ctx: Context) {
     if (ctx.from) this.sessions.delete(ctx.from.id);
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText("Действие отменено.", { reply_markup: this.mainKeyboard() });
+    await ctx.editMessageText("❌ Действие отменено.", { reply_markup: this.mainKeyboard() });
   }
 
   private async getOrCreateUser(ctx: Context) {
@@ -962,7 +966,7 @@ export class TelegramWorkspaceBot {
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message.includes("User is blocked")) {
-        await ctx.reply("Доступ к приложению и боту заблокирован. Обратитесь к владельцу приложения.");
+        await ctx.reply("⛔ Доступ к приложению заблокирован. Обратитесь к владельцу.");
       }
       throw error;
     }
@@ -1027,11 +1031,11 @@ export class TelegramWorkspaceBot {
 
   private async showMenu(ctx: Context, projects: Project[], intro?: string) {
     const text = [
-      intro ?? "Главное меню.",
+      intro ?? "🏠 ГЛАВНОЕ МЕНЮ",
       "",
       projects.length
-        ? "Выбери действие ниже. Если у тебя несколько проектов, сначала проверь, куда бот кладет задачи."
-        : "Пока нет проектов. Создай новый проект или введи код приглашения.",
+        ? "Выберите действие ниже 👇"
+        : "У вас пока нет проектов — создайте новый или войдите по коду.",
     ].join("\n");
 
     const keyboard = projects.length ? this.mainKeyboard(projects) : this.emptyProjectsKeyboard();
@@ -1094,9 +1098,9 @@ export class TelegramWorkspaceBot {
 
   private projectsMessage(projects: Array<{ title: string }>) {
     if (!projects.length) {
-      return "У тебя пока нет проектов. Создай проект или введи код приглашения.";
+      return "У вас пока нет проектов — создайте новый или войдите по коду.";
     }
-    return ["Твои проекты:", "", ...projects.map((project, index) => `${index + 1}. ${project.title}`)].join("\n");
+    return ["📁 ВАШИ ПРОЕКТЫ", "", ...projects.map((project, index) => `${index + 1}. ${project.title}`)].join("\n");
   }
 
   private getStartCode(ctx: Context) {
@@ -1121,36 +1125,8 @@ export class TelegramWorkspaceBot {
 }
 
 function parseReminderDate(text: string) {
-  const normalized = text.trim().toLowerCase();
-  const timeMatch = normalized.match(/(?:^|\s)(\d{1,2})[:.](\d{2})(?:\s|$)/);
-  const hours = timeMatch ? Number(timeMatch[1]) : 9;
-  const minutes = timeMatch ? Number(timeMatch[2]) : 0;
-  const now = new Date();
-
-  if (/\bзавтра\b/i.test(normalized)) {
-    const date = new Date(now);
-    date.setDate(date.getDate() + 1);
-    date.setHours(hours, minutes, 0, 0);
-    return date;
-  }
-
-  if (/\bсегодня\b/i.test(normalized)) {
-    const date = new Date(now);
-    date.setHours(hours, minutes, 0, 0);
-    return date;
-  }
-
-  const dateMatch = normalized.match(/(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?/);
-  if (dateMatch) {
-    const day = Number(dateMatch[1]);
-    const month = Number(dateMatch[2]) - 1;
-    const rawYear = dateMatch[3] ? Number(dateMatch[3]) : now.getFullYear();
-    const year = rawYear < 100 ? 2000 + rawYear : rawYear;
-    const date = new Date(year, month, day, hours, minutes, 0, 0);
-    if (Number.isFinite(date.getTime())) return date;
-  }
-
-  return undefined;
+  // Единый парсер дат/времени. Для напоминаний час по умолчанию — 09:00.
+  return parseDateTime(text, { defaultHour: 9 });
 }
 
 function removeDatePhrase(text: string) {
