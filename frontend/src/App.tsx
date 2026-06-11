@@ -7,6 +7,7 @@ import BoardPage from './pages/BoardPage';
 import WorkspacePage from './pages/WorkspacePage';
 import MyTasksPage from './pages/MyTasksPage';
 import InboxPage from './pages/InboxPage';
+import NotificationsPage from './pages/NotificationsPage';
 import RemindersPage from './pages/RemindersPage';
 import CalendarPage from './pages/CalendarPage';
 import MembersPage from './pages/MembersPage';
@@ -93,6 +94,7 @@ export default function App() {
         <Route path="/project/:projectId/workspace" element={<WorkspacePage />} />
         <Route path="/project/:projectId/workspace/page/:pageId" element={<WorkspacePage />} />
         <Route path="/project/:projectId/inbox" element={<InboxPage />} />
+        <Route path="/project/:projectId/notifications" element={<NotificationsPage />} />
         <Route path="/project/:projectId/reminders" element={<RemindersPage />} />
         <Route path="/project/:projectId/calendar" element={<CalendarPage />} />
         <Route path="/my-tasks" element={<MyTasksPage />} />

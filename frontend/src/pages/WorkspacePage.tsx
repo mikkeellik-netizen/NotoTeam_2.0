@@ -283,10 +283,10 @@ export default function WorkspacePage() {
             📥
           </button>
           <button
-            onClick={() => navigate(`/project/${projectId}/inbox`)}
+            onClick={() => navigate(`/project/${projectId}/notifications`)}
             className="relative w-8 h-8 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]"
-            aria-label="Входящие"
-            title="Входящие"
+            aria-label="Уведомления"
+            title="Уведомления"
           >
             🔔
             {inboxUnread.hasUnread && (
