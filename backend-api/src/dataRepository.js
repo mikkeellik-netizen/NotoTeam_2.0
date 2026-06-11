@@ -6,6 +6,18 @@ import { DatabaseSync } from "node:sqlite";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Куда складывать данные. Приоритет:
+//   1) APP_DATA_DIR (если задан),
+//   2) /data — постоянный том Railway, если он смонтирован (определяем по наличию каталога),
+//   3) локальная папка app-data (для разработки).
+// Пункт (2) делает хранилище устойчивым к пропаже переменной APP_DATA_DIR в Railway.
+function resolveAppDataDir() {
+  const fromEnv = process.env.APP_DATA_DIR?.trim();
+  if (fromEnv) return path.resolve(fromEnv);
+  if (existsSync("/data")) return "/data";
+  return path.resolve(path.join(__dirname, "../../app-data"));
+}
+
 export function createDataRepository({ createDefaultDb }) {
   const storage = (process.env.WORKSPACE_STORAGE ?? "sqlite").trim().toLowerCase();
   if (storage === "json") return createJsonDataRepository({ createDefaultDb });
@@ -13,7 +25,7 @@ export function createDataRepository({ createDefaultDb }) {
 }
 
 export function createJsonDataRepository({ createDefaultDb }) {
-  const appDataDir = path.resolve(process.env.APP_DATA_DIR ?? path.join(__dirname, "../../app-data"));
+  const appDataDir = resolveAppDataDir();
   const dataDir = path.join(appDataDir, "database");
   const migrationsDir = path.join(dataDir, "migrations");
   const backupDir = path.join(appDataDir, "backups", "database");
@@ -59,7 +71,7 @@ export function createJsonDataRepository({ createDefaultDb }) {
 }
 
 export function createSqliteDataRepository({ createDefaultDb }) {
-  const appDataDir = path.resolve(process.env.APP_DATA_DIR ?? path.join(__dirname, "../../app-data"));
+  const appDataDir = resolveAppDataDir();
   const dataDir = path.join(appDataDir, "database");
   const migrationsDir = path.join(dataDir, "migrations");
   const backupDir = path.join(appDataDir, "backups", "database");
