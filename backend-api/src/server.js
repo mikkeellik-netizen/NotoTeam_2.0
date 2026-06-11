@@ -696,7 +696,8 @@ async function handle(req, res) {
 
     params = route(method, pathname, { method: "GET", path: /^\/users\/(?<id>[^/]+)\/bot-preferences$/ });
     if (params) {
-      const user = db.users.find((item) => item.id === params.id);
+      const resolvedId = auth.kind === "user" ? String(auth.user.id) : String(params.id);
+      const user = db.users.find((item) => String(item.id) === resolvedId);
       if (!user) return send(res, 404, { error: "User not found" });
       return send(res, 200, user.botPreferences ?? {});
     }
@@ -704,7 +705,8 @@ async function handle(req, res) {
     params = route(method, pathname, { method: "PATCH", path: /^\/users\/(?<id>[^/]+)\/bot-preferences$/ });
     if (params) {
       const body = await parseBody(req);
-      const user = db.users.find((item) => item.id === params.id);
+      const resolvedId = auth.kind === "user" ? String(auth.user.id) : String(params.id);
+      const user = db.users.find((item) => String(item.id) === resolvedId);
       if (!user) return send(res, 404, { error: "User not found" });
       user.botPreferences = {
         ...(user.botPreferences ?? {}),
@@ -1295,11 +1297,12 @@ async function handle(req, res) {
 
     params = route(method, pathname, { method: "GET", path: /^\/users\/(?<id>[^/]+)\/assigned-tasks$/ });
     if (params) {
+      const resolvedId = auth.kind === "user" ? String(auth.user.id) : String(params.id);
       return send(
         res,
         200,
         db.tasks
-          .filter((task) => task.assigneeId === params.id && isTaskActiveForUserList(db, task))
+          .filter((task) => String(task.assigneeId) === resolvedId && isTaskActiveForUserList(db, task))
           .map((task) => hydrateTask(db, task)),
       );
     }
@@ -1802,11 +1805,10 @@ function authorizeRequest(auth, method, pathname, db) {
   const userId = String(auth.user.id);
 
   // Личные маршруты — только про себя (сравниваем строки чтобы избежать number vs string)
-  const selfOnly = pathname.match(/^\/users\/([^/]+)\/(projects|assigned-tasks|bot-preferences)$/);
-  if (selfOnly) {
-    if (String(selfOnly[1]) !== userId) return { status: 403, error: "Access denied" };
-    return undefined;
-  }
+  // Пользовательские маршруты /users/:id/(projects|assigned-tasks|bot-preferences)
+  // сами подставляют id из токена (см. эндпоинты), поэтому подмена id безопасна.
+  const selfScoped = pathname.match(/^\/users\/([^/]+)\/(projects|assigned-tasks|bot-preferences)$/);
+  if (selfScoped) return undefined;
 
   // Список всех проектов и outbox — только для бота
   if (method === "GET" && pathname === "/projects") return { status: 403, error: "Access denied" };
