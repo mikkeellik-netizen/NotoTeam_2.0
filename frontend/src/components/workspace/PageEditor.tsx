@@ -66,6 +66,7 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState(page.title);
   const [contextBlock, setContextBlock] = useState<{ block: Block; x: number; y: number } | null>(null);
+  const [readMode, setReadMode] = useState(false);
 
   const pageOptions = useMemo(
     () => nodes.filter((n) => n.type !== 'folder' && n.id !== page.id),
@@ -193,6 +194,14 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
             className="w-full bg-transparent text-2xl font-bold text-[var(--tg-theme-text-color)] outline-none"
           />
           <button
+            onClick={() => setReadMode((value) => !value)}
+            className={`shrink-0 h-9 w-9 rounded-full active:scale-90 transition-transform ${readMode ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'}`}
+            title={readMode ? 'Режим редактирования' : 'Режим чтения (выделять и копировать текст)'}
+            aria-label="Режим чтения"
+          >
+            {readMode ? '✎' : '📄'}
+          </button>
+          <button
             onClick={() => copyPlainText(blocks.map(blockToPlainText).join('\n').replace(/\n{3,}/g, '\n\n').trim())}
             className="shrink-0 h-9 w-9 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] active:scale-90 transition-transform"
             title="Копировать текст страницы"
@@ -202,6 +211,11 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
           </button>
         </div>
 
+        {readMode ? (
+          <div className="whitespace-pre-wrap break-words select-text pb-24 text-[15px] leading-relaxed text-[var(--tg-theme-text-color)]">
+            {blocks.map(blockToPlainText).join('\n').replace(/\n{3,}/g, '\n\n').trim() || 'Пустая страница'}
+          </div>
+        ) : (
         <div className="space-y-0.5 pb-24">
           {blocks.map((block) => (
             <div
@@ -276,14 +290,17 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
             </div>
           ))}
         </div>
+        )}
       </div>
 
+      {!readMode && (
       <button
         onClick={() => setPlusOpen(true)}
         className="fixed bottom-6 right-4 z-40 w-14 h-14 rounded-full bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)] shadow-lg flex items-center justify-center text-2xl active:scale-90 transition-transform"
       >
         +
       </button>
+      )}
 
       {(slashBlockId || plusOpen) && (
         <SlashMenu
