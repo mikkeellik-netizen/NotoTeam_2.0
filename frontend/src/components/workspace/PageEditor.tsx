@@ -193,7 +193,7 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
             className="w-full bg-transparent text-2xl font-bold text-[var(--tg-theme-text-color)] outline-none"
           />
           <button
-            onClick={() => copyPlainText(blocks.map(blockToPlainText).filter(Boolean).join('\n\n'))}
+            onClick={() => copyPlainText(blocks.map(blockToPlainText).join('\n').replace(/\n{3,}/g, '\n\n').trim())}
             className="shrink-0 h-9 w-9 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] active:scale-90 transition-transform"
             title="Копировать текст страницы"
             aria-label="Копировать текст страницы"
@@ -202,16 +202,31 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
           </button>
         </div>
 
-        <div className="space-y-2 pb-24">
+        <div className="space-y-0.5 pb-24">
           {blocks.map((block) => (
             <div
               key={block.id}
+              className="relative"
               onContextMenu={(event) => {
+                // Не показываем системное контекстное меню и НЕ открываем меню блока
+                // по нажатию/долгому тапу — меню вызывается только кнопкой ⋮.
                 event.preventDefault();
-                if (block.type === 'simple_table') return;
-                openBlockMenu(block, event.clientX, event.clientY);
               }}
             >
+            {block.type !== 'simple_table' && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openBlockMenu(block, event.clientX, event.clientY);
+                }}
+                className="absolute right-0 top-1 z-10 flex h-6 w-6 items-center justify-center rounded text-[var(--tg-theme-hint-color)] opacity-40 active:opacity-100"
+                aria-label="Меню блока"
+                title="Меню блока"
+              >
+                ⋮
+              </button>
+            )}
             <BlockEditor
               block={block}
               projectId={projectId}
