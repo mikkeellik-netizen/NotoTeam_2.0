@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import pg from "pg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,9 +20,63 @@ function resolveAppDataDir() {
 }
 
 export function createDataRepository({ createDefaultDb }) {
+  // Если задан DATABASE_URL — используем Postgres (переживает деплои без диска,
+  // например на бесплатном тарифе Render). Иначе — прежнее файловое хранилище.
+  if (process.env.DATABASE_URL?.trim()) {
+    return createPostgresDataRepository({ createDefaultDb });
+  }
   const storage = (process.env.WORKSPACE_STORAGE ?? "sqlite").trim().toLowerCase();
   if (storage === "json") return createJsonDataRepository({ createDefaultDb });
   return createSqliteDataRepository({ createDefaultDb });
+}
+
+export function createPostgresDataRepository({ createDefaultDb }) {
+  const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+  });
+
+  let initialized = false;
+
+  async function ensureTable() {
+    if (initialized) return;
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS app_state (
+        id TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    const { rows } = await pool.query("SELECT 1 FROM app_state WHERE id = $1", ["workspace"]);
+    if (rows.length === 0) {
+      await pool.query(
+        "INSERT INTO app_state (id, value, updated_at) VALUES ($1, $2, now())",
+        ["workspace", JSON.stringify(createDefaultDb())],
+      );
+    }
+    initialized = true;
+  }
+
+  return {
+    paths: {
+      // Бэкапы для Postgres не нужны на диске — есть отдельный /system/db-backup.
+      backupDir: null,
+    },
+
+    async read() {
+      await ensureTable();
+      const { rows } = await pool.query("SELECT value FROM app_state WHERE id = $1", ["workspace"]);
+      return rows[0]?.value ?? createDefaultDb();
+    },
+
+    async write(db) {
+      await ensureTable();
+      await pool.query(
+        "INSERT INTO app_state (id, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        ["workspace", JSON.stringify(db)],
+      );
+    },
+  };
 }
 
 export function createJsonDataRepository({ createDefaultDb }) {
