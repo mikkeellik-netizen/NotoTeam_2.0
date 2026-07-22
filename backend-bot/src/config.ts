@@ -13,6 +13,8 @@ export interface BotConfig {
   workspaceApiUrl: string;
   internalApiToken: string;
   mode: "polling" | "webhook";
+  publicUrl?: string;
+  webhookPath: string;
   timezone: "Europe/Moscow";
 }
 
@@ -32,12 +34,19 @@ export function loadConfig(env = process.env): BotConfig {
   // игнорируя отдельную переменную INTERNAL_API_TOKEN (нестабильна в Railway).
   const internalApiToken = deriveInternalToken(botToken);
 
+  // Render автоматически задаёт RENDER_EXTERNAL_URL — публичный https-адрес сервиса.
+  // Можно переопределить через WEBHOOK_PUBLIC_URL, если хостинг другой.
+  const publicUrl = (env.WEBHOOK_PUBLIC_URL ?? env.RENDER_EXTERNAL_URL)?.trim();
+  const mode = env.BOT_MODE === "webhook" ? "webhook" : env.BOT_MODE === "polling" ? "polling" : publicUrl ? "webhook" : "polling";
+
   return {
     botToken,
     webAppUrl: env.WEBAPP_URL ?? "http://127.0.0.1:5174",
     workspaceApiUrl,
     internalApiToken,
-    mode: env.BOT_MODE === "webhook" ? "webhook" : "polling",
+    mode,
+    publicUrl,
+    webhookPath: `/telegram/webhook/${internalApiToken.slice(0, 24)}`,
     timezone: "Europe/Moscow",
   };
 }

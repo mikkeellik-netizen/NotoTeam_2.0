@@ -1,4 +1,5 @@
 import http from "node:http";
+import { webhookCallback } from "grammy";
 import { loadConfig } from "./config.js";
 import { HttpWorkspaceRepository } from "./storage/httpRepository.js";
 import { GrammyMessenger } from "./telegram/messenger.js";
@@ -7,23 +8,17 @@ import { NotificationService } from "./services/notificationService.js";
 import { ReportService } from "./services/reportService.js";
 import { BotScheduler } from "./scheduler.js";
 
-// Render (и другие PaaS с типом "Web Service") ожидают, что процесс слушает
-// $PORT и отвечает на HTTP-запросы, иначе деплой считается зависшим/неудачным.
-// У бота нет собственного HTTP API, поэтому поднимаем минимальный health-эндпоинт.
-function startHealthServer() {
-  const port = Number(process.env.PORT) || 3000;
-  http
-    .createServer((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, service: "telegram-workspace-bot" }));
-    })
-    .listen(port, () => {
-      console.log(`Health check server listening on port ${port}`);
-    });
+// Держит бесплатный Render-инстанс "тёплым": сам себя пингует раз в 10 минут,
+// не давая усыпить процесс после 15 минут простоя. Не гарантия на 100% (при
+// перезапуске/деплое пинг всё равно временно прервётся), но резко снижает
+// шанс, что бот "спит" в момент, когда пользователь пишет команду.
+function startSelfPing(publicUrl: string) {
+  setInterval(() => {
+    fetch(publicUrl).catch(() => undefined);
+  }, 10 * 60 * 1000);
 }
 
 async function main() {
-  startHealthServer();
   const config = loadConfig();
   const repo = new HttpWorkspaceRepository(config.workspaceApiUrl, config.internalApiToken);
   const bot = new TelegramWorkspaceBot(config, repo);
@@ -34,6 +29,45 @@ async function main() {
   const scheduler = new BotScheduler(repo, notifications, reports, messenger);
 
   scheduler.start();
+
+  const port = Number(process.env.PORT) || 3000;
+
+  if (config.mode === "webhook" && config.publicUrl) {
+    // Единый HTTP-сервер: health-check для PaaS + приём апдейтов от Telegram.
+    // Входящее сообщение от Telegram само по себе — HTTP-запрос, поэтому такой
+    // режим переживает усыпление бесплатных хостингов (в отличие от long polling,
+    // которому нужно постоянно открытое соединение).
+    const secretToken = config.internalApiToken.slice(0, 32);
+    const handleWebhook = webhookCallback(bot.instance, "http", { secretToken });
+
+    http
+      .createServer((req, res) => {
+        if (req.url === config.webhookPath && req.method === "POST") {
+          void handleWebhook(req, res);
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, service: "telegram-workspace-bot", mode: "webhook" }));
+      })
+      .listen(port, () => {
+        console.log(`HTTP server listening on port ${port}`);
+      });
+
+    await bot.startWebhook(config.publicUrl, config.webhookPath, secretToken);
+    startSelfPing(config.publicUrl);
+    return;
+  }
+
+  // Локальная разработка / хостинг без sleep — обычный long polling.
+  http
+    .createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, service: "telegram-workspace-bot", mode: "polling" }));
+    })
+    .listen(port, () => {
+      console.log(`Health check server listening on port ${port}`);
+    });
+
   await bot.start();
 }
 

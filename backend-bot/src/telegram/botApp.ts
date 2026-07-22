@@ -46,7 +46,8 @@ export class TelegramWorkspaceBot {
     this.notifications = notifications;
   }
 
-  async start() {
+  // Общая подготовка — вызывается независимо от способа получения апдейтов (polling/webhook).
+  private async prepare() {
     this.bot.catch((error) => {
       console.error("Telegram bot error", error.message);
     });
@@ -65,11 +66,27 @@ export class TelegramWorkspaceBot {
       { command: "join", description: "Ввести код проекта" },
       { command: "help", description: "Справка" },
     ]);
+  }
+
+  // Long polling — для локальной разработки. Держит соединение с Telegram открытым,
+  // поэтому не подходит для бесплатных PaaS, которые усыпляют процесс без входящих HTTP-запросов.
+  async start() {
+    await this.prepare();
     await this.bot.start({
       onStart: () => {
-        console.log("Telegram Workspace Bot started");
+        console.log("Telegram Workspace Bot started (polling)");
       },
     });
+  }
+
+  // Webhook — Telegram сам присылает апдейты HTTP-запросом. Не требует постоянно
+  // открытого соединения, поэтому переживает усыпление бесплатного хостинга:
+  // входящее сообщение — это и есть запрос, который "будит" процесс.
+  async startWebhook(publicUrl: string, path: string, secretToken: string) {
+    await this.prepare();
+    const webhookUrl = `${publicUrl.replace(/\/$/, "")}${path}`;
+    await this.bot.api.setWebhook(webhookUrl, { drop_pending_updates: true, secret_token: secretToken });
+    console.log(`Telegram Workspace Bot started (webhook): ${webhookUrl}`);
   }
 
   private registerHandlers() {
