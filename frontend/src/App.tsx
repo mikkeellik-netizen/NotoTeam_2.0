@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useAuthStore } from './store/authStore';
 import { useSettingsStore } from './store/settingsStore';
@@ -24,6 +24,9 @@ export default function App() {
   useEffect(() => {
     loadSettings();
     init();
+
+    // Отключаем вертикальный свайп-«закрыть», чтобы прокрутка не сворачивала приложение
+    window.Telegram?.WebApp?.disableVerticalSwipes?.();
 
     // Когда приложение возвращается на передний план (в т.ч. при переключении
     // аккаунта Telegram), перепроверяем пользователя. init() обнаружит смену
@@ -88,6 +91,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <TelegramBackButton />
       <Routes>
         <Route path="/" element={<ProjectsPage />} />
         <Route path="/board/:projectId" element={<BoardPage />} />
@@ -107,4 +111,33 @@ export default function App() {
       </Routes>
     </BrowserRouter>
   );
+}
+
+// Связывает системную кнопку/жест «Назад» на телефоне со встроенной кнопкой
+// Telegram BackButton. Когда она видима, Android-свайп «назад» вызывает ЕЁ
+// (переход назад внутри приложения), а не закрывает мини-приложение.
+// На корневом экране кнопка скрыта — там «назад» закрывает приложение (это норма).
+function TelegramBackButton() {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    const backButton = window.Telegram?.WebApp?.BackButton;
+    if (!backButton) return;
+
+    const isRoot = location.pathname === '/';
+    if (isRoot) {
+      backButton.hide?.();
+      return;
+    }
+
+    const handler = () => navigate(-1);
+    backButton.show?.();
+    backButton.onClick?.(handler);
+    return () => {
+      backButton.offClick?.(handler);
+    };
+  }, [location.pathname, navigate]);
+
+  return null;
 }

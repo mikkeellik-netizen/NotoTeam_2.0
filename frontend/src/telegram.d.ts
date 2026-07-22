@@ -19,6 +19,14 @@ declare global {
         expand?: () => void;
         onEvent?: (event: string, handler: () => void) => void;
         offEvent?: (event: string, handler: () => void) => void;
+        BackButton?: {
+          isVisible?: boolean;
+          show?: () => void;
+          hide?: () => void;
+          onClick?: (cb: () => void) => void;
+          offClick?: (cb: () => void) => void;
+        };
+        disableVerticalSwipes?: () => void;
       };
     };
   }
