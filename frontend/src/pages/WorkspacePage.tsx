@@ -146,10 +146,31 @@ export default function WorkspacePage() {
     };
   }, [projectId]);
 
-  const activePage = useMemo(
-    () => nodes.find((node) => !node.isDeleted && node.id === (pageId ?? selectedPageId)) ?? null,
-    [nodes, pageId, selectedPageId],
+  // Корневой узел проекта (первая папка/узел в корне) — что показываем на /workspace без pageId.
+  const entryNode = useMemo(
+    () =>
+      nodes
+        .filter((node) => !node.isDeleted && node.parentId === null && node.type === 'folder')
+        .sort((a, b) => a.order - b.order)[0] ??
+      nodes
+        .filter((node) => !node.isDeleted && node.parentId === null)
+        .sort((a, b) => a.order - b.order)[0] ??
+      null,
+    [nodes],
   );
+
+  // Активная страница определяется URL-ом (pageId), а НЕ последним выбранным элементом,
+  // иначе кнопка «назад» на корневой экран не обновляет вид (см. баг с возвратом).
+  const activePage = useMemo(
+    () => (pageId ? nodes.find((node) => !node.isDeleted && node.id === pageId) ?? entryNode : entryNode),
+    [nodes, pageId, entryNode],
+  );
+
+  // Подсветка в боковом дереве следует за URL.
+  useEffect(() => {
+    if (activePage && activePage.id !== selectedPageId) selectPage(activePage.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePage?.id]);
   const inboxUnread = useMemo(
     () => {
       const summary = pid ? getInboxUnreadSummary(pid, currentProject) : { hasUnread: false, count: 0 };
