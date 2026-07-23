@@ -7,6 +7,7 @@ import { PAGE_TEMPLATES } from './templates';
 import TemplateBuilderModal from './TemplateBuilderModal';
 import IconPickerModal from './IconPickerModal';
 import ContextMenu from '../common/ContextMenu';
+import HierarchyDnd from './HierarchyDnd';
 import { copyPlainText } from '../../utils/clipboard';
 
 interface Props {
@@ -36,7 +37,6 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   } = usePageStore();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
-  const [draggedId, setDraggedId] = useState<string | null>(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [templateBuilderOpen, setTemplateBuilderOpen] = useState(false);
   const [customTemplates, setCustomTemplates] = useState<Template[]>([]);
@@ -164,7 +164,21 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
     </button>
   );
 
-  const renderNode = (node: PageNode, depth = 0) => {
+  const renderLevel = (siblings: PageNode[], parentId: string | null, depth: number) => (
+    <HierarchyDnd
+      items={siblings}
+      parentId={parentId}
+      allNodes={nodes}
+      onReorder={(id, index) => moveNode(id, parentId, index)}
+      onNest={(id, targetId) => {
+        const count = nodes.filter((n) => !n.isDeleted && n.parentId === targetId).length;
+        moveNode(id, targetId, count);
+      }}
+      renderRow={(node, isNestTarget) => renderNodeRow(node, depth, isNestTarget)}
+    />
+  );
+
+  const renderNodeRow = (node: PageNode, depth: number, isNestTarget: boolean) => {
     const children = nodes
       .filter((n) => !n.isDeleted && n.parentId === node.id)
       .sort((a, b) => a.order - b.order);
@@ -173,17 +187,8 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
     const isSelected = selectedPageId === node.id;
 
     return (
-      <div key={node.id}>
+      <div>
         <div
-          draggable
-          onDragStart={() => setDraggedId(node.id)}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            if (!draggedId || draggedId === node.id) return;
-            moveNode(draggedId, isFolder ? node.id : node.parentId, isFolder ? children.length : node.order);
-            setDraggedId(null);
-          }}
           onContextMenu={(event) => {
             event.preventDefault();
             openNodeMenu(node, event.clientX, event.clientY);
@@ -193,9 +198,12 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
           onPointerLeave={clearNodeLongPress}
           onPointerCancel={clearNodeLongPress}
           className={`flex items-center gap-1 rounded-[8px] px-2 py-1.5 ${
-            isSelected ? 'bg-[var(--tg-theme-secondary-bg-color)]' : ''
+            isNestTarget
+              ? 'bg-[var(--tg-theme-button-color)]/20 ring-1 ring-[var(--tg-theme-button-color)]'
+              : isSelected
+                ? 'bg-[var(--tg-theme-secondary-bg-color)]'
+                : ''
           }`}
-          style={{ paddingLeft: 8 + depth * 14 }}
         >
           {isFolder ? (
             <button
@@ -274,9 +282,9 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
         </div>
 
         {isFolder && !isCollapsed && (
-          <div>
-            {children.map((child) => renderNode(child, depth + 1))}
-            <div className="flex gap-1 mt-1" style={{ paddingLeft: 28 + depth * 14 }}>
+          <div className="ml-3 border-l border-[var(--tg-theme-secondary-bg-color)] pl-1">
+            {children.length > 0 && renderLevel(children, node.id, depth + 1)}
+            <div className="flex gap-2 mt-1 pl-2">
               <button onClick={() => addNode('page', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
                 + страница
               </button>
@@ -321,7 +329,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
           </div>
         )}
 
-        {roots.map((node) => renderNode(node))}
+        {renderLevel(roots, null, 0)}
       </div>
 
       <div className="shrink-0 border-t border-[var(--tg-theme-secondary-bg-color)] p-2 space-y-2">
