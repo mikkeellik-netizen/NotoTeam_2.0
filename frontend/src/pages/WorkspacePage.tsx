@@ -9,6 +9,7 @@ import PageEditor from '../components/workspace/PageEditor';
 import PageTree from '../components/workspace/PageTree';
 import QuickCaptureModal from '../components/workspace/QuickCaptureModal';
 import IconPickerModal from '../components/workspace/IconPickerModal';
+import HierarchyDnd from '../components/workspace/HierarchyDnd';
 import { usePageStore } from '../store/pageStore';
 import type { PageNode, PageNodeType } from '../types';
 import ContextMenu from '../components/common/ContextMenu';
@@ -522,10 +523,17 @@ function FolderView({
             Создай страницу, папку или Kanban-доску внутри этой папки.
           </div>
         ) : (
-          <div className="space-y-2">
-            {children.map((child) => (
+          <HierarchyDnd
+            items={children}
+            parentId={folder.id}
+            allNodes={nodes}
+            onReorder={(id, index) => onMove(id, folder.id, index)}
+            onNest={(id, targetId) => {
+              const count = nodes.filter((node) => !node.isDeleted && node.parentId === targetId).length;
+              onMove(id, targetId, count);
+            }}
+            renderRow={(child, isNestTarget) => (
               <button
-                key={child.id}
                 onClick={() => onOpenPage(child.id)}
                 onContextMenu={(event) => {
                   event.preventDefault();
@@ -535,7 +543,11 @@ function FolderView({
                 onPointerUp={clearNodeLongPress}
                 onPointerLeave={clearNodeLongPress}
                 onPointerCancel={clearNodeLongPress}
-                className="flex w-full items-center gap-3 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-left active:scale-[0.99]"
+                className={`flex w-full items-center gap-3 rounded-[12px] px-3 py-3 text-left active:scale-[0.99] ${
+                  isNestTarget
+                    ? 'bg-[var(--tg-theme-button-color)]/20 ring-2 ring-[var(--tg-theme-button-color)]'
+                    : 'bg-[var(--tg-theme-secondary-bg-color)]'
+                }`}
               >
                 <span
                   role="button"
@@ -560,13 +572,15 @@ function FolderView({
                     {child.title}
                   </span>
                   <span className="block text-xs text-[var(--tg-theme-hint-color)]">
-                    {child.type === 'folder' ? 'Папка' : child.type === 'kanban' ? 'Kanban-доска' : 'Страница'}
+                    {isNestTarget
+                      ? '↳ вложить сюда'
+                      : child.type === 'folder' ? 'Папка' : child.type === 'kanban' ? 'Kanban-доска' : 'Страница'}
                   </span>
                 </span>
                 <span className="text-[var(--tg-theme-hint-color)]">›</span>
               </button>
-            ))}
-          </div>
+            )}
+          />
         )}
       </div>
       {contextNode && (
