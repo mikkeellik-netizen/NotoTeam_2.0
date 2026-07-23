@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import {
   DndContext,
   DragOverlay,
-  PointerSensor,
+  MouseSensor,
   TouchSensor,
   closestCenter,
   useSensor,
@@ -15,7 +15,7 @@ import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import type { PageNode } from '../../types';
 
-// Порог смещения вправо, после которого вместо перестановки происходит вложение.
+// Порог смещения по горизонтали для вложения (вправо) / извлечения (влево).
 const NEST_THRESHOLD = 40;
 
 function isDescendant(nodes: PageNode[], possibleChildId: string, ancestorId: string): boolean {
@@ -34,15 +34,18 @@ interface Props {
   allNodes: PageNode[];
   onReorder: (id: string, index: number) => void;
   onNest: (id: string, targetId: string) => void;
+  onOutdent?: (id: string) => void;
   renderRow: (node: PageNode, isNestTarget: boolean) => ReactNode;
 }
 
-// Список с перетаскиванием: тянуть вертикально — переставить в последовательности,
-// тянуть вправо (за ручку) на элемент — вложить внутрь него. Работает пальцем на телефоне.
-export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onNest, renderRow }: Props) {
+// Перетаскивание на телефоне: удержать ~1с, затем
+//   вверх/вниз — переставить, вправо на элемент — вложить, влево — вытащить на уровень выше.
+export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onNest, onOutdent, renderRow }: Props) {
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    // Долгое нажатие (~1 сек) начинает перетаскивание; быстрый тап открывает элемент.
+    // MouseSensor — только для ПК (мышь). TouchSensor — для касаний с задержкой ~1с.
+    // Важно: НЕ используем PointerSensor, иначе он перехватывает касания сразу,
+    // и задержка TouchSensor не срабатывает (drag стартует слишком быстро).
+    useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 1000, tolerance: 8 } }),
   );
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -71,10 +74,14 @@ export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onN
   const handleEnd = (event: DragEndEvent) => {
     const active = String(event.active.id);
     const over = event.over?.id ? String(event.over.id) : null;
-    const wasNesting = nesting && over != null && over !== active && !isDescendant(allNodes, over, active);
+    const dx = event.delta.x;
+    const wasNesting = dx > NEST_THRESHOLD && over != null && over !== active && !isDescendant(allNodes, over, active);
+    const wantsOutdent = dx < -NEST_THRESHOLD && parentId !== null && onOutdent;
 
     if (wasNesting && over) {
       onNest(active, over);
+    } else if (wantsOutdent && onOutdent) {
+      onOutdent(active);
     } else if (over && over !== active) {
       const index = items.findIndex((node) => node.id === over);
       if (index >= 0) onReorder(active, index);
@@ -121,8 +128,13 @@ export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onN
             <span className="text-xl">{activeNode.icon}</span>
             <span className="truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">{activeNode.title}</span>
             {deltaX > NEST_THRESHOLD && (
-              <span className="ml-1 rounded-full bg-[var(--tg-theme-button-color)]/20 px-2 py-0.5 text-[11px] text-[var(--tg-theme-button-color)]">
+              <span className="ml-1 shrink-0 rounded-full bg-[var(--tg-theme-button-color)]/20 px-2 py-0.5 text-[11px] text-[var(--tg-theme-button-color)]">
                 вложить →
+              </span>
+            )}
+            {deltaX < -NEST_THRESHOLD && parentId !== null && (
+              <span className="ml-1 shrink-0 rounded-full bg-[var(--tg-theme-button-color)]/20 px-2 py-0.5 text-[11px] text-[var(--tg-theme-button-color)]">
+                ← вытащить
               </span>
             )}
           </div>

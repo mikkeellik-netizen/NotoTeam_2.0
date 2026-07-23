@@ -162,6 +162,13 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
         const count = nodes.filter((n) => !n.isDeleted && n.parentId === targetId).length;
         moveNode(id, targetId, count);
       }}
+      onOutdent={(id) => {
+        if (parentId === null) return; // уже в корне — вытаскивать некуда
+        const parentNode = nodes.find((n) => n.id === parentId);
+        const grandParentId = parentNode?.parentId ?? null;
+        const count = nodes.filter((n) => !n.isDeleted && n.parentId === grandParentId).length;
+        moveNode(id, grandParentId, count);
+      }}
       renderRow={(node, isNestTarget) => renderNodeRow(node, depth, isNestTarget)}
     />
   );
@@ -173,6 +180,8 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
     const isFolder = node.type === 'folder';
     const isCollapsed = collapsedIds.has(node.id);
     const isSelected = selectedPageId === node.id;
+    const hasChildren = children.length > 0;
+    const showChildren = isFolder || hasChildren; // вложенные страницы тоже разворачиваются
 
     return (
       <div>
@@ -189,7 +198,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
                 : ''
           }`}
         >
-          {isFolder ? (
+          {showChildren ? (
             <button
               onClick={() => toggleCollapsed(node.id)}
               className="w-5 h-5 text-[var(--tg-theme-hint-color)]"
@@ -265,20 +274,22 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
           </button>
         </div>
 
-        {isFolder && !isCollapsed && (
+        {showChildren && !isCollapsed && (
           <div className="ml-3 border-l border-[var(--tg-theme-secondary-bg-color)] pl-1">
-            {children.length > 0 && renderLevel(children, node.id, depth + 1)}
-            <div className="flex gap-2 mt-1 pl-2">
-              <button onClick={() => addNode('page', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
-                + страница
-              </button>
-              <button onClick={() => addNode('folder', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
-                + папка
-              </button>
-              <button onClick={() => addNode('kanban', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
-                + kanban
-              </button>
-            </div>
+            {hasChildren && renderLevel(children, node.id, depth + 1)}
+            {isFolder && (
+              <div className="flex gap-2 mt-1 pl-2">
+                <button onClick={() => addNode('page', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
+                  + страница
+                </button>
+                <button onClick={() => addNode('folder', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
+                  + папка
+                </button>
+                <button onClick={() => addNode('kanban', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
+                  + kanban
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
