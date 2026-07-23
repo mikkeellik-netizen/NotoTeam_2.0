@@ -48,6 +48,9 @@ export class TelegramWorkspaceBot {
 
   // Общая подготовка — вызывается независимо от способа получения апдейтов (polling/webhook).
   private async prepare() {
+    // ОБЯЗАТЕЛЬНО: без init() метод handleUpdate() (используется в webhook-режиме)
+    // падает с "Bot information unavailable" и команды не обрабатываются.
+    await this.bot.init();
     this.bot.catch((error) => {
       console.error("Telegram bot error", error.message);
     });
