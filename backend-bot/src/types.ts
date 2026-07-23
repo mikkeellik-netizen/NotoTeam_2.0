@@ -125,6 +125,8 @@ export interface BotReportSettings {
   time: string;
   skipEmpty: boolean;
   sendOnlyIfChanged: boolean;
+  /** Дата (МСК, YYYY-MM-DD) последней автоотправки — чтобы не слать дважды в день и не пропускать. */
+  lastSentDate?: string;
   sections: {
     createdTasks: boolean;
     completedTasks: boolean;

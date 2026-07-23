@@ -86,31 +86,65 @@ export class BotScheduler {
     const projects = await this.repo.listProjects();
 
     for (const project of projects) {
-      const weekly = project.botSettings.reports.weekly;
-      if (weekly.enabled && weekly.weekdays.includes(current.weekday) && weekly.time === current.time) {
+      const settings = project.botSettings;
+      let changed = false;
+
+      // Надёжная логика: сегодня нужный день недели, время УЖЕ наступило и сегодня ещё не слали.
+      // Это переживает дрейф таймера и моменты пробуждения на бесплатном хостинге.
+      if (isReportDue(settings.reports.weekly, current)) {
         await this.reports.sendWeeklyReport(project);
+        settings.reports.weekly.lastSentDate = current.date;
+        changed = true;
       }
 
-      const overdue = project.botSettings.reports.overdue;
-      if (overdue.enabled && overdue.weekdays.includes(current.weekday) && overdue.time === current.time) {
+      if (isReportDue(settings.reports.overdue, current)) {
         await this.reports.sendOverdueReport(project);
+        settings.reports.overdue.lastSentDate = current.date;
+        changed = true;
+      }
+
+      if (changed) {
+        await this.repo.updateProjectBotSettings(project.id, settings).catch((error) =>
+          console.error("Failed to persist report lastSentDate", error instanceof Error ? error.message : error),
+        );
       }
     }
   }
+}
+
+function isReportDue(
+  report: { enabled: boolean; weekdays: number[]; time: string; lastSentDate?: string },
+  current: { weekday: number; minutesOfDay: number; date: string },
+) {
+  if (!report.enabled) return false;
+  if (!report.weekdays.includes(current.weekday)) return false;
+  if (report.lastSentDate === current.date) return false; // уже отправляли сегодня
+  const scheduled = parseMinutes(report.time);
+  return current.minutesOfDay >= scheduled;
+}
+
+function parseMinutes(time: string) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+  if (!match) return 0;
+  return Number(match[1]) * 60 + Number(match[2]);
 }
 
 function getMskTimeParts(date: Date) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Moscow",
     weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   }).formatToParts(date);
 
-  const weekdayText = parts.find((part) => part.type === "weekday")?.value ?? "Mon";
-  const hour = parts.find((part) => part.type === "hour")?.value ?? "00";
-  const minute = parts.find((part) => part.type === "minute")?.value ?? "00";
+  const get = (type: string, fallback: string) => parts.find((part) => part.type === type)?.value ?? fallback;
+  const weekdayText = get("weekday", "Mon");
+  const hour = get("hour", "00");
+  const minute = get("minute", "00");
   const weekdayMap: Record<string, number> = {
     Mon: 1,
     Tue: 2,
@@ -124,5 +158,7 @@ function getMskTimeParts(date: Date) {
   return {
     weekday: weekdayMap[weekdayText] ?? 1,
     time: `${hour}:${minute}`,
+    minutesOfDay: Number(hour) * 60 + Number(minute),
+    date: `${get("year", "1970")}-${get("month", "01")}-${get("day", "01")}`,
   };
 }
