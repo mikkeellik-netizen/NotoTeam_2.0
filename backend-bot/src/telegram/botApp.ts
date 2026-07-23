@@ -1062,18 +1062,10 @@ export class TelegramWorkspaceBot {
     await this.replyOrEdit(ctx, text, keyboard);
   }
 
-  private mainKeyboard(projects: Array<{ id?: string; title: string }> = []) {
-    const keyboard = this.addWebAppButton(new InlineKeyboard(), "Открыть Mini App", this.config.webAppUrl);
-
-    for (const project of projects.slice(0, 6)) {
-      if (!project.id) continue;
-      if (this.isHttpsUrl(this.config.webAppUrl)) {
-        keyboard.row().webApp(`Открыть: ${project.title}`, `${this.config.webAppUrl}/project/${project.id}/workspace`);
-      }
-    }
+  private mainKeyboard(_projects: Array<{ id?: string; title: string }> = []) {
+    const keyboard = new InlineKeyboard();
 
     return keyboard
-      .row()
       .text("➕ Задача", "new_task")
       .text("📥 Inbox", "new_inbox_note")
       .row()
