@@ -42,8 +42,8 @@ interface Props {
 export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onNest, renderRow }: Props) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    // Долгое нажатие (~280мс) начинает перетаскивание; быстрый тап открывает элемент.
-    useSensor(TouchSensor, { activationConstraint: { delay: 280, tolerance: 8 } }),
+    // Долгое нажатие (~1 сек) начинает перетаскивание; быстрый тап открывает элемент.
+    useSensor(TouchSensor, { activationConstraint: { delay: 1000, tolerance: 8 } }),
   );
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
