@@ -85,8 +85,11 @@ export default function SettingsPage() {
     () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
     [activeProjectId, projects],
   );
-  const isActiveProjectOwner = activeProject?.ownerId === currentUser?.id;
-  const currentMember = activeProject?.members?.find((member) => member.userId === currentUser?.id);
+  // Сравниваем как строки: с бэкенда userId/ownerId могут прийти строкой, а currentUser.id — числом.
+  const isActiveProjectOwner = String(activeProject?.ownerId ?? '') === String(currentUser?.id ?? '_');
+  const currentMember = activeProject?.members?.find(
+    (member) => String(member.userId) === String(currentUser?.id ?? '_'),
+  );
   const canOpenAdminPanel = isActiveProjectOwner || currentMember?.role?.name === 'admin';
   const inviteLink = useMemo(
     () => (inviteCode ? `${window.location.origin}/?join=${encodeURIComponent(inviteCode)}` : ''),
@@ -272,7 +275,7 @@ export default function SettingsPage() {
   const leaveProject = async (projectOverride?: Project) => {
     const project = projectOverride ?? activeProject;
     if (!project?.id || !currentUser?.id) return;
-    const member = project.members?.find((item) => item.userId === currentUser.id);
+    const member = project.members?.find((item) => String(item.userId) === String(currentUser.id));
     setMemberActionId(member?.id ?? -1);
     try {
       await projectsApi.leaveProject(project.id, currentUser.id);
@@ -505,8 +508,8 @@ export default function SettingsPage() {
           <div className="space-y-2">
             {projects.map((project) => {
               const isActive = activeProject?.id === project.id;
-              const canDeleteProject = project.ownerId === currentUser?.id;
-              const projectMember = project.members?.find((member) => member.userId === currentUser?.id);
+              const canDeleteProject = String(project.ownerId) === String(currentUser?.id ?? '_');
+              const projectMember = project.members?.find((member) => String(member.userId) === String(currentUser?.id ?? '_'));
               return (
               <div
                 key={project.id}
