@@ -69,10 +69,6 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
     () => nodes.filter((node) => node.isDeleted).sort((a, b) => new Date(b.deletedAt ?? 0).getTime() - new Date(a.deletedAt ?? 0).getTime()),
     [nodes],
   );
-  const folders = useMemo(
-    () => nodes.filter((node) => !node.isDeleted && node.type === 'folder').sort((a, b) => a.order - b.order),
-    [nodes],
-  );
   const allTemplates = useMemo(() => [...PAGE_TEMPLATES, ...customTemplates], [customTemplates]);
 
   useEffect(() => {
@@ -654,22 +650,33 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
                 }}
                 className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-left text-sm font-medium text-[var(--tg-theme-text-color)]"
               >
-                В корень проекта
+                📂 В корень проекта
               </button>
-              {folders
-                .filter((folder) => folder.id !== nodeToMove.id && !isTreeDescendant(nodes, folder.id, nodeToMove.id))
-                .map((folder) => (
+              <p className="px-1 pt-2 text-[11px] font-semibold uppercase text-[var(--tg-theme-hint-color)]">Вложить внутрь</p>
+              {nodes
+                .filter(
+                  (node) =>
+                    !node.isDeleted &&
+                    node.id !== nodeToMove.id &&
+                    node.parentId !== nodeToMove.id &&
+                    !isTreeDescendant(nodes, node.id, nodeToMove.id),
+                )
+                .sort((a, b) => a.title.localeCompare(b.title))
+                .map((target) => (
                   <button
-                    key={folder.id}
+                    key={target.id}
                     onClick={() => {
-                      const order = nodes.filter((node) => !node.isDeleted && node.parentId === folder.id).length;
-                      moveNode(nodeToMove.id, folder.id, order);
+                      const order = nodes.filter((node) => !node.isDeleted && node.parentId === target.id).length;
+                      moveNode(nodeToMove.id, target.id, order);
                       setNodeToMove(null);
                     }}
                     className="flex w-full items-center gap-2 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-left text-sm font-medium text-[var(--tg-theme-text-color)]"
                   >
-                    <span>{folder.icon}</span>
-                    <span className="truncate">{folder.title}</span>
+                    <span>{target.icon}</span>
+                    <span className="truncate">{target.title}</span>
+                    <span className="ml-auto text-[11px] text-[var(--tg-theme-hint-color)]">
+                      {target.type === 'folder' ? 'папка' : target.type === 'kanban' ? 'kanban' : 'страница'}
+                    </span>
                   </button>
                 ))}
             </div>
