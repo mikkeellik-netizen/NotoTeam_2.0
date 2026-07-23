@@ -42,7 +42,8 @@ interface Props {
 export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onNest, renderRow }: Props) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
+    // Долгое нажатие (~280мс) начинает перетаскивание; быстрый тап открывает элемент.
+    useSensor(TouchSensor, { activationConstraint: { delay: 280, tolerance: 8 } }),
   );
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
@@ -99,23 +100,14 @@ export default function HierarchyDnd({ items, parentId, allNodes, onReorder, onN
       }}
     >
       <SortableContext items={items.map((node) => node.id)} strategy={verticalListSortingStrategy}>
-        <div className="space-y-2">
+        <div className="space-y-1">
           {items.map((node) => (
             <SortableRow key={node.id} id={node.id}>
               {(handleProps) => (
-                <div className="flex items-stretch gap-1">
-                  <button
-                    {...handleProps.attributes}
-                    {...handleProps.listeners}
-                    className="shrink-0 touch-none select-none px-1 text-lg text-[var(--tg-theme-hint-color)] active:text-[var(--tg-theme-text-color)]"
-                    aria-label="Перетащить"
-                    title="Перетащить: вверх/вниз — переставить, вправо на элемент — вложить"
-                  >
-                    ⠿
-                  </button>
-                  <div className="min-w-0 flex-1">
-                    {renderRow(node, activeId != null && overId === node.id && nesting && node.id !== activeId)}
-                  </div>
+                // Вся строка — область перетаскивания (долгое нажатие начинает drag).
+                // Быстрый тап проходит на кнопки внутри (открыть/иконка/★/✎/×).
+                <div {...handleProps.attributes} {...handleProps.listeners} className="touch-none">
+                  {renderRow(node, activeId != null && overId === node.id && nesting && node.id !== activeId)}
                 </div>
               )}
             </SortableRow>

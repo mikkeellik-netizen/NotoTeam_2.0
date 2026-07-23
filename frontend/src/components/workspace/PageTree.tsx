@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { activityApi } from '../../api/activity';
 import { templatesApi } from '../../api/templates';
 import type { PageNode, PageNodeType, Template } from '../../types';
@@ -47,7 +47,6 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   const [contextNode, setContextNode] = useState<{ node: PageNode; x: number; y: number } | null>(null);
   const [nodeToMove, setNodeToMove] = useState<PageNode | null>(null);
   const [iconTarget, setIconTarget] = useState<PageNode | null>(null);
-  const longPressTimerRef = useRef<number | null>(null);
 
   const roots = useMemo(
     () => nodes.filter((n) => !n.isDeleted && n.parentId === null).sort((a, b) => a.order - b.order),
@@ -140,17 +139,6 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
     setContextNode({ node, x, y });
   };
 
-  const startNodeLongPress = (node: PageNode, x: number, y: number) => {
-    if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = window.setTimeout(() => openNodeMenu(node, x, y), 600);
-  };
-
-  const clearNodeLongPress = () => {
-    if (!longPressTimerRef.current) return;
-    window.clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = null;
-  };
-
   const renderQuickNode = (node: PageNode, prefix?: string) => (
     <button
       key={node.id}
@@ -193,10 +181,6 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
             event.preventDefault();
             openNodeMenu(node, event.clientX, event.clientY);
           }}
-          onPointerDown={(event) => startNodeLongPress(node, event.clientX, event.clientY)}
-          onPointerUp={clearNodeLongPress}
-          onPointerLeave={clearNodeLongPress}
-          onPointerCancel={clearNodeLongPress}
           className={`flex items-center gap-1 rounded-[8px] px-2 py-1.5 ${
             isNestTarget
               ? 'bg-[var(--tg-theme-button-color)]/20 ring-1 ring-[var(--tg-theme-button-color)]'
