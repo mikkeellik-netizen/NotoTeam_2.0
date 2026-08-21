@@ -1,6 +1,8 @@
 // ─── Enums ────────────────────────────────────────────────────
 export type Priority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 export type AiTone = 'FRIENDLY' | 'MINIMAL' | 'BUSINESS' | 'YOUTH' | 'STRICT' | 'PASTORAL';
+export type ArchiveCleanupMode = 'never' | '2weeks' | '1month' | '3months';
+export type TaskImportanceScore = 1 | 2 | 3 | 4 | 5;
 export type NotificationType =
   | 'TASK_ASSIGNED'
   | 'HALF_TIME'
@@ -17,6 +19,11 @@ export interface User {
   username?: string;
   firstName?: string;
   lastName?: string;
+  photoUrl?: string;
+  avatarUrl?: string;
+  avatarMode?: 'none' | 'telegram' | 'manual';
+  avatarStatus?: 'disabled' | 'ready' | 'unavailable' | 'error';
+  avatarUpdatedAt?: string;
 }
 
 // ─── Project ──────────────────────────────────────────────────
@@ -36,9 +43,25 @@ export interface Project {
   pages?: PageNode[];
   botSettings?: ProjectBotSettings;
   calendarCategories?: CalendarCategory[];
+  responsibilityAreas?: ResponsibilityArea[];
   _count?: {
     tasks: number;
   };
+}
+
+export interface ResponsibilityArea {
+  id: string;
+  projectId: number | string;
+  title: string;
+  description?: string;
+  ownerUserIds: Array<number | string>;
+  color: string;
+  icon: string;
+  linkedPageIds?: string[];
+  linkedKanbanBoardIds?: string[];
+  linkedTaskIds?: Array<number | string>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type BotTone = 'soft' | 'neutral' | 'strict' | 'pastoral';
@@ -75,32 +98,59 @@ export interface BotReportSettings {
 
 export interface ProjectBotSettings {
   timezone: string;
+  archiveCleanupMode: ArchiveCleanupMode;
   taskDeadlineNotificationsEnabled: boolean;
   mentionNotificationsEnabled: boolean;
   dutyNotificationsEnabled: boolean;
+  smartAdminNotificationsEnabled: boolean;
   kanbanReminderTone: BotTone;
   kanbanReminderPoints: KanbanReminderPoint[];
+  taskSignificance: TaskSignificanceSettings;
   reports: {
     weekly: BotReportSettings;
     overdue: BotReportSettings;
   };
 }
 
+export interface TaskSignificanceSettings {
+  priorityBonus: Record<Priority, number>;
+  overdueBonus: number;
+  longOverdueBonus: number;
+  longOverdueHours: number;
+  blockingBonus: number;
+  attentionThreshold: number;
+  criticalThreshold: number;
+}
+
 // ─── Role & Member ────────────────────────────────────────────
+export type ProjectRoleName = 'owner' | 'admin' | 'editor' | 'viewer';
+
 export interface Role {
   id: number;
   projectId: number;
-  name: string;
+  name: ProjectRoleName;
   permissions: RolePermissions;
 }
 
 export interface RolePermissions {
+  viewProject?: boolean;
   createTask?: boolean;
+  updateTask?: boolean;
+  moveTask?: boolean;
   deleteTask?: boolean;
   manageColumns?: boolean;
   manageMembers?: boolean;
   viewAnalytics?: boolean;
   manageProject?: boolean;
+  manageWorkspace?: boolean;
+  createPage?: boolean;
+  updatePage?: boolean;
+  deletePage?: boolean;
+  manageTemplates?: boolean;
+  manageCalendar?: boolean;
+  manageReminders?: boolean;
+  manageBot?: boolean;
+  exportProject?: boolean;
 }
 
 export interface ProjectMember {
@@ -108,6 +158,7 @@ export interface ProjectMember {
   projectId: number;
   userId: number;
   roleId?: number;
+  adminNotes?: string;
   user?: User;
   role?: Role;
 }
@@ -148,6 +199,8 @@ export interface Task {
   priority: Priority;
   deadlineAt?: string;
   scheduledAt?: string;
+  importanceScore?: TaskImportanceScore;
+  isBlocking?: boolean;
   colorLabel?: string;
   isRepeating: boolean;
   position: number;
@@ -433,3 +486,84 @@ export const PRIORITY_COLOR: Record<Priority, string> = {
   HIGH: '#EF4444',
   CRITICAL: '#7C3AED',
 };
+
+export const TASK_IMPORTANCE_LABEL: Record<TaskImportanceScore, string> = {
+  1: 'Низкая',
+  2: 'Малая',
+  3: 'Обычная',
+  4: 'Важная',
+  5: 'Критичная',
+};
+
+export const DEFAULT_TASK_SIGNIFICANCE_SETTINGS: TaskSignificanceSettings = {
+  priorityBonus: {
+    LOW: 0,
+    MEDIUM: 0,
+    HIGH: 1,
+    CRITICAL: 2,
+  },
+  overdueBonus: 1,
+  longOverdueBonus: 2,
+  longOverdueHours: 72,
+  blockingBonus: 2,
+  attentionThreshold: 6,
+  criticalThreshold: 8,
+};
+
+export function normalizeTaskSignificanceSettings(settings?: Partial<TaskSignificanceSettings> | null): TaskSignificanceSettings {
+  const priorityBonus = {
+    ...DEFAULT_TASK_SIGNIFICANCE_SETTINGS.priorityBonus,
+    ...settings?.priorityBonus,
+  };
+  return {
+    priorityBonus: {
+      LOW: clampWholeNumber(priorityBonus.LOW, 0, 5, 0),
+      MEDIUM: clampWholeNumber(priorityBonus.MEDIUM, 0, 5, 0),
+      HIGH: clampWholeNumber(priorityBonus.HIGH, 0, 5, 1),
+      CRITICAL: clampWholeNumber(priorityBonus.CRITICAL, 0, 5, 2),
+    },
+    overdueBonus: clampWholeNumber(settings?.overdueBonus, 0, 5, 1),
+    longOverdueBonus: clampWholeNumber(settings?.longOverdueBonus, 0, 5, 2),
+    longOverdueHours: clampWholeNumber(settings?.longOverdueHours, 1, 24 * 30, 72),
+    blockingBonus: clampWholeNumber(settings?.blockingBonus, 0, 5, 2),
+    attentionThreshold: clampWholeNumber(settings?.attentionThreshold, 1, 10, 6),
+    criticalThreshold: clampWholeNumber(settings?.criticalThreshold, 1, 10, 8),
+  };
+}
+
+export function normalizeTaskImportanceScore(value?: number | string | null): TaskImportanceScore {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 3;
+  return Math.max(1, Math.min(5, Math.round(parsed))) as TaskImportanceScore;
+}
+
+export function calculateTaskSignificanceScore(
+  task: Pick<Task, 'priority' | 'deadlineAt' | 'importanceScore' | 'isBlocking'>,
+  now = Date.now(),
+  settings?: Partial<TaskSignificanceSettings> | null,
+) {
+  const normalizedSettings = normalizeTaskSignificanceSettings(settings);
+  const importance = normalizeTaskImportanceScore(task.importanceScore);
+  let overdueBonus = 0;
+  if (task.deadlineAt) {
+    const overdueHours = (now - new Date(task.deadlineAt).getTime()) / 3600000;
+    if (overdueHours > normalizedSettings.longOverdueHours) overdueBonus = normalizedSettings.longOverdueBonus;
+    else if (overdueHours > 0) overdueBonus = normalizedSettings.overdueBonus;
+  }
+  const blockingBonus = task.isBlocking ? normalizedSettings.blockingBonus : 0;
+  return Math.max(1, Math.min(10, importance + normalizedSettings.priorityBonus[task.priority] + overdueBonus + blockingBonus));
+}
+
+function clampWholeNumber(value: unknown, min: number, max: number, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+}
+
+export function getTaskSignificanceLabel(score: number) {
+  if (score >= 9) return 'горит';
+  if (score >= 7) return 'критично';
+  if (score >= 5) return 'важно';
+  if (score >= 3) return 'обычно';
+  return 'низко';
+}

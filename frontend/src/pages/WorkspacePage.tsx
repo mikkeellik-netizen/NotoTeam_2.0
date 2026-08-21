@@ -1,20 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { activityApi } from '../api/activity';
 import { useProjectStore } from '../store/projectStore';
-import BoardPage from '../pages/BoardPage';
 import Breadcrumbs from '../components/workspace/Breadcrumbs';
-import CommandPalette from '../components/workspace/CommandPalette';
-import PageEditor from '../components/workspace/PageEditor';
-import PageTree from '../components/workspace/PageTree';
-import QuickCaptureModal from '../components/workspace/QuickCaptureModal';
-import IconPickerModal from '../components/workspace/IconPickerModal';
 import { usePageStore } from '../store/pageStore';
 import type { PageNode, PageNodeType } from '../types';
 import ContextMenu from '../components/common/ContextMenu';
-import { copyPlainText } from '../utils/clipboard';
-import { getInboxReadAt, getInboxUnreadSummary } from '../services/inboxService';
+import { getInboxReadAt, loadInboxUnreadSummary } from '../services/inboxService';
 import { remindersApi } from '../api/reminders';
+import { useAuthStore } from '../store/authStore';
+import { getProjectPermissions } from '../utils/projectPermissions';
+
+const BoardPage = lazy(() => import('../pages/BoardPage'));
+const CommandPalette = lazy(() => import('../components/workspace/CommandPalette'));
+const PageEditor = lazy(() => import('../components/workspace/PageEditor'));
+const PageTree = lazy(() => import('../components/workspace/PageTree'));
+const QuickCaptureModal = lazy(() => import('../components/workspace/QuickCaptureModal'));
+const IconPickerModal = lazy(() => import('../components/workspace/IconPickerModal'));
 
 export default function WorkspacePage() {
   const { projectId, pageId } = useParams<{ projectId: string; pageId?: string }>();
@@ -23,16 +25,24 @@ export default function WorkspacePage() {
   const [treeOpen, setTreeOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [workspaceIconTarget, setWorkspaceIconTarget] = useState<PageNode | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [inboxVersion, setInboxVersion] = useState(0);
   const [dueReminderCount, setDueReminderCount] = useState(0);
+  const [inboxSummary, setInboxSummary] = useState({ count: 0, hasUnread: false });
+  const currentUserId = useAuthStore((state) => state.user?.id);
 
   const { currentProject, fetchProject } = useProjectStore();
   const {
     nodes,
-    blocks,
+    isPartialSpace,
+    loadedBlockPageIds,
+    loadingBlockPageIds,
     selectedPageId,
     loadProjectSpace,
+    ensureFolderChildrenLoaded,
+    ensureNodeLoaded,
+    ensurePageBlocksLoaded,
     selectPage,
     createNode,
     renameNode,
@@ -58,6 +68,11 @@ export default function WorkspacePage() {
   useEffect(() => {
     if (pageId) selectPage(pageId);
   }, [pageId]);
+
+  useEffect(() => {
+    if (!projectId || !pageId || nodes.some((node) => node.id === pageId)) return;
+    void ensureNodeLoaded(projectId, pageId);
+  }, [ensureNodeLoaded, nodes, pageId, projectId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -112,7 +127,25 @@ export default function WorkspacePage() {
   }, [pid]);
 
   useEffect(() => {
-    if (!projectId) return;
+    if (!pid || !currentUserId) {
+      setInboxSummary({ count: 0, hasUnread: false });
+      return;
+    }
+    let cancelled = false;
+    loadInboxUnreadSummary(pid)
+      .then((summary) => {
+        if (!cancelled) setInboxSummary(summary);
+      })
+      .catch(() => {
+        if (!cancelled) setInboxSummary({ count: 0, hasUnread: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId, inboxVersion, pid]);
+
+  useEffect(() => {
+    if (!projectId || !currentUserId) return;
     let mounted = true;
     const loadDueReminders = () => {
       const readAt = getInboxReadAt(Number(projectId));
@@ -124,7 +157,7 @@ export default function WorkspacePage() {
             items.filter(
               (item) =>
                 item.status === 'active' &&
-                item.targetUserId === '1' &&
+                String(item.targetUserId) === String(currentUserId) &&
                 item.nextRunAt &&
                 new Date(item.nextRunAt).getTime() <= Date.now() &&
                 new Date(item.nextRunAt).getTime() > readAt,
@@ -143,7 +176,7 @@ export default function WorkspacePage() {
       window.clearInterval(timer);
       window.removeEventListener('workspace-inbox-read', loadDueReminders);
     };
-  }, [projectId]);
+  }, [currentUserId, projectId]);
 
   // Корневой узел проекта (первая папка/узел в корне) — что показываем на /workspace без pageId.
   const entryNode = useMemo(
@@ -170,14 +203,40 @@ export default function WorkspacePage() {
     if (activePage && activePage.id !== selectedPageId) selectPage(activePage.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage?.id]);
+
+  useEffect(() => {
+    if (!projectId || !activePage) return;
+    if (activePage.type === 'folder') {
+      void ensureFolderChildrenLoaded(projectId, activePage.id);
+      return;
+    }
+    if (activePage.type === 'page') {
+      void ensurePageBlocksLoaded(projectId, activePage.id);
+    }
+  }, [activePage?.id, activePage?.type, ensureFolderChildrenLoaded, ensurePageBlocksLoaded, projectId]);
+
+  const activePageBlocksReady =
+    !activePage ||
+    activePage.type !== 'page' ||
+    !isPartialSpace ||
+    loadedBlockPageIds.has(activePage.id);
+  const activePageBlocksLoading = Boolean(activePage?.id && loadingBlockPageIds.has(activePage.id));
+
   const inboxUnread = useMemo(
     () => {
-      const summary = pid ? getInboxUnreadSummary(pid, currentProject) : { hasUnread: false, count: 0 };
-      const count = summary.count + dueReminderCount;
+      const count = inboxSummary.count + dueReminderCount;
       return { count, hasUnread: count > 0 };
     },
-    [blocks, currentProject, dueReminderCount, inboxVersion, nodes, pid],
+    [dueReminderCount, inboxSummary.count],
   );
+  const permissions = useMemo(
+    () => getProjectPermissions(currentProject, currentUserId),
+    [currentProject, currentUserId],
+  );
+  const canCreatePage = Boolean(permissions.createPage);
+  const canUpdatePage = Boolean(permissions.updatePage);
+  const canDeletePage = Boolean(permissions.deletePage);
+  const canManageTemplates = Boolean(permissions.manageTemplates);
 
   const openPage = (nextPageId: string, options?: { replace?: boolean }) => {
     const nextPage = nodes.find((node) => !node.isDeleted && node.id === nextPageId);
@@ -187,6 +246,12 @@ export default function WorkspacePage() {
       return;
     }
     navigate(`/project/${projectId}/workspace/page/${nextPageId}`, { replace: options?.replace });
+  };
+
+  const openTask = (targetPageId: string | undefined, taskId: string | number) => {
+    if (!targetPageId) return;
+    selectPage(targetPageId);
+    navigate(`/project/${projectId}/workspace/page/${targetPageId}?taskId=${encodeURIComponent(String(taskId))}`);
   };
 
   const handleBack = () => {
@@ -208,11 +273,14 @@ export default function WorkspacePage() {
     <div className="flex h-full bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]">
       {!focusMode && (
       <div className="hidden sm:block w-[290px] border-r border-[var(--tg-theme-secondary-bg-color)]">
-        <PageTree
-          projectId={projectId!}
-          selectedPageId={activePage?.id ?? null}
-          onOpenPage={openPage}
-        />
+        <Suspense fallback={<InlinePageFallback label="Загрузка дерева..." />}>
+          <PageTree
+            projectId={projectId!}
+            selectedPageId={activePage?.id ?? null}
+            onOpenPage={openPage}
+            permissions={permissions}
+          />
+        </Suspense>
       </div>
       )}
 
@@ -220,19 +288,22 @@ export default function WorkspacePage() {
         <div className="fixed inset-0 z-50 sm:hidden">
           <div className="absolute inset-0 bg-black/50" onClick={() => setTreeOpen(false)} />
           <div className="absolute left-0 top-0 bottom-0 w-[86vw] max-w-[330px] shadow-2xl">
-            <PageTree
-              projectId={projectId!}
-              selectedPageId={activePage?.id ?? null}
-              onOpenPage={openPage}
-              onCloseDrawer={() => setTreeOpen(false)}
-            />
+            <Suspense fallback={<InlinePageFallback label="Загрузка дерева..." />}>
+              <PageTree
+                projectId={projectId!}
+                selectedPageId={activePage?.id ?? null}
+                onOpenPage={openPage}
+                onCloseDrawer={() => setTreeOpen(false)}
+                permissions={permissions}
+              />
+            </Suspense>
           </div>
         </div>
       )}
 
       <section className="flex-1 min-w-0 flex flex-col">
         {!focusMode && (
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--tg-theme-secondary-bg-color)]">
+        <div className="flex items-center gap-2 overflow-hidden px-4 py-2 border-b border-[var(--tg-theme-secondary-bg-color)]">
           <button
             onClick={() => setTreeOpen(true)}
             className="sm:hidden w-8 h-8 flex items-center justify-center text-[var(--tg-theme-link-color)]"
@@ -247,12 +318,28 @@ export default function WorkspacePage() {
           >
             ←
           </button>
-          <div className="min-w-0">
-            <p className="text-xs text-[var(--tg-theme-hint-color)] truncate">
+          <div className="min-w-0 flex-1 overflow-hidden leading-tight">
+            <p className="truncate text-xs leading-4 text-[var(--tg-theme-hint-color)]">
               {currentProject?.title ?? 'Проект'}
             </p>
-            <h1 className="text-base font-semibold truncate">
-              {activePage ? `${activePage.icon} ${activePage.title}` : 'Рабочее пространство'}
+            <h1 className="flex h-6 min-w-0 items-center gap-1 overflow-hidden text-base font-semibold leading-6">
+              {activePage ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => canUpdatePage && setWorkspaceIconTarget(activePage)}
+                    disabled={!canUpdatePage}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] text-base active:scale-[0.95] disabled:opacity-70"
+                    aria-label="Сменить иконку"
+                    title="Сменить иконку"
+                  >
+                    {activePage.icon}
+                  </button>
+                  <span className="min-w-0 truncate">{activePage.title}</span>
+                </>
+              ) : (
+                <span className="min-w-0 truncate">Рабочее пространство</span>
+              )}
             </h1>
             <Breadcrumbs activePage={activePage} nodes={nodes} onOpenPage={openPage} />
           </div>
@@ -356,52 +443,88 @@ export default function WorkspacePage() {
               Выбери страницу
             </div>
           ) : activePage.type === 'kanban' ? (
-            <BoardPage embedded boardPageId={activePage.id} />
+            <Suspense fallback={<InlinePageFallback label="Загрузка доски..." />}>
+              <BoardPage embedded boardPageId={activePage.id} />
+            </Suspense>
           ) : activePage.type === 'folder' ? (
             <FolderView
               folder={activePage}
               nodes={nodes}
               projectId={projectId!}
               onCreate={(type) => {
+                if (!canCreatePage) return;
                 const node = createNode({ projectId: projectId!, parentId: activePage.id, type });
                 openPage(node.id);
               }}
-              onRename={(title) => renameNode(activePage.id, title)}
-              onIconChange={(nodeId, icon) => updateNodeIcon(nodeId, icon)}
+              onRename={(title) => canUpdatePage && renameNode(activePage.id, title)}
+              onRenameNode={(nodeId, title) => canUpdatePage && renameNode(nodeId, title)}
+              onIconChange={(nodeId, icon) => canUpdatePage && updateNodeIcon(nodeId, icon)}
               onDuplicate={duplicateNode}
               onMove={moveNode}
               onOpenPage={openPage}
+              canCreate={canCreatePage}
+              canUpdate={canUpdatePage}
+              canDelete={canDeletePage}
             />
+          ) : !activePageBlocksReady ? (
+            <InlinePageFallback label={activePageBlocksLoading ? 'Загрузка блоков...' : 'Подготовка страницы...'} />
           ) : (
-            <PageEditor
-              page={activePage}
-              projectId={projectId!}
-              members={currentProject?.members ?? []}
-              onOpenPage={openPage}
-            />
+            <Suspense fallback={<InlinePageFallback label="Загрузка редактора..." />}>
+              <PageEditor
+                page={activePage}
+                projectId={projectId!}
+                members={currentProject?.members ?? []}
+                onOpenPage={openPage}
+                canEdit={canUpdatePage}
+              />
+            </Suspense>
           )}
         </div>
       </section>
 
+      {workspaceIconTarget && (
+        <Suspense fallback={null}>
+          <IconPickerModal
+            node={workspaceIconTarget}
+            onSelect={(icon) => updateNodeIcon(workspaceIconTarget.id, icon)}
+            onClose={() => setWorkspaceIconTarget(null)}
+          />
+        </Suspense>
+      )}
+
       {commandOpen && (
-        <CommandPalette
-          projectId={projectId!}
-          nodes={nodes}
-          blocks={blocks}
-          onOpenPage={openPage}
-          onClose={() => setCommandOpen(false)}
-          onQuickCapture={() => setQuickCaptureOpen(true)}
-        />
+        <Suspense fallback={null}>
+          <CommandPalette
+            projectId={projectId!}
+            nodes={nodes}
+            onOpenPage={openPage}
+            onOpenTask={openTask}
+            onClose={() => setCommandOpen(false)}
+            onQuickCapture={() => setQuickCaptureOpen(true)}
+            canCreatePage={canCreatePage}
+            canManageTemplates={canManageTemplates}
+          />
+        </Suspense>
       )}
 
       {quickCaptureOpen && (
-        <QuickCaptureModal
-          projectId={projectId!}
-          onOpenPage={openPage}
-          onClose={() => setQuickCaptureOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <QuickCaptureModal
+            projectId={projectId!}
+            onOpenPage={openPage}
+            onClose={() => setQuickCaptureOpen(false)}
+          />
+        </Suspense>
       )}
 
+    </div>
+  );
+}
+
+function InlinePageFallback({ label }: { label: string }) {
+  return (
+    <div className="flex h-full items-center justify-center text-sm text-[var(--tg-theme-hint-color)]">
+      {label}
     </div>
   );
 }
@@ -412,27 +535,42 @@ function FolderView({
   projectId,
   onCreate,
   onRename,
+  onRenameNode,
   onIconChange,
   onDuplicate,
   onMove,
   onOpenPage,
+  canCreate,
+  canUpdate,
+  canDelete,
 }: {
   folder: PageNode;
   nodes: PageNode[];
   projectId: string;
   onCreate: (type: PageNodeType) => void;
   onRename: (title: string) => void;
+  onRenameNode: (nodeId: string, title: string) => void;
   onIconChange: (nodeId: string, icon: string) => void;
   onDuplicate: (nodeId: string) => PageNode | null;
   onMove: (nodeId: string, parentId: string | null, order: number) => void;
   onOpenPage: (pageId: string) => void;
+  canCreate: boolean;
+  canUpdate: boolean;
+  canDelete: boolean;
 }) {
   const [titleDraft, setTitleDraft] = useState(folder.title);
   const [contextNode, setContextNode] = useState<{ node: PageNode; x: number; y: number } | null>(null);
   const [nodeToMove, setNodeToMove] = useState<PageNode | null>(null);
   const [nodeToDelete, setNodeToDelete] = useState<PageNode | null>(null);
   const [iconTarget, setIconTarget] = useState<PageNode | null>(null);
+  const [renameTarget, setRenameTarget] = useState<PageNode | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
   const longPressTimerRef = useRef<number | null>(null);
+  const {
+    loadedTreeParentIds,
+    loadingTreeParentIds,
+    ensureFolderChildrenLoaded,
+  } = usePageStore();
   const children = useMemo(
     () =>
       nodes
@@ -449,7 +587,18 @@ function FolderView({
     setTitleDraft(folder.title);
   }, [folder.id, folder.title]);
 
+  useEffect(() => {
+    void ensureFolderChildrenLoaded(projectId, folder.id);
+  }, [ensureFolderChildrenLoaded, folder.id, projectId]);
+
+  const isLoadingChildren = loadingTreeParentIds.has(folder.id);
+  const hasLoadedChildren = loadedTreeParentIds.has(folder.id);
+
   const commitTitle = () => {
+    if (!canUpdate) {
+      setTitleDraft(folder.title);
+      return;
+    }
     const nextTitle = titleDraft.trim();
     if (!nextTitle) {
       setTitleDraft(folder.title);
@@ -472,6 +621,21 @@ function FolderView({
     setContextNode({ node, x, y });
   };
 
+  const openRenameModal = (node: PageNode) => {
+    setRenameTarget(node);
+    setRenameDraft(node.title);
+  };
+
+  const commitNodeRename = () => {
+    if (!renameTarget) return;
+    const nextTitle = renameDraft.trim();
+    if (nextTitle && nextTitle !== renameTarget.title) {
+      onRenameNode(renameTarget.id, nextTitle);
+    }
+    setRenameTarget(null);
+    setRenameDraft('');
+  };
+
   const startNodeLongPress = (node: PageNode, x: number, y: number) => {
     if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = window.setTimeout(() => openNodeMenu(node, x, y), 600);
@@ -489,8 +653,9 @@ function FolderView({
         <div className="mb-5">
           <button
             type="button"
-            onClick={() => setIconTarget(folder)}
-            className="mb-3 flex h-14 w-14 items-center justify-center rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] text-3xl active:scale-[0.96]"
+            onClick={() => canUpdate && setIconTarget(folder)}
+            disabled={!canUpdate}
+            className="mb-3 flex h-14 w-14 items-center justify-center rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] text-3xl active:scale-[0.96] disabled:opacity-80"
             aria-label="Сменить иконку"
           >
             {folder.icon}
@@ -499,6 +664,7 @@ function FolderView({
             value={titleDraft}
             onChange={(event) => setTitleDraft(event.target.value)}
             onBlur={commitTitle}
+            readOnly={!canUpdate}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
@@ -517,6 +683,7 @@ function FolderView({
           </p>
         </div>
 
+        {canCreate && (
         <div className="mb-4 grid grid-cols-3 gap-2">
           <button
             onClick={() => onCreate('page')}
@@ -537,55 +704,69 @@ function FolderView({
             + Kanban
           </button>
         </div>
+        )}
 
-        {children.length === 0 ? (
+        {isLoadingChildren && !hasLoadedChildren ? (
+          <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-8 text-center text-sm text-[var(--tg-theme-hint-color)]">
+            Загрузка вложений...
+          </div>
+        ) : children.length === 0 ? (
           <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-8 text-center text-sm text-[var(--tg-theme-hint-color)]">
             Создай страницу, папку или Kanban-доску внутри этой папки.
           </div>
         ) : (
           <div className="space-y-2">
             {children.map((child) => (
-              <button
+              <div
                 key={child.id}
-                onClick={() => onOpenPage(child.id)}
                 onContextMenu={(event) => {
+                  if (!canUpdate && !canDelete && !canCreate) return;
                   event.preventDefault();
                   openNodeMenu(child, event.clientX, event.clientY);
                 }}
-                onPointerDown={(event) => startNodeLongPress(child, event.clientX, event.clientY)}
+                onPointerDown={(event) => {
+                  if (canUpdate || canDelete || canCreate) startNodeLongPress(child, event.clientX, event.clientY);
+                }}
                 onPointerUp={clearNodeLongPress}
                 onPointerLeave={clearNodeLongPress}
                 onPointerCancel={clearNodeLongPress}
                 className="flex w-full items-center gap-3 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-left active:scale-[0.99]"
               >
-                <span
-                  role="button"
-                  tabIndex={0}
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
                   onClick={(event) => {
                     event.stopPropagation();
-                    setIconTarget(child);
+                    if (canUpdate) setIconTarget(child);
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter' && event.key !== ' ') return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setIconTarget(child);
-                  }}
-                  className="rounded-[8px] px-1 text-xl active:scale-[0.95]"
+                  disabled={!canUpdate}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] bg-[var(--tg-theme-bg-color)] text-xl active:scale-[0.95] disabled:opacity-80"
                   aria-label="Сменить иконку"
+                  title="Сменить иконку"
                 >
                   {child.icon}
-                </span>
-                <span className="min-w-0 flex-1">
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenPage(child.id)}
+                  className="min-w-0 flex-1 text-left"
+                >
                   <span className="block truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">
                     {child.title}
                   </span>
                   <span className="block text-xs text-[var(--tg-theme-hint-color)]">
                     {child.type === 'folder' ? 'Папка' : child.type === 'kanban' ? 'Kanban-доска' : 'Страница'}
                   </span>
-                </span>
-                <span className="text-[var(--tg-theme-hint-color)]">›</span>
-              </button>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenPage(child.id)}
+                  className="h-8 w-8 shrink-0 text-[var(--tg-theme-hint-color)]"
+                  aria-label="Открыть"
+                >
+                  ›
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -597,23 +778,66 @@ function FolderView({
           y={contextNode.y}
           onClose={() => setContextNode(null)}
           items={[
-            { label: 'Сменить иконку', onClick: () => setIconTarget(contextNode.node) },
-            { label: 'Открыть', onClick: () => onOpenPage(contextNode.node.id) },
-            {
-              label: 'Копировать название',
-              onClick: () => copyPlainText(`${contextNode.node.icon} ${contextNode.node.title}`),
-            },
+            ...(canUpdate ? [
+              { label: 'Сменить иконку', onClick: () => setIconTarget(contextNode.node) },
+              { label: 'Редактировать название', onClick: () => openRenameModal(contextNode.node) },
+            ] : []),
             {
               label: 'Дублировать',
+              disabled: !canCreate,
               onClick: () => {
+                if (!canCreate) return;
                 const node = onDuplicate(contextNode.node.id);
                 if (node && node.type !== 'folder') onOpenPage(node.id);
               },
             },
-            { label: 'Переместить...', onClick: () => setNodeToMove(contextNode.node) },
-            { label: 'Переместить в корзину', danger: true, onClick: () => setNodeToDelete(contextNode.node) },
+            { label: 'Переместить...', disabled: !canUpdate, onClick: () => setNodeToMove(contextNode.node) },
+            { label: 'Переместить в корзину', danger: true, disabled: !canDelete, onClick: () => setNodeToDelete(contextNode.node) },
           ]}
         />
+      )}
+      {renameTarget && (
+        <div className="fixed inset-0 z-[88] flex items-end bg-black/50" onClick={() => setRenameTarget(null)}>
+          <div
+            className="w-full rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="mb-2 text-lg font-bold text-[var(--tg-theme-text-color)]">Редактировать название</h3>
+            <input
+              value={renameDraft}
+              onChange={(event) => setRenameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  commitNodeRename();
+                }
+                if (event.key === 'Escape') {
+                  setRenameTarget(null);
+                  setRenameDraft('');
+                }
+              }}
+              autoFocus
+              className="mb-4 w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-[var(--tg-theme-text-color)] outline-none"
+            />
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setRenameTarget(null);
+                  setRenameDraft('');
+                }}
+                className="flex-1 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3 font-medium text-[var(--tg-theme-text-color)]"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={commitNodeRename}
+                className="flex-1 rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)]"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {nodeToDelete && (
         <div className="fixed inset-0 z-[88] flex items-end bg-black/50" onClick={() => setNodeToDelete(null)}>
@@ -700,11 +924,13 @@ function FolderView({
         </div>
       )}
       {iconTarget && (
-        <IconPickerModal
-          node={iconTarget}
-          onSelect={(icon) => onIconChange(iconTarget.id, icon)}
-          onClose={() => setIconTarget(null)}
-        />
+        <Suspense fallback={null}>
+          <IconPickerModal
+            node={iconTarget}
+            onSelect={(icon) => onIconChange(iconTarget.id, icon)}
+            onClose={() => setIconTarget(null)}
+          />
+        </Suspense>
       )}
     </div>
   );

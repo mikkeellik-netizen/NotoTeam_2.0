@@ -1,16 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
+import { searchApi, type WorkspaceSearchResult } from '../../api/search';
 import { templatesApi } from '../../api/templates';
-import type { Block, PageNode, Template } from '../../types';
+import type { PageNode, Template } from '../../types';
 import { usePageStore } from '../../store/pageStore';
 import { PAGE_TEMPLATES } from './templates';
 
 interface Props {
   projectId: string;
   nodes: PageNode[];
-  blocks: Block[];
   onOpenPage: (pageId: string) => void;
+  onOpenTask?: (pageId: string | undefined, taskId: string | number) => void;
   onClose: () => void;
   onQuickCapture: () => void;
+  canCreatePage?: boolean;
+  canManageTemplates?: boolean;
 }
 
 interface CommandItem {
@@ -23,13 +26,17 @@ interface CommandItem {
 export default function CommandPalette({
   projectId,
   nodes,
-  blocks,
   onOpenPage,
+  onOpenTask,
   onClose,
   onQuickCapture,
+  canCreatePage = true,
+  canManageTemplates = true,
 }: Props) {
   const [query, setQuery] = useState('');
   const [customTemplates, setCustomTemplates] = useState<Template[]>([]);
+  const [searchResults, setSearchResults] = useState<WorkspaceSearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   const { createNode, createPageFromTemplate, ensureDailyNote, selectedPageId } = usePageStore();
   const normalized = query.toLowerCase().trim();
 
@@ -51,32 +58,47 @@ export default function CommandPalette({
     };
   }, [projectId]);
 
+  useEffect(() => {
+    if (!normalized) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsSearching(true);
+    const timer = window.setTimeout(() => {
+      searchApi
+        .list(projectId, normalized, 16)
+        .then((items) => {
+          if (!cancelled) setSearchResults(items);
+        })
+        .catch(() => {
+          if (!cancelled) setSearchResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setIsSearching(false);
+        });
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [normalized, projectId]);
+
   const results = useMemo<CommandItem[]>(() => {
     if (!normalized) return [];
 
-    const pageResults = nodes
-      .filter((node) => `${node.title} ${node.icon}`.toLowerCase().includes(normalized))
-      .map((node) => ({
-        id: `page-${node.id}`,
-        title: `${node.icon} ${node.title}`,
-        subtitle: node.type === 'kanban' ? 'Kanban-доска' : node.type === 'folder' ? 'Папка' : 'Страница',
-        action: () => onOpenPage(node.id),
-      }));
+    const remoteResults = searchResults.map((result) => ({
+      id: `search-${result.kind}-${String(result.id)}`,
+      title: `${result.icon ? `${result.icon} ` : ''}${result.title}`,
+      subtitle: result.subtitle || resultKindLabel(result.kind),
+      action: () => openSearchResult(result, onOpenPage, onOpenTask),
+    }));
 
-    const blockResults = blocks
-      .filter((block) => JSON.stringify(block.content).toLowerCase().includes(normalized))
-      .slice(0, 8)
-      .map((block) => {
-        const page = nodes.find((node) => node.id === block.pageId);
-        return {
-          id: `block-${block.id}`,
-          title: `Текст: ${extractBlockText(block.content).slice(0, 64) || block.type}`,
-          subtitle: page ? `${page.icon} ${page.title}` : 'Блок',
-          action: () => page && onOpenPage(page.id),
-        };
-      });
-
-    const templateResults = allTemplates
+    const templateResults = canCreatePage
+      ? allTemplates
       .filter((template) =>
         `${template.title} ${template.icon} ${template.description ?? ''}`.toLowerCase().includes(normalized),
       )
@@ -89,17 +111,28 @@ export default function CommandPalette({
           const node = createPageFromTemplate(projectId, activeParentId, template);
           onOpenPage(node.id);
         },
-      }));
+      }))
+      : [];
 
-    return [...pageResults, ...blockResults, ...templateResults].slice(0, 16);
-  }, [activeParentId, allTemplates, blocks, createPageFromTemplate, nodes, normalized, onOpenPage, projectId]);
+    return [...remoteResults, ...templateResults].slice(0, 16);
+  }, [
+    activeParentId,
+    allTemplates,
+    createPageFromTemplate,
+    normalized,
+    onOpenPage,
+    onOpenTask,
+    projectId,
+    searchResults,
+    canCreatePage,
+  ]);
 
   const runAction = (action: () => void) => {
     action();
     onClose();
   };
 
-  const actions: CommandItem[] = [
+  const createActions: CommandItem[] = canCreatePage ? [
     {
       id: 'new-page',
       title: '📝 Создать страницу',
@@ -139,7 +172,8 @@ export default function CommandPalette({
         onOpenPage(node.id);
       },
     })),
-  ];
+  ] : [];
+  const actions: CommandItem[] = canManageTemplates ? createActions : createActions.filter((item) => !item.id.startsWith('template-'));
 
   const visible = normalized ? results : actions;
 
@@ -158,7 +192,9 @@ export default function CommandPalette({
         />
         <div className="max-h-[62vh] overflow-y-auto p-2">
           {visible.length === 0 ? (
-            <div className="px-3 py-4 text-sm text-[var(--tg-theme-hint-color)]">Ничего не найдено</div>
+            <div className="px-3 py-4 text-sm text-[var(--tg-theme-hint-color)]">
+              {isSearching ? 'Ищем...' : 'Ничего не найдено'}
+            </div>
           ) : (
             visible.map((item) => (
               <button
@@ -177,15 +213,35 @@ export default function CommandPalette({
   );
 }
 
+function openSearchResult(
+  result: WorkspaceSearchResult,
+  onOpenPage: (pageId: string) => void,
+  onOpenTask?: (pageId: string | undefined, taskId: string | number) => void,
+) {
+  const pageId = result.pageId ?? (isPageLike(result.kind) ? String(result.id) : undefined);
+  if ((result.kind === 'task' || result.kind === 'subtask') && result.taskId && onOpenTask) {
+    onOpenTask(pageId, result.taskId);
+    return;
+  }
+  if (pageId) onOpenPage(pageId);
+}
+
+function isPageLike(kind: WorkspaceSearchResult['kind']) {
+  return kind === 'page' || kind === 'folder' || kind === 'kanban';
+}
+
+function resultKindLabel(kind: WorkspaceSearchResult['kind']) {
+  if (kind === 'folder') return 'Папка';
+  if (kind === 'kanban') return 'Kanban-доска';
+  if (kind === 'block') return 'Блок';
+  if (kind === 'task') return 'Задача';
+  if (kind === 'subtask') return 'Подзадача';
+  if (kind === 'member') return 'Участник';
+  return 'Страница';
+}
+
 function getActiveParentId(nodes: PageNode[], selectedPageId: string | null) {
   const activeNode = nodes.find((node) => node.id === selectedPageId);
   if (!activeNode) return null;
   return activeNode.type === 'folder' ? activeNode.id : activeNode.parentId ?? null;
-}
-
-function extractBlockText(content: any) {
-  if (!content) return '';
-  if (typeof content.text === 'string') return content.text;
-  if (typeof content.title === 'string') return content.title;
-  return '';
 }

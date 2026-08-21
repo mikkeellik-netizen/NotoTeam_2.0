@@ -1,12 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-
-// Та же формула, что в backend-api, чтобы обе стороны получили одинаковый токен.
-function deriveInternalToken(botToken: string): string {
-  return crypto.createHash("sha256").update(`workspace-internal:${botToken}`).digest("hex");
-}
-
 export interface BotConfig {
   botToken: string;
   webAppUrl: string;
@@ -30,9 +23,10 @@ export function loadConfig(env = process.env): BotConfig {
     throw new Error("WORKSPACE_API_URL is required so the bot uses the same backend data as the Mini App");
   }
 
-  // Всегда выводим из BOT_TOKEN той же формулой, что и backend-api,
-  // игнорируя отдельную переменную INTERNAL_API_TOKEN (нестабильна в Railway).
-  const internalApiToken = deriveInternalToken(botToken);
+  const internalApiToken = env.INTERNAL_API_TOKEN?.trim();
+  if (!internalApiToken) {
+    throw new Error("INTERNAL_API_TOKEN is required and must match backend-api INTERNAL_API_TOKEN");
+  }
 
   // Render автоматически задаёт RENDER_EXTERNAL_URL — публичный https-адрес сервиса.
   // Можно переопределить через WEBHOOK_PUBLIC_URL, если хостинг другой.

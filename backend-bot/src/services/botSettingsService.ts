@@ -1,6 +1,6 @@
 import type { WorkspaceRepository } from "../ports.js";
 import type { BotReportSettings, ProjectBotSettings } from "../types.js";
-import { defaultBotSettings } from "../defaultSettings.js";
+import { mergeBotSettings } from "../defaultSettings.js";
 
 export class BotSettingsService {
   constructor(private repo: WorkspaceRepository) {}
@@ -8,7 +8,7 @@ export class BotSettingsService {
   async getSettings(projectId: string) {
     const project = await this.repo.getProject(projectId);
     if (!project) throw new Error("Project not found");
-    return project.botSettings ?? defaultBotSettings;
+    return mergeBotSettings(project.botSettings);
   }
 
   async updateSettings(projectId: string, patch: Partial<ProjectBotSettings>) {

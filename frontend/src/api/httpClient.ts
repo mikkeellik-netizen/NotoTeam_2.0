@@ -2,7 +2,6 @@ const API_URL = (import.meta.env.VITE_WORKSPACE_API_URL as string | undefined)?.
 
 export const isWorkspaceApiConfigured = Boolean(API_URL);
 export const workspaceApiUrl = API_URL ?? '';
-export const useWorkspaceBackend = true;
 
 const AUTH_TOKEN_STORAGE_KEY = 'workspaceAuthToken';
 
@@ -42,7 +41,7 @@ export function isInsideTelegram(): boolean {
 //     аккаунта и вызвать утечку данных между пользователями).
 // В обычном браузере:
 //   - используем сохранённый session token (Bearer).
-function getEffectiveAuthHeader(): string | undefined {
+export function getEffectiveAuthHeader(): string | undefined {
   if (isInsideTelegram()) {
     const initData = window.Telegram?.WebApp?.initData;
     return initData && initData.length > 0 ? `tma ${initData}` : undefined;

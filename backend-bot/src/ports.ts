@@ -2,6 +2,8 @@ import type {
   Column,
   NotificationEvent,
   PageBlock,
+  PageNode,
+  PageNodeInput,
   ParsedTask,
   Project,
   ProjectBotSettings,
@@ -13,6 +15,20 @@ import type {
   BotUserPreferences,
   CalendarEvent,
 } from "./types.js";
+
+export interface BotOutboxAttachment {
+  fileName: string;
+  content: string;
+  mimeType?: string;
+  encoding?: "utf8" | "base64";
+}
+
+export interface BotOutboxMessage {
+  id: string;
+  telegramId: string;
+  text: string;
+  attachment?: BotOutboxAttachment;
+}
 
 export interface WorkspaceRepository {
   findOrCreateTelegramUser(input: {
@@ -39,13 +55,15 @@ export interface WorkspaceRepository {
   createTask(input: ParsedTask & { projectId: string; pageId?: string; creatorId: string; assigneeId?: string }): Promise<Task>;
   updateProjectBotSettings(projectId: string, settings: ProjectBotSettings): Promise<ProjectBotSettings>;
   getProjectBlocks(projectId: string): Promise<PageBlock[]>;
+  getProjectNodes(projectId: string): Promise<PageNode[]>;
+  createProjectNode(projectId: string, input: PageNodeInput): Promise<PageNode>;
   getProjectSpace(projectId: string): Promise<WorkspaceSpace>;
   saveProjectSpace(projectId: string, space: WorkspaceSpace): Promise<WorkspaceSpace>;
   createReminder(projectId: string, reminder: ReminderInput): Promise<Reminder>;
   findDueReminders(nowIso: string): Promise<Reminder[]>;
   markReminderSent(reminderId: string): Promise<Reminder>;
 
-  fetchPendingOutbox(): Promise<Array<{ id: string; telegramId: string; text: string }>>;
+  fetchPendingOutbox(): Promise<BotOutboxMessage[]>;
   markOutboxSent(id: string): Promise<void>;
 
   createNotification(event: Omit<NotificationEvent, "id" | "status">): Promise<NotificationEvent>;
@@ -56,5 +74,5 @@ export interface WorkspaceRepository {
 }
 
 export interface BotMessenger {
-  sendMessage(telegramId: string, text: string, options?: { webAppUrl?: string }): Promise<void>;
+  sendMessage(telegramId: string, text: string, options?: { webAppUrl?: string; attachment?: BotOutboxAttachment }): Promise<void>;
 }

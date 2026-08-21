@@ -1,7 +1,7 @@
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { Task } from '../../types';
-import { PRIORITY_COLOR, getDeadlineZone } from '../../types';
+import { PRIORITY_COLOR, calculateTaskSignificanceScore, getDeadlineZone } from '../../types';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 
@@ -27,10 +27,13 @@ export default function TaskCard({ task, onClick }: Props) {
   const completedSubs = subtasks.filter((s) => s.isCompleted).length;
   const tags = task.tags ?? [];
   const priorityColor = PRIORITY_COLOR[task.priority];
+  const significanceScore = calculateTaskSignificanceScore(task);
+  const showSignificance = zone === 'red' || significanceScore >= 7;
 
   return (
     <div
       ref={setNodeRef}
+      data-kanban-task-id={task.id}
       style={style}
       {...attributes}
       {...listeners}
@@ -83,6 +86,12 @@ export default function TaskCard({ task, onClick }: Props) {
             style={{ color: zone !== 'none' ? zoneColor : 'var(--tg-theme-hint-color)' }}
           >
             {format(new Date(task.deadlineAt), 'd MMM', { locale: ru })}
+          </span>
+        )}
+
+        {showSignificance && (
+          <span className="rounded-full bg-red-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-red-400">
+            {significanceScore}/10
           </span>
         )}
 

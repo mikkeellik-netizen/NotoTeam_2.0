@@ -85,3 +85,11 @@ select {
 .overflow-x-auto::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--tg-theme-button-color) 75%, transparent);
 }
+
+.workspace-breadcrumbs {
+  scrollbar-width: none;
+}
+
+.workspace-breadcrumbs::-webkit-scrollbar {
+  display: none;
+}

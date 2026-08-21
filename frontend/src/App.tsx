@@ -1,21 +1,23 @@
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { useAuthStore } from './store/authStore';
 import { useSettingsStore } from './store/settingsStore';
-import ProjectsPage from './pages/ProjectsPage';
-import BoardPage from './pages/BoardPage';
-import WorkspacePage from './pages/WorkspacePage';
-import MyTasksPage from './pages/MyTasksPage';
-import InboxPage from './pages/InboxPage';
-import NotificationsPage from './pages/NotificationsPage';
-import RemindersPage from './pages/RemindersPage';
-import CalendarPage from './pages/CalendarPage';
-import MembersPage from './pages/MembersPage';
-import SettingsPage from './pages/SettingsPage';
-import ArchivePage from './pages/ArchivePage';
-import SystemAdminPage from './pages/SystemAdminPage';
 import LoginPage from './pages/LoginPage';
 import { isWorkspaceApiConfigured } from './api/httpClient';
+import ProjectAccessGate from './components/common/ProjectAccessGate';
+
+const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
+const BoardPage = lazy(() => import('./pages/BoardPage'));
+const WorkspacePage = lazy(() => import('./pages/WorkspacePage'));
+const MyTasksPage = lazy(() => import('./pages/MyTasksPage'));
+const InboxPage = lazy(() => import('./pages/InboxPage'));
+const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
+const RemindersPage = lazy(() => import('./pages/RemindersPage'));
+const CalendarPage = lazy(() => import('./pages/CalendarPage'));
+const MembersPage = lazy(() => import('./pages/MembersPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const ArchivePage = lazy(() => import('./pages/ArchivePage'));
+const SystemAdminPage = lazy(() => import('./pages/SystemAdminPage'));
 
 export default function App() {
   const { init, isAuthed, isLoading, error, inTelegram } = useAuthStore();
@@ -92,24 +94,37 @@ export default function App() {
   return (
     <BrowserRouter>
       <TelegramBackButton />
-      <Routes>
-        <Route path="/" element={<ProjectsPage />} />
-        <Route path="/board/:projectId" element={<BoardPage />} />
-        <Route path="/project/:projectId/workspace" element={<WorkspacePage />} />
-        <Route path="/project/:projectId/workspace/page/:pageId" element={<WorkspacePage />} />
-        <Route path="/project/:projectId/inbox" element={<InboxPage />} />
-        <Route path="/project/:projectId/notifications" element={<NotificationsPage />} />
-        <Route path="/project/:projectId/reminders" element={<RemindersPage />} />
-        <Route path="/project/:projectId/calendar" element={<CalendarPage />} />
-        <Route path="/my-tasks" element={<MyTasksPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route path="/system-admin" element={<SystemAdminPage />} />
-        <Route path="/project/:projectId/members" element={<MembersPage />} />
-        <Route path="/project/:projectId/settings" element={<SettingsPage />} />
-        <Route path="/project/:projectId/archive" element={<ArchivePage />} />
-        <Route path="*" element={<Navigate to="/" />} />
-      </Routes>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/" element={<ProjectsPage />} />
+          <Route path="/board/:projectId" element={<ProjectAccessGate><BoardPage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/workspace" element={<ProjectAccessGate><WorkspacePage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/workspace/page/:pageId" element={<ProjectAccessGate><WorkspacePage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/inbox" element={<ProjectAccessGate><InboxPage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/notifications" element={<ProjectAccessGate><NotificationsPage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/reminders" element={<ProjectAccessGate><RemindersPage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/calendar" element={<ProjectAccessGate><CalendarPage /></ProjectAccessGate>} />
+          <Route path="/my-tasks" element={<MyTasksPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/system-admin" element={<SystemAdminPage />} />
+          <Route path="/project/:projectId/members" element={<ProjectAccessGate><MembersPage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/settings" element={<ProjectAccessGate><SettingsPage /></ProjectAccessGate>} />
+          <Route path="/project/:projectId/archive" element={<ProjectAccessGate><ArchivePage /></ProjectAccessGate>} />
+          <Route path="*" element={<Navigate to="/" />} />
+        </Routes>
+      </Suspense>
     </BrowserRouter>
+  );
+}
+
+function RouteFallback() {
+  return (
+    <div className="flex h-full items-center justify-center">
+      <div className="text-center">
+        <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--tg-theme-button-color)] border-t-transparent" />
+        <p className="text-sm text-[var(--tg-theme-hint-color)]">Загрузка...</p>
+      </div>
+    </div>
   );
 }
 

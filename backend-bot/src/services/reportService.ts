@@ -1,5 +1,6 @@
 import type { BotMessenger, WorkspaceRepository } from "../ports.js";
 import type { Column, Project, Task } from "../types.js";
+import { mergeBotSettings } from "../defaultSettings.js";
 import { escapeMarkdown, formatMskDate } from "./formatters.js";
 
 export class ReportService {
@@ -9,7 +10,7 @@ export class ReportService {
   ) {}
 
   async sendWeeklyReport(project: Project) {
-    const settings = project.botSettings.reports.weekly;
+    const settings = mergeBotSettings(project.botSettings).reports.weekly;
     if (!settings.enabled) return;
 
     const [tasks, columns] = await Promise.all([this.repo.getTasksByProject(project.id), this.repo.getProjectColumns(project.id)]);
@@ -37,7 +38,7 @@ export class ReportService {
   }
 
   async sendOverdueReport(project: Project) {
-    const settings = project.botSettings.reports.overdue;
+    const settings = mergeBotSettings(project.botSettings).reports.overdue;
     if (!settings.enabled) return;
 
     const [tasks, columns] = await Promise.all([
@@ -175,7 +176,15 @@ function percent(value: number, total: number) {
 }
 
 function userName(user: { firstName?: string; lastName?: string; username?: string } | undefined, fallback?: string) {
-  return [user?.firstName, user?.lastName].filter(Boolean).join(" ") || (user?.username ? `@${user.username}` : fallback === "none" ? "Без исполнителя" : fallback ?? "Не назначен");
+  const displayName = [user?.firstName, user?.lastName].filter((part) => part && !isBrokenText(part)).join(" ").trim();
+  if (displayName) return displayName;
+  if (user?.username) return `@${user.username}`;
+  return fallback === "none" ? "Без исполнителя" : fallback ?? "Не назначен";
+}
+
+function isBrokenText(value: string) {
+  const text = value.trim();
+  return !text || /^[?\s]+$/.test(text) || /Р[Ѐ-ӿ]/.test(text);
 }
 
 function sameBoard(itemPageId: string | undefined, pageId: string | undefined) {

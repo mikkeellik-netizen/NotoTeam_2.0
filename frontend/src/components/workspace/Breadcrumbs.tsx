@@ -17,13 +17,13 @@ export default function Breadcrumbs({ activePage, nodes, onOpenPage }: Props) {
   }
 
   return (
-    <nav className="flex items-center gap-1 overflow-x-auto text-xs text-[var(--tg-theme-hint-color)]">
+    <nav className="workspace-breadcrumbs flex h-4 min-w-0 items-center gap-1 overflow-x-auto whitespace-nowrap text-xs leading-4 text-[var(--tg-theme-hint-color)]">
       {chain.map((node, index) => (
-        <span key={node.id} className="flex items-center gap-1 shrink-0">
+        <span key={node.id} className="flex h-4 shrink-0 items-center gap-1">
           {index > 0 && <span>/</span>}
           <button
             onClick={() => onOpenPage(node.id)}
-            className="max-w-[140px] truncate text-[var(--tg-theme-link-color)]"
+            className="block max-w-[140px] truncate leading-4 text-[var(--tg-theme-link-color)]"
           >
             {node.title}
           </button>

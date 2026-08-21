@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import type { Column, Priority, ProjectMember, Task } from '../../types';
+import type { Column, Priority, ProjectMember, Task, TaskImportanceScore } from '../../types';
+import { TASK_IMPORTANCE_LABEL } from '../../types';
 
 interface Props {
   columns: Column[];
@@ -22,6 +23,8 @@ export default function CreateTaskModal({
   const [description, setDescription] = useState('');
   const [columnId, setColumnId] = useState(defaultColumnId);
   const [priority, setPriority] = useState<Priority>('MEDIUM');
+  const [importanceScore, setImportanceScore] = useState<TaskImportanceScore>(3);
+  const [isBlocking, setIsBlocking] = useState(false);
   const [deadlineAt, setDeadlineAt] = useState('');
   const [scheduledAt, setScheduledAt] = useState('');
   const [deferOpen, setDeferOpen] = useState(false);
@@ -38,6 +41,8 @@ export default function CreateTaskModal({
         description,
         columnId,
         priority,
+        importanceScore,
+        isBlocking,
         deadlineAt: deadlineAt || undefined,
         scheduledAt: scheduledAt || undefined,
         assigneeId: member?.userId,
@@ -119,6 +124,36 @@ export default function CreateTaskModal({
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <span className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Значимость</span>
+            <span className="rounded-full bg-[var(--tg-theme-bg-color)] px-2 py-1 text-xs font-semibold text-[var(--tg-theme-hint-color)]">
+              {importanceScore}/5
+            </span>
+          </div>
+          <div className="grid grid-cols-5 gap-1.5">
+            {([1, 2, 3, 4, 5] as TaskImportanceScore[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setImportanceScore(value)}
+                className={`rounded-[9px] px-1 py-2 text-xs font-semibold ${
+                  importanceScore === value
+                    ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                    : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]'
+                }`}
+                title={TASK_IMPORTANCE_LABEL[value]}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+          <label className="mt-3 flex items-center justify-between gap-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-text-color)]">
+            <span>Блокирует других</span>
+            <input type="checkbox" checked={isBlocking} onChange={(event) => setIsBlocking(event.target.checked)} />
+          </label>
         </div>
 
         <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3">

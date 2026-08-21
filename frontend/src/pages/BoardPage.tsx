@@ -6,9 +6,11 @@ import KanbanBoard from '../components/board/KanbanBoard';
 import TaskModal from '../components/task/TaskModal';
 import CreateTaskModal from '../components/board/CreateTaskModal';
 import { tasksApi, type ArchiveCleanupMode } from '../api/tasks';
+import { botSettingsApi } from '../api/botSettings';
+import { useAuthStore } from '../store/authStore';
 import type { ProjectMember, Task } from '../types';
+import { getProjectPermissions } from '../utils/projectPermissions';
 
-const CURRENT_USER_ID = 1;
 const MY_TASKS_FILTER_KEY = 'kanban-show-only-my-tasks-v1';
 
 interface Props {
@@ -24,6 +26,8 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
 
   const { currentProject, columns, fetchProject, fetchColumns, createColumn, updateColumn, deleteColumn } = useProjectStore();
   const { tasks, fetchTasks, openTask, closeTask, selectedTask, createTask } = useTaskStore();
+  const currentUser = useAuthStore((state) => state.user);
+  const currentUserId = currentUser?.id;
 
   const [createColumnId, setCreateColumnId] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -32,7 +36,7 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
   const [now, setNow] = useState(Date.now());
   const [showOnlyMyTasks, setShowOnlyMyTasks] = useState(() => localStorage.getItem(MY_TASKS_FILTER_KEY) === 'true');
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
-  const [archiveCleanupMode, setArchiveCleanupMode] = useState<ArchiveCleanupMode>(() => tasksApi.getArchiveCleanupMode());
+  const [archiveCleanupMode, setArchiveCleanupMode] = useState<ArchiveCleanupMode>('never');
 
   useEffect(() => {
     const loadBoard = async () => {
@@ -63,9 +67,30 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
     tasksApi.getArchived(pid, boardPageId).then(setArchivedTasks);
   }, [activeView, archiveCleanupMode, boardPageId, pid]);
 
+  useEffect(() => {
+    if (!pid) return;
+    let cancelled = false;
+    botSettingsApi
+      .getArchiveCleanupMode(pid)
+      .then((mode) => {
+        if (!cancelled) setArchiveCleanupMode(mode);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [pid]);
+
   const members = currentProject?.members ?? [];
+  const permissions = getProjectPermissions(currentProject, currentUserId);
+  const canCreateTask = Boolean(permissions.createTask);
+  const canUpdateTask = Boolean(permissions.updateTask);
+  const canMoveTask = Boolean(permissions.moveTask);
+  const canDeleteTask = Boolean(permissions.deleteTask);
+  const canManageColumns = Boolean(permissions.manageColumns);
 
   const handleAddTask = (columnId: number) => {
+    if (!canCreateTask) return;
     setCreateColumnId(columnId);
   };
 
@@ -83,28 +108,34 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
   };
 
   const handleCreateTask = async (data: any) => {
-    const member = currentProject?.members?.find((item) => item.userId === CURRENT_USER_ID);
+    if (!canCreateTask) return;
+    const member = currentUserId
+      ? currentProject?.members?.find((item) => String(item.userId) === String(currentUserId))
+      : undefined;
     await createTask(pid, {
       ...data,
       pageId: boardPageId,
-      assigneeId: showOnlyMyTasks && !data.assigneeId ? CURRENT_USER_ID : data.assigneeId,
+      assigneeId: showOnlyMyTasks && !data.assigneeId && currentUserId ? currentUserId : data.assigneeId,
       assignee: showOnlyMyTasks && !data.assigneeId ? member?.user : data.assignee,
     });
     await fetchTasks(pid, boardPageId);
   };
 
   const handleAddColumn = async () => {
+    if (!canManageColumns) return;
     const nextNumber = columns.filter((column) => column.title.startsWith('Новый столбец')).length + 1;
     await createColumn(pid, nextNumber > 1 ? `Новый столбец ${nextNumber}` : 'Новый столбец', boardPageId);
   };
 
   const handleDuplicateColumn = async (columnId: number) => {
+    if (!canManageColumns) return;
     const source = columns.find((column) => column.id === columnId);
     if (!source) return;
     await createColumn(pid, `${source.title} копия`, boardPageId);
   };
 
   const handleMoveColumn = async (columnId: number, direction: -1 | 1) => {
+    if (!canManageColumns) return;
     const visible = columns.filter((column) => !column.isHidden && !column.isArchive).sort((a, b) => a.position - b.position);
     const index = visible.findIndex((column) => column.id === columnId);
     const nextIndex = index + direction;
@@ -129,7 +160,7 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
       })
     : tasks;
   const personalTasks = showOnlyMyTasks
-    ? filteredTasks.filter((task) => String(task.assigneeId ?? task.assignee?.id ?? '') === String(CURRENT_USER_ID))
+    ? filteredTasks.filter((task) => currentUserId && String(task.assigneeId ?? task.assignee?.id ?? '') === String(currentUserId))
     : filteredTasks;
   const dueTasks = personalTasks.filter((task) => !task.scheduledAt || new Date(task.scheduledAt).getTime() <= now);
   const deferredTasks = personalTasks.filter((task) => task.scheduledAt && new Date(task.scheduledAt).getTime() > now);
@@ -267,9 +298,10 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
           <ArchiveInlineView
             tasks={archivedTasks}
             cleanupMode={archiveCleanupMode}
-            onCleanupModeChange={(mode) => {
-              tasksApi.setArchiveCleanupMode(mode);
+            onCleanupModeChange={async (mode) => {
               setArchiveCleanupMode(mode);
+              const savedMode = await botSettingsApi.setArchiveCleanupMode(pid, mode);
+              setArchiveCleanupMode(savedMode);
             }}
             onClear={async () => {
               await tasksApi.clearArchive(pid);
@@ -282,16 +314,20 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
             tasks={dueTasks}
             onTaskClick={handleTaskClick}
             onAddTask={handleAddTask}
-            onRenameColumn={(columnId, title) => updateColumn(columnId, { title })}
-            onAddColumn={handleAddColumn}
-            onDuplicateColumn={handleDuplicateColumn}
-            onMoveColumn={handleMoveColumn}
-            onDeleteColumn={deleteColumn}
+            onRenameColumn={canManageColumns ? (columnId, title) => updateColumn(columnId, { title }) : undefined}
+            onAddColumn={canManageColumns ? handleAddColumn : undefined}
+            onDuplicateColumn={canManageColumns ? handleDuplicateColumn : undefined}
+            onMoveColumn={canManageColumns ? handleMoveColumn : undefined}
+            onDeleteColumn={canManageColumns ? deleteColumn : undefined}
+            canCreateTask={canCreateTask}
+            canMoveTask={canMoveTask}
+            canManageColumns={canManageColumns}
           />
         )}
       </div>
 
       {/* FAB — добавить задачу */}
+      {canCreateTask && (
       <button
         onClick={() => {
           const defaultCol = columns.find((c) => c.isDefault) ?? columns[0];
@@ -301,6 +337,7 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
       >
         +
       </button>
+      )}
 
       {/* Модалка задачи */}
       {selectedTask && (
@@ -308,6 +345,9 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
           task={selectedTask}
           members={members}
           onClose={handleCloseTask}
+          canEdit={canUpdateTask}
+          canMove={canMoveTask}
+          canArchive={canDeleteTask || canUpdateTask}
         />
       )}
 

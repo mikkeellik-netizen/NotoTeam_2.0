@@ -5,7 +5,7 @@ import { escapeMarkdown, formatMskDate, formatMyTasksMessage } from "../services
 import { buildWeeklyReportText } from "../services/reportService.js";
 import { NotificationService } from "../services/notificationService.js";
 import { TaskParser } from "../services/taskParser.js";
-import { parseDateTime } from "../services/dateParser.js";
+import { parseDateTime, stripDateTimePhrases } from "../services/dateParser.js";
 import type { PageNode, Project, User } from "../types.js";
 
 type TaskTarget = {
@@ -22,6 +22,48 @@ type Session =
   | { mode: "reminder_date"; projectId: string; title: string; targetUserId?: string; description?: string }
   | { mode: "new_project" }
   | { mode: "join_project" };
+
+type BotProjectRoleName = "owner" | "admin" | "editor" | "viewer";
+type BotProjectPermission = "viewProject" | "createTask" | "createPage" | "manageReminders" | "viewAnalytics";
+
+const BOT_NO_PERMISSIONS: Record<BotProjectPermission, boolean> = {
+  viewProject: false,
+  createTask: false,
+  createPage: false,
+  manageReminders: false,
+  viewAnalytics: false,
+};
+
+const BOT_ROLE_PERMISSIONS: Record<BotProjectRoleName, Record<BotProjectPermission, boolean>> = {
+  owner: {
+    viewProject: true,
+    createTask: true,
+    createPage: true,
+    manageReminders: true,
+    viewAnalytics: true,
+  },
+  admin: {
+    viewProject: true,
+    createTask: true,
+    createPage: true,
+    manageReminders: true,
+    viewAnalytics: true,
+  },
+  editor: {
+    viewProject: true,
+    createTask: true,
+    createPage: true,
+    manageReminders: true,
+    viewAnalytics: false,
+  },
+  viewer: {
+    viewProject: true,
+    createTask: false,
+    createPage: false,
+    manageReminders: false,
+    viewAnalytics: false,
+  },
+};
 
 export class TelegramWorkspaceBot {
   private bot: Bot;
@@ -287,8 +329,8 @@ export class TelegramWorkspaceBot {
       await ctx.reply("📭 Сначала создайте проект или войдите по коду.", { reply_markup: this.emptyProjectsKeyboard() });
       return;
     }
-    const role = project.members.find((member) => member.userId === user.id)?.role;
-    if (project.ownerId !== user.id && role !== "owner" && role !== "admin") {
+    const canViewAnalytics = this.hasProjectPermission(project, user.id, "viewAnalytics");
+    if (!canViewAnalytics) {
       await ctx.reply("🔒 Еженедельный отчёт доступен только владельцу или администратору проекта.");
       return;
     }
@@ -326,7 +368,12 @@ export class TelegramWorkspaceBot {
     const user = await this.getOrCreateUser(ctx);
     const projects = await this.repo.getUserProjects(user.id);
     await this.answerCallbackIfNeeded(ctx);
-    await this.askProjectForTask(ctx, projects, true);
+    const writableProjects = this.filterProjectsByPermission(projects, user.id, "createTask");
+    if (!writableProjects.length) {
+      await this.denyProjectPermission(ctx, "createTask");
+      return;
+    }
+    await this.askProjectForTask(ctx, writableProjects, true);
   }
 
   private async askNewProjectTitle(ctx: Context) {
@@ -355,14 +402,20 @@ export class TelegramWorkspaceBot {
       return;
     }
 
-    const target = await this.ensureDefaultTarget(ctx.from.id, user.id, projects);
+    const writableProjects = this.filterProjectsByPermission(projects, user.id, "createTask");
+    if (!writableProjects.length) {
+      await this.denyProjectPermission(ctx, "createTask");
+      return;
+    }
+
+    const target = await this.ensureDefaultTarget(ctx.from.id, user.id, writableProjects);
     if (target) {
       this.sessions.set(ctx.from.id, { mode: "new_task", ...target });
       await this.askTaskText(ctx, target);
       return;
     }
 
-    await this.askProjectForTask(ctx, projects, false);
+    await this.askProjectForTask(ctx, writableProjects, false);
   }
 
   private async askProjectForTask(ctx: Context, projects: Project[], switching: boolean) {
@@ -391,13 +444,14 @@ export class TelegramWorkspaceBot {
 
   private async askBoardForTask(ctx: Context, projectId: string, switching: boolean) {
     if (!ctx.from) return;
+    const access = await this.requireProjectPermission(ctx, projectId, "createTask");
+    if (!access) return;
     const boards = await this.getProjectBoards(projectId);
 
     if (boards.length <= 1) {
-      const user = await this.getOrCreateUser(ctx);
       const boardPageId = boards[0]?.id;
       const target = { projectId, boardPageId };
-      await this.saveDefaultTarget(ctx.from.id, user.id, target);
+      await this.saveDefaultTarget(ctx.from.id, access.user.id, target);
       if (switching) {
         this.sessions.delete(ctx.from.id);
         await this.replyOrEdit(ctx, "✅ Готово. Теперь задачи создаются в этой доске.", this.mainKeyboard());
@@ -422,9 +476,10 @@ export class TelegramWorkspaceBot {
     const boardPageId = String(ctx.match[2]);
     const session = this.sessions.get(ctx.from.id);
     const switching = session?.mode === "new_task" ? Boolean(session.switching) : false;
-    const user = await this.getOrCreateUser(ctx);
+    const access = await this.requireProjectPermission(ctx, projectId, "createTask");
+    if (!access) return;
     const target = { projectId, boardPageId };
-    await this.saveDefaultTarget(ctx.from.id, user.id, target);
+    await this.saveDefaultTarget(ctx.from.id, access.user.id, target);
     await ctx.answerCallbackQuery();
     if (switching) {
       this.sessions.delete(ctx.from.id);
@@ -453,7 +508,7 @@ export class TelegramWorkspaceBot {
     if (!ctx.from) return;
     const user = await this.getOrCreateUser(ctx);
     const projects = await this.repo.getUserProjects(user.id);
-    const projectId = await this.resolveProjectForBotCapture(ctx, projects, "note_project");
+    const projectId = await this.resolveProjectForBotCapture(ctx, projects, "note_project", "createPage");
     if (!projectId) return;
     this.sessions.set(ctx.from.id, { mode: "inbox_note", projectId });
     await this.answerCallbackIfNeeded(ctx);
@@ -464,7 +519,7 @@ export class TelegramWorkspaceBot {
     if (!ctx.from) return;
     const user = await this.getOrCreateUser(ctx);
     const projects = await this.repo.getUserProjects(user.id);
-    const projectId = await this.resolveProjectForBotCapture(ctx, projects, "reminder_project");
+    const projectId = await this.resolveProjectForBotCapture(ctx, projects, "reminder_project", "manageReminders");
     if (!projectId) return;
     this.sessions.set(ctx.from.id, { mode: "reminder_text", projectId });
     await this.answerCallbackIfNeeded(ctx);
@@ -478,14 +533,25 @@ export class TelegramWorkspaceBot {
     );
   }
 
-  private async resolveProjectForBotCapture(ctx: Context, projects: Project[], callbackPrefix: "note_project" | "reminder_project") {
+  private async resolveProjectForBotCapture(
+    ctx: Context,
+    projects: Project[],
+    callbackPrefix: "note_project" | "reminder_project",
+    permission: BotProjectPermission,
+  ) {
     if (!projects.length) {
       await this.replyOrEdit(ctx, "📭 Сначала создайте проект или войдите по коду.", this.emptyProjectsKeyboard());
       return undefined;
     }
-    if (projects.length === 1) return projects[0].id;
+    const user = await this.getOrCreateUser(ctx);
+    const allowedProjects = this.filterProjectsByPermission(projects, user.id, permission);
+    if (!allowedProjects.length) {
+      await this.denyProjectPermission(ctx, permission);
+      return undefined;
+    }
+    if (allowedProjects.length === 1) return allowedProjects[0].id;
     const keyboard = new InlineKeyboard();
-    for (const project of projects) keyboard.text(project.title, `${callbackPrefix}:${project.id}`).row();
+    for (const project of allowedProjects) keyboard.text(project.title, `${callbackPrefix}:${project.id}`).row();
     keyboard.text("Отмена", "cancel_session");
     await this.replyOrEdit(ctx, "📁 Выберите проект:", keyboard);
     return undefined;
@@ -494,6 +560,8 @@ export class TelegramWorkspaceBot {
   private async handleChooseInboxProject(ctx: Context) {
     if (!ctx.from || !("match" in ctx) || !ctx.match) return;
     const projectId = String(ctx.match[1]);
+    const access = await this.requireProjectPermission(ctx, projectId, "createPage");
+    if (!access) return;
     this.sessions.set(ctx.from.id, { mode: "inbox_note", projectId });
     await ctx.answerCallbackQuery();
     await this.replyOrEdit(ctx, "📥 Напишите текст заметки — сохраню в Inbox проекта.", this.cancelKeyboard());
@@ -502,6 +570,8 @@ export class TelegramWorkspaceBot {
   private async handleChooseReminderProject(ctx: Context) {
     if (!ctx.from || !("match" in ctx) || !ctx.match) return;
     const projectId = String(ctx.match[1]);
+    const access = await this.requireProjectPermission(ctx, projectId, "manageReminders");
+    if (!access) return;
     this.sessions.set(ctx.from.id, { mode: "reminder_text", projectId });
     await ctx.answerCallbackQuery();
     await this.replyOrEdit(ctx, "⏰ О чём напомнить? Можно сразу с датой: «позвонить отцу 01.01.2026 18:00».", this.cancelKeyboard());
@@ -608,56 +678,43 @@ export class TelegramWorkspaceBot {
       return;
     }
 
-    const space = await this.repo.getProjectSpace(projectId);
-    const nowIso = new Date().toISOString();
-    let inbox = (space.nodes ?? []).find((node) => node.projectId === projectId && node.title === "Inbox");
+    const access = await this.requireProjectPermission(ctx, projectId, "createPage");
+    if (!access) return;
+    const currentUser = access.user;
+    const nodes = await this.repo.getProjectNodes(projectId);
+    let inbox = nodes.find((node) => node.projectId === projectId && node.title === "Inbox" && !node.isDeleted);
     if (!inbox) {
-      inbox = {
-        id: `inbox_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-        projectId,
+      inbox = await this.repo.createProjectNode(projectId, {
+        actorUserId: currentUser.id,
         parentId: null,
         type: "folder",
         title: "Inbox",
         icon: "📥",
-        order: space.nodes?.length ?? 0,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      space.nodes = [...(space.nodes ?? []), inbox];
+        order: nodes.filter((node) => (node.parentId ?? null) === null && !node.isDeleted).length,
+        properties: { author: currentUser.id },
+      });
     }
 
-    const notePage = {
-      id: `page_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      projectId,
+    await this.repo.createProjectNode(projectId, {
+      actorUserId: currentUser.id,
       parentId: inbox.id,
-      type: "page" as const,
+      type: "page",
       title: cleanText.slice(0, 42) || "Заметка",
       icon: "📥",
-      order: (space.nodes ?? []).filter((node) => node.parentId === inbox?.id).length,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-    space.nodes = [...(space.nodes ?? []), notePage];
-    const pageId = notePage.id;
-    const blocks = space.blocks ?? [];
-    const order = blocks.filter((block) => block.pageId === pageId).length;
-    space.blocks = [
-      ...blocks,
-      {
-        id: `block_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-        pageId,
-        type: "paragraph",
-        content: {
-          text: cleanText,
-          source: "telegram_bot",
-          createdByTelegramId: String(ctx.from.id),
+      order: nodes.filter((node) => node.parentId === inbox?.id && !node.isDeleted).length,
+      properties: { author: currentUser.id },
+      initialBlocks: [
+        {
+          type: "paragraph",
+          content: {
+            text: cleanText,
+            source: "telegram_bot",
+            createdByTelegramId: String(ctx.from.id),
+          },
+          order: 0,
         },
-        order,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-    ];
-    await this.repo.saveProjectSpace(projectId, space);
+      ],
+    });
     this.sessions.delete(ctx.from.id);
     await ctx.reply(["📥 ЗАМЕТКА СОХРАНЕНА", "", "Добавил в Inbox проекта."].join("\n"), {
       reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Inbox", `${this.config.webAppUrl}/project/${projectId}/inbox`)
@@ -674,12 +731,16 @@ export class TelegramWorkspaceBot {
       return;
     }
 
-    const currentUser = await this.getOrCreateUser(ctx);
+    const access = await this.requireProjectPermission(ctx, projectId, "manageReminders");
+    if (!access) return;
+    const currentUser = access.user;
     const assigneeUsername = cleanText.match(/@([a-zA-Z0-9_]{3,})/)?.[1];
     const parsedDate = parseReminderDate(cleanText);
+    const members = await this.repo.getProjectMembers(projectId);
+    const mentionedMember = findMentionedUser(cleanText, members);
     const title =
-      removeMention(removeDatePhrase(cleanText), assigneeUsername).trim() ||
-      removeMention(cleanText, assigneeUsername).trim() ||
+      removeUserNameFromTitle(removeMention(stripDateTimePhrases(cleanText), assigneeUsername), mentionedMember).trim() ||
+      removeUserNameFromTitle(removeMention(cleanText, assigneeUsername), mentionedMember).trim() ||
       cleanText;
     let targetUserId = currentUser.id;
 
@@ -699,6 +760,8 @@ export class TelegramWorkspaceBot {
         return;
       }
       targetUserId = target.id;
+    } else if (mentionedMember) {
+      targetUserId = mentionedMember.id;
     }
 
     if (parsedDate) {
@@ -761,7 +824,9 @@ export class TelegramWorkspaceBot {
 
   private async createOneTimeReminder(ctx: Context, projectId: string, title: string, dateText: string, description = "", targetUserId?: string) {
     if (!ctx.from) return;
-    const user = await this.getOrCreateUser(ctx);
+    const access = await this.requireProjectPermission(ctx, projectId, "manageReminders");
+    if (!access) return;
+    const user = access.user;
     const isoDate = /^\d{4}-\d{2}-\d{2}/.test(dateText.trim()) ? new Date(dateText) : undefined;
     const remindAt = isoDate && Number.isFinite(isoDate.getTime()) ? isoDate : parseReminderDate(dateText) ?? new Date(dateText);
     if (!Number.isFinite(remindAt.getTime())) {
@@ -829,6 +894,8 @@ export class TelegramWorkspaceBot {
 
   private async prepareTaskDraft(ctx: Context, projectId: string, boardPageId: string | undefined, text: string) {
     if (!ctx.from) return;
+    const access = await this.requireProjectPermission(ctx, projectId, "createTask");
+    if (!access) return;
     if (!boardPageId) {
       await ctx.reply("📋 Сначала выберите доску для задачи.");
       await this.askBoardForTask(ctx, projectId, false);
@@ -851,16 +918,25 @@ export class TelegramWorkspaceBot {
   private async askDraftAssignee(ctx: Context, session: Extract<Session, { mode: "task_draft" }>) {
     if (!ctx.from) return;
     const username = session.draft.assigneeUsername;
+    const members = await this.repo.getProjectMembers(session.projectId);
     const recognized = username ? await this.repo.getUserByUsername(username) : undefined;
-    if (recognized) {
-      (session.draft as any).assigneeId = recognized.id;
+    const recognizedMember = recognized ? members.find((member) => String(member.id) === String(recognized.id)) : undefined;
+    if (recognizedMember) {
+      (session.draft as any).assigneeId = recognizedMember.id;
+      await this.askDraftDeadline(ctx, session);
+      return;
+    }
+
+    const mentionedMember = findMentionedUser(session.draft.description ?? session.draft.title, members);
+    if (mentionedMember) {
+      (session.draft as any).assigneeId = mentionedMember.id;
+      session.draft.title = removeUserNameFromTitle(session.draft.title, mentionedMember) || session.draft.title;
       await this.askDraftDeadline(ctx, session);
       return;
     }
 
     session.step = "assignee";
     this.sessions.set(ctx.from.id, session);
-    const members = await this.repo.getProjectMembers(session.projectId);
     const keyboard = new InlineKeyboard();
     for (const member of members.slice(0, 20)) {
       const label = member.username ? `@${member.username}` : [member.firstName, member.lastName].filter(Boolean).join(" ") || `User ${member.id}`;
@@ -921,12 +997,18 @@ export class TelegramWorkspaceBot {
     if (!ctx.from) return;
     if (!this.notifications) throw new Error("Notification service is not configured");
 
-    const creator = await this.getOrCreateUser(ctx);
-    const assignee = assigneeId
+    const access = await this.requireProjectPermission(ctx, projectId, "createTask");
+    if (!access) return;
+    const creator = access.user;
+    const requestedAssignee = assigneeId
       ? await this.repo.getUserById(assigneeId)
       : parsed.assigneeUsername
         ? await this.repo.getUserByUsername(parsed.assigneeUsername)
         : undefined;
+    const members = await this.repo.getProjectMembers(projectId);
+    const assignee = requestedAssignee && members.some((member) => String(member.id) === String(requestedAssignee.id))
+      ? requestedAssignee
+      : undefined;
 
     const task = await this.repo.createTask({
       ...parsed,
@@ -992,6 +1074,62 @@ export class TelegramWorkspaceBot {
     }
   }
 
+  private async requireProjectPermission(ctx: Context, projectId: string, permission: BotProjectPermission) {
+    if (!ctx.from) return undefined;
+    const user = await this.getOrCreateUser(ctx);
+    const project = await this.repo.getProject(projectId);
+    if (!project || !this.hasProjectPermission(project, user.id, "viewProject") || !this.hasProjectPermission(project, user.id, permission)) {
+      await this.denyProjectPermission(ctx, permission);
+      return undefined;
+    }
+    return { user, project };
+  }
+
+  private filterProjectsByPermission(projects: Project[], userId: string, permission: BotProjectPermission) {
+    return projects.filter((project) => this.hasProjectPermission(project, userId, permission));
+  }
+
+  private hasProjectPermission(project: Project | undefined, userId: string | undefined, permission: BotProjectPermission) {
+    return Boolean(this.projectPermissions(project, userId)[permission]);
+  }
+
+  private projectPermissions(project: Project | undefined, userId: string | undefined): Record<BotProjectPermission, boolean> {
+    const roleName = this.projectRoleName(project, userId);
+    if (!roleName) return { ...BOT_NO_PERMISSIONS };
+
+    const member = (project?.members ?? []).find((item) => String(item.userId) === String(userId));
+    const rawRole = member?.role as unknown;
+    const explicitPermissions =
+      rawRole && typeof rawRole === "object" && "permissions" in rawRole
+        ? ((rawRole as { permissions?: Partial<Record<BotProjectPermission, boolean>> }).permissions ?? {})
+        : {};
+
+    return {
+      ...BOT_ROLE_PERMISSIONS[roleName],
+      ...explicitPermissions,
+    };
+  }
+
+  private projectRoleName(project: Project | undefined, userId: string | undefined): BotProjectRoleName | undefined {
+    if (!project || !userId) return undefined;
+    if (String(project.ownerId) === String(userId)) return "owner";
+
+    const member = (project.members ?? []).find((item) => String(item.userId) === String(userId));
+    if (!member) return undefined;
+
+    const rawRole = member.role as unknown;
+    const rawRoleName = rawRole && typeof rawRole === "object" && "name" in rawRole ? (rawRole as { name?: unknown }).name : rawRole;
+    return normalizeBotProjectRole(rawRoleName, "editor");
+  }
+
+  private async denyProjectPermission(ctx: Context, permission: BotProjectPermission) {
+    if (ctx.from) this.sessions.delete(ctx.from.id);
+    if (ctx.callbackQuery) {
+      await ctx.answerCallbackQuery({ text: "Нет прав для этого действия", show_alert: true }).catch(() => undefined);
+    }
+    await ctx.reply(botPermissionDeniedText(permission), { reply_markup: this.mainKeyboard() });
+  }
+
   private async ensureDefaultTarget(telegramUserId: number | undefined, userId: string | undefined, projects: Project[]) {
     if (!telegramUserId || !projects.length) return undefined;
     const current = this.defaultTargets.get(telegramUserId);
@@ -1038,9 +1176,9 @@ export class TelegramWorkspaceBot {
   }
 
   private async getProjectBoards(projectId: string) {
-    const space = await this.repo.getProjectSpace(projectId);
-    return [...(space.nodes ?? [])]
-      .filter((node) => node.type === "kanban")
+    const nodes = await this.repo.getProjectNodes(projectId);
+    return [...nodes]
+      .filter((node) => node.type === "kanban" && !node.isDeleted)
       .sort((left, right) => left.order - right.order);
   }
 
@@ -1163,6 +1301,56 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function findMentionedUser(text: string, users: User[]) {
+  const normalizedText = normalizeSearchText(text);
+  const candidates = users
+    .flatMap((user) => userSearchKeys(user).map((key) => ({ user, key })))
+    .sort((left, right) => right.key.length - left.key.length);
+
+  return candidates.find(({ key }) => containsSearchToken(normalizedText, key))?.user;
+}
+
+function removeUserNameFromTitle(title: string, user?: User) {
+  if (!user) return cleanupTitle(title);
+
+  let result = title;
+  for (const key of userSearchKeys(user)) {
+    result = result.replace(new RegExp(`(^|[^\\p{L}\\p{N}_@])${escapeRegExp(key)}(?=$|[^\\p{L}\\p{N}_])`, "giu"), " ");
+  }
+  return cleanupTitle(result);
+}
+
+function userSearchKeys(user: User) {
+  const keys = [
+    user.username ? `@${user.username}` : "",
+    user.username ?? "",
+    [user.firstName, user.lastName].filter(Boolean).join(" "),
+    user.firstName ?? "",
+    user.lastName ?? "",
+  ]
+    .map((value) => normalizeSearchText(value))
+    .filter((value) => value.length >= 2);
+
+  return [...new Set(keys)].sort((left, right) => right.length - left.length);
+}
+
+function containsSearchToken(text: string, token: string) {
+  if (!token) return false;
+  return new RegExp(`(^|[^\\p{L}\\p{N}_@])${escapeRegExp(token)}(?=$|[^\\p{L}\\p{N}_])`, "iu").test(text);
+}
+
+function normalizeSearchText(value: string) {
+  return value.toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
+}
+
+function cleanupTitle(value: string) {
+  return value
+    .replace(/^(напомни|напомнить)\s+(мне|ему|ей|нам|им)?\s*/iu, "")
+    .replace(/\b(должен|должна|должны|надо|нужно)\b/giu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function isBotCompletedTask(task: { isArchived?: boolean; completedAt?: string; columnId: string; projectId: string; pageId?: string }, columns: Array<{ id: string; position: number; projectId?: string; pageId?: string; isArchive?: boolean; isHidden?: boolean }>) {
   if (task.isArchived || task.completedAt) return true;
   const finalColumn = columns
@@ -1174,4 +1362,25 @@ function isBotCompletedTask(task: { isArchived?: boolean; completedAt?: string; 
 
 function sameBotBoard(columnPageId: string | undefined, taskPageId: string | undefined) {
   return taskPageId ? columnPageId === taskPageId : !columnPageId;
+}
+
+function normalizeBotProjectRole(value: unknown, fallback: BotProjectRoleName = "viewer"): BotProjectRoleName {
+  const role = String(value ?? "").trim().toLowerCase();
+  if (role === "owner" || role === "admin" || role === "editor" || role === "viewer") return role;
+  return fallback;
+}
+
+function botPermissionDeniedText(permission: BotProjectPermission) {
+  const action =
+    permission === "createTask"
+      ? "создавать задачи"
+      : permission === "createPage"
+        ? "создавать заметки и страницы"
+        : permission === "manageReminders"
+          ? "создавать напоминания"
+          : permission === "viewAnalytics"
+            ? "смотреть отчеты"
+            : "выполнять это действие";
+
+  return `🔒 У вас нет прав ${action} в этом проекте. Попросите владельца изменить роль или выберите другой проект.`;
 }

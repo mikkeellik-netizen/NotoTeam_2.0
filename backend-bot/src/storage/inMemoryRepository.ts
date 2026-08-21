@@ -4,6 +4,8 @@ import type {
   Column,
   NotificationEvent,
   PageBlock,
+  PageNode,
+  PageNodeInput,
   ParsedTask,
   Project,
   ProjectBotSettings,
@@ -180,6 +182,48 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     return this.blocks.filter((block) => block.projectId === projectId);
   }
 
+  async getProjectNodes(projectId: string) {
+    const space = await this.getProjectSpace(projectId);
+    return space.nodes.filter((node) => node.projectId === projectId && !node.isDeleted);
+  }
+
+  async createProjectNode(projectId: string, input: PageNodeInput) {
+    const space = await this.getProjectSpace(projectId);
+    const createdAt = now();
+    const siblings = space.nodes.filter((node) => (node.parentId ?? null) === (input.parentId ?? null));
+    const node: PageNode = {
+      id: input.id ?? `${input.type}_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      projectId,
+      parentId: input.parentId ?? null,
+      type: input.type,
+      title: input.title ?? (input.type === "folder" ? "Новая папка" : input.type === "kanban" ? "Kanban-доска" : "Новая страница"),
+      icon: input.icon ?? (input.type === "folder" ? "📁" : input.type === "kanban" ? "📋" : "📝"),
+      order: input.order ?? siblings.length,
+      properties: input.properties,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    space.nodes.push(node);
+
+    if (node.type === "page") {
+      for (const [index, block] of (input.initialBlocks ?? []).entries()) {
+        const pageBlock: Omit<PageBlock, "projectId"> = {
+          id: block.id ?? `block_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          pageId: node.id,
+          type: block.type,
+          content: block.content ?? {},
+          order: block.order ?? index,
+          createdAt,
+          updatedAt: createdAt,
+        };
+        space.blocks.push(pageBlock);
+        this.blocks.push({ ...pageBlock, projectId });
+      }
+    }
+
+    return node;
+  }
+
   async getProjectSpace(projectId: string) {
     const existing = this.spaces.get(projectId);
     if (existing) return existing;
@@ -265,7 +309,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   }
 
   async fetchPendingOutbox() {
-    return [] as Array<{ id: string; telegramId: string; text: string }>;
+    return [];
   }
 
   async markOutboxSent(_id: string) {

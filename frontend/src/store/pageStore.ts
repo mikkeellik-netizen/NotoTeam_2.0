@@ -1,14 +1,6 @@
 import { create } from 'zustand';
-import { apiRequest } from '../api/httpClient';
+import { workspaceApi } from '../api/workspace';
 import type { Block, BlockType, PageNode, PageNodeType, PageProperties, Template } from '../types';
-
-interface PersistedProjectSpace {
-  nodes: PageNode[];
-  blocks: Block[];
-  collapsedIds: string[];
-  recentPages?: string[];
-  dailyNotes?: Record<string, string>;
-}
 
 interface HistorySnapshot {
   nodes: PageNode[];
@@ -22,6 +14,11 @@ interface HistorySnapshot {
 interface PageState {
   nodes: PageNode[];
   blocks: Block[];
+  isPartialSpace: boolean;
+  loadedTreeParentIds: Set<string>;
+  loadingTreeParentIds: Set<string>;
+  loadedBlockPageIds: Set<string>;
+  loadingBlockPageIds: Set<string>;
   selectedPageId: string | null;
   collapsedIds: Set<string>;
   recentPages: string[];
@@ -30,6 +27,9 @@ interface PageState {
   redoStack: HistorySnapshot[];
 
   loadProjectSpace: (projectId: string, projectTitle?: string) => void;
+  ensureFolderChildrenLoaded: (projectId: string, parentId: string | null) => Promise<void>;
+  ensureNodeLoaded: (projectId: string, nodeId: string) => Promise<void>;
+  ensurePageBlocksLoaded: (projectId: string, pageId: string) => Promise<void>;
   undo: () => void;
   redo: () => void;
   selectPage: (pageId: string) => void;
@@ -62,11 +62,21 @@ interface CreateNodeInput {
   type: PageNodeType;
   title?: string;
   icon?: string;
+  properties?: PageProperties;
+  initialBlocks?: Array<{ type: BlockType; content: any; order?: number }>;
 }
+
+let projectSpaceLoadSeq = 0;
+const ROOT_PARENT_KEY = '__root__';
 
 export const usePageStore = create<PageState>((set, get) => ({
   nodes: [],
   blocks: [],
+  isPartialSpace: false,
+  loadedTreeParentIds: new Set(),
+  loadingTreeParentIds: new Set(),
+  loadedBlockPageIds: new Set(),
+  loadingBlockPageIds: new Set(),
   selectedPageId: null,
   collapsedIds: new Set(),
   recentPages: [],
@@ -75,9 +85,15 @@ export const usePageStore = create<PageState>((set, get) => ({
   redoStack: [],
 
   loadProjectSpace: (projectId, projectTitle = 'Проект') => {
+    const loadSeq = ++projectSpaceLoadSeq;
     set({
       nodes: [],
       blocks: [],
+      isPartialSpace: true,
+      loadedTreeParentIds: new Set(),
+      loadingTreeParentIds: new Set(),
+      loadedBlockPageIds: new Set(),
+      loadingBlockPageIds: new Set(),
       selectedPageId: null,
       collapsedIds: new Set(),
       recentPages: [],
@@ -86,34 +102,128 @@ export const usePageStore = create<PageState>((set, get) => ({
       redoStack: [],
     });
 
-    void apiRequest<PersistedProjectSpace>(`/projects/${projectId}/space`)
-      .then((remote) => {
-        const remoteFirstOpenNode = getProjectEntryNode(remote.nodes);
+    void Promise.all([
+      workspaceApi.getTree(projectId, null),
+      workspaceApi.getMeta(projectId).catch(() => ({
+        collapsedIds: [],
+        recentPages: [],
+        dailyNotes: {},
+      })),
+    ])
+      .then(([tree, meta]) => {
+        if (loadSeq !== projectSpaceLoadSeq) return;
+        const entryNode = getProjectEntryNode(tree.nodes);
         set({
-          nodes: remote.nodes,
-          blocks: remote.blocks,
-          selectedPageId: remoteFirstOpenNode?.id ?? null,
-          collapsedIds: new Set(remote.collapsedIds),
-          recentPages: remote.recentPages ?? [],
-          dailyNotes: remote.dailyNotes ?? {},
+          nodes: tree.nodes,
+          blocks: [],
+          isPartialSpace: true,
+          loadedTreeParentIds: new Set([parentLoadKey(null)]),
+          loadingTreeParentIds: new Set(),
+          loadedBlockPageIds: new Set(),
+          loadingBlockPageIds: new Set(),
+          selectedPageId: entryNode?.id ?? null,
+          collapsedIds: new Set(meta.collapsedIds),
+          recentPages: meta.recentPages,
+          dailyNotes: meta.dailyNotes,
           undoStack: [],
           redoStack: [],
         });
+        void Promise.all(meta.recentPages.slice(0, 8).map((id) => get().ensureNodeLoaded(projectId, id))).catch(() => undefined);
       })
       .catch(() => {
-        const fallback = createDefaultSpace(projectId, projectTitle);
+        if (loadSeq !== projectSpaceLoadSeq) return;
         set({
-          ...restoreHistorySnapshot({
-            nodes: fallback.nodes,
-            blocks: fallback.blocks,
-            collapsedIds: fallback.collapsedIds,
-            recentPages: fallback.recentPages ?? [],
-            dailyNotes: fallback.dailyNotes ?? {},
-            selectedPageId: null,
-          }),
+          nodes: [],
+          blocks: [],
+          isPartialSpace: true,
+          loadedTreeParentIds: new Set(),
+          loadingTreeParentIds: new Set(),
+          loadedBlockPageIds: new Set(),
+          loadingBlockPageIds: new Set(),
           selectedPageId: null,
+          collapsedIds: new Set(),
+          recentPages: [],
+          dailyNotes: {},
+          undoStack: [],
+          redoStack: [],
         });
       });
+  },
+
+  ensureFolderChildrenLoaded: async (projectId, parentId) => {
+    const key = parentLoadKey(parentId);
+    const state = get();
+    if (state.loadedTreeParentIds.has(key) || state.loadingTreeParentIds.has(key)) return;
+
+    set((s) => ({ loadingTreeParentIds: new Set([...s.loadingTreeParentIds, key]) }));
+
+    try {
+      const tree = await workspaceApi.getTree(projectId, parentId);
+      set((s) => {
+        if (!isSameProject(s, projectId)) return s;
+        const loadingTreeParentIds = new Set(s.loadingTreeParentIds);
+        loadingTreeParentIds.delete(key);
+        return {
+          nodes: mergeNodes(s.nodes, tree.nodes),
+          loadedTreeParentIds: new Set([...s.loadedTreeParentIds, key]),
+          loadingTreeParentIds,
+        };
+      });
+    } catch {
+      set((s) => {
+        const loadingTreeParentIds = new Set(s.loadingTreeParentIds);
+        loadingTreeParentIds.delete(key);
+        return { loadingTreeParentIds };
+      });
+    }
+  },
+
+  ensureNodeLoaded: async (projectId, nodeId) => {
+    if (get().nodes.some((node) => node.id === nodeId)) return;
+
+    try {
+      const loaded: PageNode[] = [];
+      let currentId: string | null | undefined = nodeId;
+      const seen = new Set<string>();
+      while (currentId && !seen.has(currentId) && !get().nodes.some((node) => node.id === currentId)) {
+        seen.add(currentId);
+        const node = await workspaceApi.getNode(projectId, currentId);
+        loaded.push(node);
+        currentId = node.parentId;
+      }
+      if (loaded.length > 0) {
+        set((s) => (isSameProject(s, projectId) ? { nodes: mergeNodes(s.nodes, loaded) } : s));
+      }
+    } catch {
+      // Initial project load uses granular workspace endpoints only.
+    }
+  },
+
+  ensurePageBlocksLoaded: async (projectId, pageId) => {
+    const state = get();
+    if (state.loadedBlockPageIds.has(pageId) || state.loadingBlockPageIds.has(pageId)) return;
+
+    set((s) => ({ loadingBlockPageIds: new Set([...s.loadingBlockPageIds, pageId]) }));
+
+    try {
+      const response = await workspaceApi.getPageBlocks(projectId, pageId);
+      set((s) => {
+        if (!isSameProject(s, projectId)) return s;
+        const loadingBlockPageIds = new Set(s.loadingBlockPageIds);
+        loadingBlockPageIds.delete(pageId);
+        return {
+          blocks: mergePageBlocks(s.blocks, pageId, response.blocks),
+          loadedBlockPageIds: new Set([...s.loadedBlockPageIds, pageId]),
+          loadingBlockPageIds,
+        };
+      });
+    } catch {
+      set((s) => {
+        const loadingBlockPageIds = new Set(s.loadingBlockPageIds);
+        loadingBlockPageIds.delete(pageId);
+        return { loadingBlockPageIds };
+      });
+    }
   },
 
   undo: () => {
@@ -145,11 +255,12 @@ export const usePageStore = create<PageState>((set, get) => ({
   },
 
   selectPage: (pageId) => {
+    let recentPages: string[] = [];
     set((s) => ({
       selectedPageId: pageId,
-      recentPages: [pageId, ...s.recentPages.filter((id) => id !== pageId)].slice(0, 20),
+      recentPages: (recentPages = [pageId, ...s.recentPages.filter((id) => id !== pageId)].slice(0, 20)),
     }));
-    persistCurrentProject();
+    persistCurrentProjectMeta({ recentPages });
   },
 
   toggleCollapsed: (pageId) => {
@@ -158,34 +269,46 @@ export const usePageStore = create<PageState>((set, get) => ({
     if (next.has(pageId)) next.delete(pageId);
     else next.add(pageId);
     set({ collapsedIds: next });
-    persistCurrentProject();
+    persistCurrentProjectMeta({ collapsedIds: [...next] });
   },
 
   togglePinned: (pageId) => {
     recordHistory(set, get);
+    let updatedNode: PageNode | undefined;
     set((s) => {
       const pinned = s.nodes
         .filter((node) => node.isPinned && node.id !== pageId)
         .sort((a, b) => (a.pinnedOrder ?? 0) - (b.pinnedOrder ?? 0));
       const target = s.nodes.find((node) => node.id === pageId);
       const shouldPin = !target?.isPinned;
-      return {
-        nodes: s.nodes.map((node) => {
-          if (node.id !== pageId) return node;
-          return {
-            ...node,
+      updatedNode = target
+        ? {
+            ...target,
             isPinned: shouldPin,
             pinnedOrder: shouldPin ? pinned.length : undefined,
             updatedAt: new Date().toISOString(),
-          };
+          }
+        : undefined;
+      return {
+        nodes: s.nodes.map((node) => {
+          if (node.id !== pageId) return node;
+          return updatedNode ?? node;
         }),
       };
     });
-    persistCurrentProject();
+    if (updatedNode) {
+      void workspaceApi
+        .updateNode(updatedNode.projectId, updatedNode.id, {
+          isPinned: updatedNode.isPinned,
+          pinnedOrder: updatedNode.pinnedOrder,
+        })
+        .catch(() => undefined);
+    }
   },
 
   movePinned: (pageId, direction) => {
     recordHistory(set, get);
+    let updatedNodes: PageNode[] = [];
     set((s) => {
       const pinned = s.nodes
         .filter((node) => node.isPinned)
@@ -197,21 +320,30 @@ export const usePageStore = create<PageState>((set, get) => ({
       const [item] = reordered.splice(index, 1);
       reordered.splice(nextIndex, 0, item);
       const orderById = new Map(reordered.map((node, order) => [node.id, order]));
+      updatedNodes = s.nodes
+        .filter((node) => orderById.has(node.id) && node.pinnedOrder !== orderById.get(node.id))
+        .map((node) => ({ ...node, pinnedOrder: orderById.get(node.id) }));
       return {
         nodes: s.nodes.map((node) =>
           orderById.has(node.id) ? { ...node, pinnedOrder: orderById.get(node.id) } : node,
         ),
       };
     });
-    persistCurrentProject();
+    for (const node of updatedNodes) {
+      void workspaceApi
+        .updateNode(node.projectId, node.id, { pinnedOrder: node.pinnedOrder })
+        .catch(() => undefined);
+    }
   },
 
   moveNode: (nodeId, parentId, order) => {
     recordHistory(set, get);
+    const moving = get().nodes.find((node) => node.id === nodeId);
+    let shouldPersistMove = false;
     set((s) => {
       if (parentId === nodeId || isDescendant(s.nodes, parentId, nodeId)) return s;
-      const moving = s.nodes.find((node) => node.id === nodeId);
       if (!moving) return s;
+      shouldPersistMove = true;
       const targetSiblings = s.nodes
         .filter((node) => node.parentId === parentId && node.id !== nodeId)
         .sort((a, b) => a.order - b.order);
@@ -229,7 +361,9 @@ export const usePageStore = create<PageState>((set, get) => ({
         }),
       };
     });
-    persistCurrentProject();
+    if (moving && shouldPersistMove) {
+      void workspaceApi.moveNode(moving.projectId, nodeId, { parentId, order }).catch(() => undefined);
+    }
   },
 
   duplicateNode: (nodeId) => {
@@ -242,7 +376,7 @@ export const usePageStore = create<PageState>((set, get) => ({
     const sourceIds = [source.id, ...collectDescendantIds(allNodes, source.id)];
     const idMap = new Map<string, string>();
     for (const id of sourceIds) idMap.set(id, makeId(id.startsWith('folder') ? 'folder' : id.startsWith('kanban') ? 'kanban' : 'page'));
-    const siblings = allNodes.filter((node) => node.parentId === source.parentId && node.id !== source.id);
+    const duplicateTitle = getUniqueNodeTitle(`${source.title} копия`, allNodes, source.projectId, source.parentId);
     const duplicatedNodes = sourceIds
       .map((id) => allNodes.find((node) => node.id === id))
       .filter((node): node is PageNode => Boolean(node))
@@ -250,7 +384,7 @@ export const usePageStore = create<PageState>((set, get) => ({
         ...node,
         id: idMap.get(node.id)!,
         parentId: node.id === source.id ? source.parentId : idMap.get(node.parentId ?? '') ?? node.parentId,
-        title: node.id === source.id ? `${node.title} копия` : node.title,
+        title: node.id === source.id ? duplicateTitle : node.title,
         order: node.id === source.id ? source.order + 1 : node.order,
         isPinned: false,
         pinnedOrder: undefined,
@@ -271,34 +405,112 @@ export const usePageStore = create<PageState>((set, get) => ({
         ...duplicatedNodes,
       ],
       blocks: [...s.blocks, ...duplicatedBlocks],
+      loadedTreeParentIds: new Set([
+        ...s.loadedTreeParentIds,
+        ...duplicatedNodes.filter((node) => node.type === 'folder').map((node) => parentLoadKey(node.id)),
+      ]),
+      loadedBlockPageIds: new Set([
+        ...s.loadedBlockPageIds,
+        ...duplicatedNodes.filter((node) => node.type === 'page').map((node) => node.id),
+      ]),
       selectedPageId: duplicatedNodes[0]?.type === 'folder' ? s.selectedPageId : duplicatedNodes[0]?.id ?? s.selectedPageId,
     }));
-    persistCurrentProject();
+    for (const node of duplicatedNodes.sort((a, b) => getNodeDepth(duplicatedNodes, a) - getNodeDepth(duplicatedNodes, b))) {
+      void workspaceApi
+        .createNode(node.projectId, {
+          id: node.id,
+          parentId: node.parentId,
+          type: node.type,
+          title: node.title,
+          icon: node.icon,
+          order: node.order,
+          properties: node.properties,
+          initialBlocks:
+            node.type === 'page'
+              ? duplicatedBlocks
+                  .filter((block) => block.pageId === node.id)
+                  .map((block) => ({
+                    id: block.id,
+                    type: block.type,
+                    content: block.content,
+                    order: block.order,
+                  }))
+              : undefined,
+        })
+        .catch(() => undefined);
+    }
     return duplicatedNodes[0] ?? null;
   },
 
   createNode: (input) => {
     recordHistory(set, get);
     const now = new Date().toISOString();
-    const siblings = get().nodes.filter((n) => n.parentId === (input.parentId ?? null));
+    const parentId = input.parentId ?? null;
+    const siblings = get().nodes.filter((n) => n.projectId === input.projectId && n.parentId === parentId && !n.isDeleted);
+    const title = getUniqueNodeTitle(input.title ?? defaultTitle(input.type), get().nodes, input.projectId, parentId);
     const node: PageNode = {
-      id: makeId('page'),
+      id: makeId(input.type),
       projectId: input.projectId,
-      parentId: input.parentId ?? null,
+      parentId,
       type: input.type,
-      title: input.title ?? defaultTitle(input.type),
+      title,
       icon: input.icon ?? defaultIcon(input.type),
       order: siblings.length,
+      properties: input.properties,
       createdAt: now,
       updatedAt: now,
     };
+    const explicitInitialBlocks = input.initialBlocks ?? [];
+    const hasExplicitInitialBlocks = explicitInitialBlocks.length > 0;
+    const initialBlocks =
+      input.type === 'page'
+        ? hasExplicitInitialBlocks
+          ? explicitInitialBlocks.map((block, index) =>
+              createBlock(node.id, block.type, block.order ?? index, structuredCloneSafe(block.content)),
+            )
+          : [createInitialBlock(node.id)]
+        : [];
 
     set((s) => ({
       nodes: [...s.nodes, node],
-      blocks: input.type === 'page' ? [...s.blocks, createInitialBlock(node.id)] : s.blocks,
+      blocks: initialBlocks.length > 0 ? [...s.blocks, ...initialBlocks] : s.blocks,
+      loadedTreeParentIds:
+        input.type === 'folder'
+          ? new Set([...s.loadedTreeParentIds, parentLoadKey(node.id)])
+          : s.loadedTreeParentIds,
+      loadedBlockPageIds:
+        input.type === 'page'
+          ? new Set([...s.loadedBlockPageIds, node.id])
+          : s.loadedBlockPageIds,
       selectedPageId: input.type === 'folder' ? s.selectedPageId : node.id,
     }));
-    persistCurrentProject();
+    void workspaceApi
+      .createNode(input.projectId, {
+        id: node.id,
+        parentId: node.parentId,
+        type: node.type,
+        title: node.title,
+        icon: node.icon,
+        order: node.order,
+        properties: node.properties,
+        initialBlockId: !hasExplicitInitialBlocks && initialBlocks.length === 1 ? initialBlocks[0].id : undefined,
+        initialBlocks: hasExplicitInitialBlocks || initialBlocks.length > 1
+          ? initialBlocks.map((block) => ({
+              id: block.id,
+              type: block.type,
+              content: block.content,
+              order: block.order,
+            }))
+          : undefined,
+      })
+      .then((createdNode) => {
+        set((s) => ({
+          nodes: s.nodes.map((item) => (item.id === node.id ? { ...item, ...createdNode } : item)),
+        }));
+      })
+      .catch(() => {
+        if (!get().isPartialSpace) persistCurrentProject();
+      });
     return node;
   },
 
@@ -309,18 +521,11 @@ export const usePageStore = create<PageState>((set, get) => ({
       type: template.nodeType ?? (template.id === 'kanban' ? 'kanban' : 'page'),
       title: template.title,
       icon: template.icon,
+      initialBlocks:
+        (template.nodeType ?? (template.id === 'kanban' ? 'kanban' : 'page')) === 'page'
+          ? template.blocks.map((block, order) => ({ type: block.type, content: block.content, order }))
+          : undefined,
     });
-
-    if (node.type === 'page') {
-      const initialBlockIds = get().blocks.filter((block) => block.pageId === node.id).map((block) => block.id);
-      set((s) => ({
-        blocks: [
-          ...s.blocks.filter((block) => !initialBlockIds.includes(block.id)),
-          ...template.blocks.map((block, order) => createBlock(node.id, block.type, order, block.content)),
-        ],
-      }));
-      persistCurrentProject();
-    }
 
     return node;
   },
@@ -334,7 +539,7 @@ export const usePageStore = create<PageState>((set, get) => ({
     set((s) => ({
       nodes: s.nodes.map((n) => (n.id === id ? { ...n, title, updatedAt } : n)),
     }));
-    persistCurrentProject();
+    void workspaceApi.updateNode(current.projectId, id, { title }).catch(() => undefined);
   },
 
   updateNodeIcon: (id, icon) => {
@@ -346,23 +551,27 @@ export const usePageStore = create<PageState>((set, get) => ({
     set((s) => ({
       nodes: s.nodes.map((node) => (node.id === id ? { ...node, icon, updatedAt } : node)),
     }));
-    persistCurrentProject();
+    void workspaceApi.updateNode(current.projectId, id, { icon }).catch(() => undefined);
   },
 
   updatePageProperties: (id, properties) => {
+    const current = get().nodes.find((node) => node.id === id);
+    if (!current) return;
     recordHistory(set, get);
     const updatedAt = new Date().toISOString();
     set((s) => ({
       nodes: s.nodes.map((node) =>
         node.id === id
           ? { ...node, properties: { ...(node.properties ?? {}), ...properties }, updatedAt }
-          : node,
+        : node,
       ),
     }));
-    persistCurrentProject();
+    void workspaceApi.updateNode(current.projectId, id, { properties }).catch(() => undefined);
   },
 
   deleteNode: (id) => {
+    const target = get().nodes.find((node) => node.id === id);
+    if (!target) return;
     recordHistory(set, get);
     const idsToDelete = collectDescendantIds(get().nodes, id);
     idsToDelete.add(id);
@@ -379,10 +588,12 @@ export const usePageStore = create<PageState>((set, get) => ({
         : s.selectedPageId;
       return { nodes, blocks, selectedPageId };
     });
-    persistCurrentProject();
+    void workspaceApi.trashNode(target.projectId, id).catch(() => undefined);
   },
 
   restoreNode: (id) => {
+    const target = get().nodes.find((node) => node.id === id);
+    if (!target) return;
     recordHistory(set, get);
     const idsToRestore = collectDescendantIds(get().nodes, id);
     idsToRestore.add(id);
@@ -402,10 +613,12 @@ export const usePageStore = create<PageState>((set, get) => ({
         };
       }),
     }));
-    persistCurrentProject();
+    void workspaceApi.restoreNode(target.projectId, id).catch(() => undefined);
   },
 
   purgeNode: (id) => {
+    const target = get().nodes.find((node) => node.id === id);
+    if (!target) return;
     recordHistory(set, get);
     const idsToPurge = collectDescendantIds(get().nodes, id);
     idsToPurge.add(id);
@@ -425,7 +638,7 @@ export const usePageStore = create<PageState>((set, get) => ({
         selectedPageId,
       };
     });
-    persistCurrentProject();
+    void workspaceApi.purgeNode(target.projectId, id).catch(() => undefined);
   },
 
   ensureDailyNote: (projectId, date = new Date()) => {
@@ -451,7 +664,7 @@ export const usePageStore = create<PageState>((set, get) => ({
       get().createBlockWithContent(node.id, 'paragraph', { text: '' }, 2);
     }
     set((s) => ({ dailyNotes: { ...s.dailyNotes, [key]: node.id } }));
-    persistCurrentProject();
+    persistCurrentProjectMeta({ dailyNotes: get().dailyNotes });
     return node;
   },
 
@@ -482,7 +695,21 @@ export const usePageStore = create<PageState>((set, get) => ({
         block,
       ],
     }));
-    persistCurrentProject();
+    const projectId = getProjectIdForPage(get(), pageId);
+    if (projectId) {
+      void workspaceApi
+        .createBlock(projectId, pageId, {
+          id: block.id,
+          type: block.type,
+          content: block.content,
+          order: block.order,
+        })
+        .catch(() => {
+          if (!get().isPartialSpace) persistCurrentProject();
+        });
+    } else if (!get().isPartialSpace) {
+      persistCurrentProject();
+    }
     return block;
   },
 
@@ -501,7 +728,21 @@ export const usePageStore = create<PageState>((set, get) => ({
         block,
       ],
     }));
-    persistCurrentProject();
+    const projectId = getProjectIdForPage(get(), pageId);
+    if (projectId) {
+      void workspaceApi
+        .createBlock(projectId, pageId, {
+          id: block.id,
+          type: block.type,
+          content: block.content,
+          order: block.order,
+        })
+        .catch(() => {
+          if (!get().isPartialSpace) persistCurrentProject();
+        });
+    } else if (!get().isPartialSpace) {
+      persistCurrentProject();
+    }
     return block;
   },
 
@@ -516,7 +757,12 @@ export const usePageStore = create<PageState>((set, get) => ({
     set((s) => ({
       blocks: s.blocks.map((b) => (b.id === id ? { ...b, type: nextType, content, updatedAt } : b)),
     }));
-    persistCurrentProject();
+    const projectId = getProjectIdForPage(get(), current.pageId);
+    if (projectId) {
+      void workspaceApi.updateBlock(projectId, id, { type: nextType, content }).catch(() => undefined);
+    } else if (!get().isPartialSpace) {
+      persistCurrentProject();
+    }
   },
 
   moveBlock: (id, direction) => {
@@ -527,20 +773,33 @@ export const usePageStore = create<PageState>((set, get) => ({
     const target = pageBlocks[index + direction];
     if (!target) return;
     recordHistory(set, get);
+    const updatedAt = new Date().toISOString();
     set((s) => ({
       blocks: s.blocks.map((item) => {
-        if (item.id === block.id) return { ...item, order: target.order, updatedAt: new Date().toISOString() };
-        if (item.id === target.id) return { ...item, order: block.order, updatedAt: new Date().toISOString() };
+        if (item.id === block.id) return { ...item, order: target.order, updatedAt };
+        if (item.id === target.id) return { ...item, order: block.order, updatedAt };
         return item;
       }),
     }));
-    persistCurrentProject();
+    const projectId = getProjectIdForPage(get(), block.pageId);
+    if (projectId) {
+      void workspaceApi.moveBlock(projectId, id, { order: target.order }).catch(() => undefined);
+    } else if (!get().isPartialSpace) {
+      persistCurrentProject();
+    }
   },
 
   deleteBlock: (id) => {
+    const block = get().blocks.find((item) => item.id === id);
+    if (!block) return;
     recordHistory(set, get);
     set((s) => ({ blocks: s.blocks.filter((b) => b.id !== id) }));
-    persistCurrentProject();
+    const projectId = getProjectIdForPage(get(), block.pageId);
+    if (projectId) {
+      void workspaceApi.deleteBlock(projectId, id).catch(() => undefined);
+    } else if (!get().isPartialSpace) {
+      persistCurrentProject();
+    }
   },
 
   getBlocksByPage: (pageId) =>
@@ -595,24 +854,6 @@ function areSnapshotsEqual(a: HistorySnapshot, b: HistorySnapshot) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function purgeExpiredDeletedNodes(space: PersistedProjectSpace) {
-  const expiredIds = new Set(
-    space.nodes
-      .filter((node) => node.isDeleted && isOlderThan30Days(node.deletedAt))
-      .map((node) => node.id),
-  );
-  for (const id of [...expiredIds]) {
-    for (const childId of collectDescendantIds(space.nodes, id)) expiredIds.add(childId);
-  }
-  if (expiredIds.size === 0) return;
-  space.nodes = space.nodes.filter((node) => !expiredIds.has(node.id));
-  space.blocks = space.blocks.filter((block) => !expiredIds.has(block.pageId));
-  space.recentPages = (space.recentPages ?? []).filter((id) => !expiredIds.has(id));
-  for (const [date, pageId] of Object.entries(space.dailyNotes ?? {})) {
-    if (expiredIds.has(pageId)) delete space.dailyNotes?.[date];
-  }
-}
-
 function getProjectEntryNode(nodes: PageNode[]) {
   return (
     nodes
@@ -627,26 +868,52 @@ function getProjectEntryNode(nodes: PageNode[]) {
   );
 }
 
-function isOlderThan30Days(date?: string) {
-  if (!date) return false;
-  return Date.now() - new Date(date).getTime() > 30 * 24 * 3600000;
+function parentLoadKey(parentId: string | null) {
+  return parentId ?? ROOT_PARENT_KEY;
+}
+
+function mergeNodes(current: PageNode[], incoming: PageNode[]) {
+  const byId = new Map(current.map((node) => [node.id, node]));
+  for (const node of incoming) byId.set(node.id, node);
+  return [...byId.values()];
+}
+
+function mergePageBlocks(current: Block[], pageId: string, incoming: Block[]) {
+  return [...current.filter((block) => block.pageId !== pageId), ...incoming];
+}
+
+function isSameProject(state: PageState, projectId: string | number) {
+  const projectIds = state.nodes.map((node) => String(node.projectId));
+  return projectIds.length === 0 || projectIds.includes(String(projectId));
+}
+
+function getProjectIdForPage(state: PageState, pageId: string) {
+  return state.nodes.find((node) => node.id === pageId)?.projectId;
+}
+
+function getCurrentProjectId(state: PageState) {
+  return state.nodes[0]?.projectId;
+}
+
+function persistCurrentProjectMeta(input: Parameters<typeof workspaceApi.updateMeta>[1]) {
+  const state = usePageStore.getState();
+  const projectId = getCurrentProjectId(state);
+  if (!projectId) return;
+  void workspaceApi.updateMeta(projectId, input).catch(() => undefined);
 }
 
 function persistCurrentProject() {
-  const state = usePageStore.getState();
-  const projectId = state.nodes[0]?.projectId;
-  if (!projectId) return;
-  const space = {
-    nodes: state.nodes,
-    blocks: state.blocks,
-    collapsedIds: [...state.collapsedIds],
-    recentPages: state.recentPages,
-    dailyNotes: state.dailyNotes,
-  };
-  void apiRequest(`/projects/${projectId}/space`, { method: 'PUT', body: space }).catch(() => undefined);
+  // Legacy full-space persistence is intentionally disabled.
+  // Mutations must go through granular workspaceApi endpoints.
 }
 
-function createDefaultSpace(projectId: string, projectTitle: string): PersistedProjectSpace {
+function createDefaultSpace(projectId: string, projectTitle: string): {
+  nodes: PageNode[];
+  blocks: Block[];
+  collapsedIds: string[];
+  recentPages: string[];
+  dailyNotes: Record<string, string>;
+} {
   const now = new Date().toISOString();
   const rootFolder: PageNode = {
     id: makeId('folder'),
@@ -734,6 +1001,20 @@ function collectDescendantIds(nodes: PageNode[], parentId: string): Set<string> 
   return result;
 }
 
+function getUniqueNodeTitle(baseTitle: string, nodes: PageNode[], projectId: string, parentId: string | null) {
+  const title = baseTitle.trim() || 'Новая страница';
+  const existingTitles = new Set(
+    nodes
+      .filter((node) => !node.isDeleted && node.projectId === projectId && (node.parentId ?? null) === parentId)
+      .map((node) => node.title.trim()),
+  );
+  if (!existingTitles.has(title)) return title;
+
+  let index = 1;
+  while (existingTitles.has(`${title}_${index}`)) index += 1;
+  return `${title}_${index}`;
+}
+
 function defaultTitle(type: PageNodeType) {
   if (type === 'folder') return 'Новая папка';
   if (type === 'kanban') return 'Kanban-доска';
@@ -754,6 +1035,18 @@ function isDescendant(nodes: PageNode[], possibleChildId: string | null, parentI
     current = current.parentId ? nodes.find((node) => node.id === current?.parentId) : undefined;
   }
   return false;
+}
+
+function getNodeDepth(nodes: PageNode[], node: PageNode) {
+  let depth = 0;
+  let parentId = node.parentId;
+  const seen = new Set<string>();
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    depth += 1;
+    parentId = nodes.find((item) => item.id === parentId)?.parentId ?? null;
+  }
+  return depth;
 }
 
 function structuredCloneSafe<T>(value: T): T {

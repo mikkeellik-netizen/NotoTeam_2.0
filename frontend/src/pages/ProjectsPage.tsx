@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsApi } from '../api/projects';
 import { systemApi } from '../api/system';
+import UserAvatarImage from '../components/UserAvatarImage';
 import { useAuthStore } from '../store/authStore';
 import { useProjectStore } from '../store/projectStore';
-import type { Project } from '../types';
+import type { Project, ProjectMember } from '../types';
 
 export default function ProjectsPage() {
   const navigate = useNavigate();
@@ -344,12 +345,13 @@ function ProjectCard({ project, onClick }: { project: Project & { overdueCount?:
         {members.length > 0 && (
           <div className="ml-auto flex -space-x-1">
             {members.slice(0, 4).map((member) => (
-              <div
+              <UserAvatarImage
                 key={member.id}
-                className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-button-color)] text-xs font-bold text-[var(--tg-theme-button-text-color)]"
-              >
-                {(member.user?.firstName?.[0] || member.user?.username?.[0] || '?').toUpperCase()}
-              </div>
+                user={member.user}
+                label={projectMemberLabel(member)}
+                size="xs"
+                className="border-2 border-[var(--tg-theme-secondary-bg-color)]"
+              />
             ))}
             {members.length > 4 && (
               <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-hint-color)] text-xs text-white">
@@ -372,4 +374,14 @@ function getInviteCodeFromParams(searchParams: URLSearchParams) {
 
   if (!raw) return '';
   return raw.trim().replace(/^join[_-]/i, '').toUpperCase();
+}
+
+function projectMemberLabel(member: ProjectMember) {
+  const user = member.user;
+  return (
+    [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+    user?.username ||
+    user?.telegramId ||
+    '?'
+  );
 }

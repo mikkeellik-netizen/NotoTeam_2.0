@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { remindersApi, type ReminderInput } from '../api/reminders';
 import { useProjectStore } from '../store/projectStore';
+import { useAuthStore } from '../store/authStore';
 import type { Reminder } from '../types';
+import { getProjectPermissions } from '../utils/projectPermissions';
 
-const CURRENT_USER_ID = '1';
 const WEEKDAYS = [
   { value: 1, label: 'Пн' },
   { value: 2, label: 'Вт' },
@@ -20,12 +21,14 @@ export default function RemindersPage() {
   const navigate = useNavigate();
   const pid = Number(projectId);
   const { currentProject, fetchProject } = useProjectStore();
+  const currentUser = useAuthStore((state) => state.user);
+  const currentUserId = currentUser?.id ? String(currentUser.id) : '';
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [targetUserId, setTargetUserId] = useState(CURRENT_USER_ID);
+  const [targetUserId, setTargetUserId] = useState('');
   const [scheduleMode, setScheduleMode] = useState<'once' | 'recurring' | 'dates'>('once');
   const [frequency, setFrequency] = useState<'daily' | 'weekly' | 'monthly'>('weekly');
   const [remindAt, setRemindAt] = useState(toLocalInputValue(new Date(Date.now() + 3600000)));
@@ -38,6 +41,8 @@ export default function RemindersPage() {
   const [botChannel, setBotChannel] = useState(true);
 
   const members = currentProject?.members ?? [];
+  const permissions = useMemo(() => getProjectPermissions(currentProject, currentUser?.id), [currentProject, currentUser?.id]);
+  const canManageReminders = Boolean(permissions.manageReminders);
   const active = useMemo(() => reminders.filter((item) => item.status === 'active'), [reminders]);
   const paused = useMemo(() => reminders.filter((item) => item.status === 'paused'), [reminders]);
   const due = useMemo(
@@ -57,10 +62,20 @@ export default function RemindersPage() {
   }, [projectId]);
 
   useEffect(() => {
-    if (members.length && !members.some((member) => String(member.userId) === targetUserId)) {
-      setTargetUserId(String(members[0].userId));
+    if (!members.length) return;
+    const targetExists = members.some((member) => String(member.userId) === targetUserId);
+    if (targetExists) return;
+    const currentMember = currentUserId
+      ? members.find((member) => String(member.userId) === currentUserId)
+      : undefined;
+    setTargetUserId(String(currentMember?.userId ?? members[0].userId));
+  }, [currentUserId, members, targetUserId]);
+
+  useEffect(() => {
+    if (!targetUserId && currentUserId) {
+      setTargetUserId(currentUserId);
     }
-  }, [members, targetUserId]);
+  }, [currentUserId, targetUserId]);
 
   const refresh = async () => {
     if (!projectId) return;
@@ -68,11 +83,11 @@ export default function RemindersPage() {
   };
 
   const createReminder = async () => {
-    if (!projectId || !title.trim() || saving) return;
+    if (!canManageReminders || !projectId || !title.trim() || saving || !currentUserId || !targetUserId) return;
     setSaving(true);
     try {
       const input: ReminderInput = {
-        creatorUserId: CURRENT_USER_ID,
+        creatorUserId: currentUserId,
         targetUserId,
         sourceType: 'manual',
         title: title.trim(),
@@ -107,11 +122,13 @@ export default function RemindersPage() {
   };
 
   const updateStatus = async (reminder: Reminder, status: Reminder['status']) => {
+    if (!canManageReminders) return;
     const updated = await remindersApi.update(reminder.id, { status });
     setReminders((items) => items.map((item) => (item.id === updated.id ? updated : item)));
   };
 
   const deleteReminder = async (reminder: Reminder) => {
+    if (!canManageReminders) return;
     await remindersApi.remove(reminder.id);
     setReminders((items) => items.filter((item) => item.id !== reminder.id));
   };
@@ -132,6 +149,7 @@ export default function RemindersPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-4">
+        {canManageReminders && (
         <section className="mb-4 rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
           <h2 className="mb-3 text-sm font-bold">Новое напоминание</h2>
           <div className="space-y-3">
@@ -152,7 +170,12 @@ export default function RemindersPage() {
               onChange={(event) => setTargetUserId(event.target.value)}
               className="w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-sm outline-none"
             >
-              {(members.length ? members : [{ userId: 1, user: { firstName: 'Local', username: 'local_user' } } as any]).map((member) => (
+              {(members.length
+                ? members
+                : currentUser
+                  ? [{ userId: currentUser.id, user: currentUser } as any]
+                  : []
+              ).map((member) => (
                 <option key={member.userId} value={String(member.userId)}>
                   {member.user?.firstName ?? member.user?.username ?? `User ${member.userId}`}
                   {member.user?.username ? ` · @${member.user.username}` : ''}
@@ -259,6 +282,7 @@ export default function RemindersPage() {
             </button>
           </div>
         </section>
+        )}
 
         <section className="space-y-2">
           <h2 className="text-sm font-bold">Активные напоминания</h2>
@@ -278,6 +302,7 @@ export default function RemindersPage() {
                 onPause={() => updateStatus(reminder, 'paused')}
                 onResume={() => updateStatus(reminder, 'active')}
                 onDelete={() => deleteReminder(reminder)}
+                canManage={canManageReminders}
               />
             ))
           )}
@@ -297,6 +322,7 @@ export default function RemindersPage() {
                 onPause={() => updateStatus(reminder, 'paused')}
                 onResume={() => updateStatus(reminder, 'active')}
                 onDelete={() => deleteReminder(reminder)}
+                canManage={canManageReminders}
               />
             ))
           )}
@@ -311,11 +337,13 @@ function ReminderCard({
   onPause,
   onResume,
   onDelete,
+  canManage,
 }: {
   reminder: Reminder;
   onPause: () => void;
   onResume: () => void;
   onDelete: () => void;
+  canManage: boolean;
 }) {
   const due = reminder.nextRunAt && new Date(reminder.nextRunAt).getTime() <= Date.now();
   const isPaused = reminder.status === 'paused';
@@ -334,6 +362,7 @@ function ReminderCard({
           </p>
         </div>
       </div>
+      {canManage && (
       <div className="mt-3 flex gap-2">
         <button
           onClick={isPaused ? onResume : onPause}
@@ -345,6 +374,7 @@ function ReminderCard({
           ×
         </button>
       </div>
+      )}
     </div>
   );
 }

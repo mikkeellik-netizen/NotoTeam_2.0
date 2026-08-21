@@ -1,11 +1,13 @@
 export type Priority = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export type BotTone = "soft" | "neutral" | "strict" | "pastoral";
+export type ArchiveCleanupMode = "never" | "2weeks" | "1month" | "3months";
 
 export type NotificationKind =
   | "task_assigned"
   | "task_deadline_15h"
   | "task_deadline_2h"
+  | `task_deadline_${number}m`
   | "task_deadline_now"
   | "task_overdue"
   | "mention"
@@ -98,8 +100,36 @@ export interface PageNode {
   title: string;
   icon: string;
   order: number;
+  properties?: {
+    author?: string;
+    status?: string;
+    tags?: string[];
+    deadline?: string;
+    responsibleUserId?: string;
+  };
+  isDeleted?: boolean;
+  deletedAt?: string;
+  isPinned?: boolean;
+  pinnedOrder?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PageNodeInput {
+  id?: string;
+  actorUserId?: string;
+  parentId?: string | null;
+  type: PageNode["type"];
+  title?: string;
+  icon?: string;
+  order?: number;
+  properties?: PageNode["properties"];
+  initialBlocks?: Array<{
+    id?: string;
+    type: string;
+    content?: unknown;
+    order?: number;
+  }>;
 }
 
 export interface WorkspaceSpace {
@@ -142,6 +172,7 @@ export interface BotReportSettings {
 
 export interface ProjectBotSettings {
   timezone: "Europe/Moscow";
+  archiveCleanupMode: ArchiveCleanupMode;
   taskDeadlineNotificationsEnabled: boolean;
   mentionNotificationsEnabled: boolean;
   dutyNotificationsEnabled: boolean;

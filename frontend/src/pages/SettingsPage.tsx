@@ -1,33 +1,61 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { activityApi } from '../api/activity';
+import { adminSummaryApi, type AdminChangeSummary } from '../api/adminSummary';
+import { avatarApi } from '../api/avatar';
 import { botSettingsApi, defaultProjectBotSettings } from '../api/botSettings';
 import { projectsApi } from '../api/projects';
 import { tasksApi } from '../api/tasks';
 import { LANGUAGE_OPTIONS } from '../localization/languages';
+import UserAvatarImage from '../components/UserAvatarImage';
 import {
   createProjectExport,
   downloadExportResult,
   exportLabel,
   getProjectExportTargets,
   openPrintableExport,
+  sendProjectExportToTelegram,
   type ExportFormat,
   type ExportResult,
   type ExportScope,
 } from '../services/exportService';
 import { useAuthStore } from '../store/authStore';
-import { usePageStore } from '../store/pageStore';
 import { useProjectStore } from '../store/projectStore';
 import { type LanguageCode, useSettingsStore } from '../store/settingsStore';
-import type { ActivityEvent, Block, PageNode, Project, ProjectBotSettings, ProjectJoinRequest, ProjectMember, Task } from '../types';
+import { calculateTaskSignificanceScore, getTaskSignificanceLabel, normalizeTaskSignificanceSettings } from '../types';
+import type {
+  ActivityEvent,
+  Block,
+  Column,
+  PageNode,
+  Project,
+  ProjectBotSettings,
+  ProjectJoinRequest,
+  ProjectMember,
+  ProjectRoleName,
+  ResponsibilityArea,
+  Task,
+  TaskSignificanceSettings,
+  User,
+} from '../types';
 import { copyPlainText } from '../utils/clipboard';
+import { getProjectPermissions } from '../utils/projectPermissions';
 
 export default function SettingsPage() {
   const navigate = useNavigate();
   const { projectId } = useParams<{ projectId?: string }>();
   const selectedProjectId = projectId ? Number(projectId) : undefined;
   const currentUser = useAuthStore((state) => state.user);
-  const { projects, fetchProjects, fetchProject, createProject, removeProject, restoreProject } = useProjectStore();
+  const setAuthUser = useAuthStore((state) => state.setUser);
+  const {
+    projects,
+    fetchProjects,
+    fetchProject,
+    createProject,
+    removeProject,
+    restoreProject,
+    leaveProject: leaveProjectInStore,
+  } = useProjectStore();
   const { displayName, theme, language, loadSettings, setDisplayName, setTheme, setLanguage } = useSettingsStore();
   const [nameDraft, setNameDraft] = useState(displayName);
   const [memberUsername, setMemberUsername] = useState('');
@@ -41,7 +69,7 @@ export default function SettingsPage() {
   const [newProjectTitle, setNewProjectTitle] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
-  const [memberActionId, setMemberActionId] = useState<number | null>(null);
+  const [memberActionId, setMemberActionId] = useState<number | string | null>(null);
   const [memberConfirm, setMemberConfirm] = useState<{
     type: 'remove' | 'transfer' | 'leave';
     member?: ProjectMember;
@@ -49,6 +77,7 @@ export default function SettingsPage() {
   } | null>(null);
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminTasks, setAdminTasks] = useState<Task[]>([]);
+  const [adminColumns, setAdminColumns] = useState<Column[]>([]);
   const [adminEvents, setAdminEvents] = useState<ActivityEvent[]>([]);
   const [activityRetentionDays, setActivityRetentionDays] = useState(7);
   const [exportingProject, setExportingProject] = useState(false);
@@ -57,11 +86,21 @@ export default function SettingsPage() {
   const [exportScope, setExportScope] = useState<ExportScope>('project');
   const [exportTargetId, setExportTargetId] = useState('');
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
+  const [exportMessage, setExportMessage] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [joinRequests, setJoinRequests] = useState<ProjectJoinRequest[]>([]);
   const [joinCode, setJoinCode] = useState('');
   const [accessNotice, setAccessNotice] = useState('');
   const [accessLoading, setAccessLoading] = useState(false);
+  const [appDialog, setAppDialog] = useState<{
+    title: string;
+    message: string;
+    tone?: 'info' | 'success' | 'danger';
+  } | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarNotice, setAvatarNotice] = useState('');
+  const [avatarRefreshKey, setAvatarRefreshKey] = useState(0);
+  const [avatarTelegramConsentOpen, setAvatarTelegramConsentOpen] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -82,7 +121,7 @@ export default function SettingsPage() {
   }, [selectedProjectId]);
 
   const activeProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
+    () => projects.find((project) => String(project.id) === String(activeProjectId)) ?? projects[0],
     [activeProjectId, projects],
   );
   // Сравниваем как строки: с бэкенда userId/ownerId могут прийти строкой, а currentUser.id — числом.
@@ -90,14 +129,19 @@ export default function SettingsPage() {
   const currentMember = activeProject?.members?.find(
     (member) => String(member.userId) === String(currentUser?.id ?? '_'),
   );
-  const canOpenAdminPanel = isActiveProjectOwner || currentMember?.role?.name === 'admin';
+  const currentPermissions = getProjectPermissions(activeProject, currentUser?.id);
+  const canOpenAdminPanel = Boolean(currentPermissions.viewAnalytics || currentPermissions.manageBot || currentPermissions.manageProject);
+  const canManageMembers = Boolean(currentPermissions.manageMembers);
+  const canExportProject = Boolean(currentPermissions.exportProject);
+  const isMemberActionLoading = (id: number | string | undefined) =>
+    memberActionId !== null && String(memberActionId) === String(id ?? -1);
   const inviteLink = useMemo(
     () => (inviteCode ? `${window.location.origin}/?join=${encodeURIComponent(inviteCode)}` : ''),
     [inviteCode],
   );
 
   useEffect(() => {
-    if (!activeProject?.id || !currentUser?.id || !isActiveProjectOwner) {
+    if (!activeProject?.id || !currentUser?.id || !canManageMembers) {
       setInviteCode('');
       setJoinRequests([]);
       return;
@@ -117,7 +161,7 @@ export default function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.id, currentUser?.id, isActiveProjectOwner]);
+  }, [activeProject?.id, currentUser?.id, canManageMembers]);
 
   const selectProject = (id: number) => {
     setActiveProjectId(id);
@@ -135,6 +179,61 @@ export default function SettingsPage() {
   const saveName = () => {
     const next = nameDraft.trim() || 'Local User';
     setDisplayName(next);
+  };
+
+  const applyUpdatedAvatarUser = async (user: User, message: string) => {
+    setAuthUser(user);
+    setAvatarNotice(message);
+    setAvatarRefreshKey((value) => value + 1);
+    if (activeProject?.id) await fetchProject(activeProject.id);
+    else await fetchProjects();
+  };
+
+  const useTelegramAvatar = async () => {
+    if (!currentUser?.id) return;
+    setAvatarBusy(true);
+    setAvatarNotice('');
+    try {
+      const user = await avatarApi.useTelegram(currentUser.id);
+      const message = user.avatarStatus === 'ready'
+        ? 'Фото из Telegram подключено.'
+        : 'Фото Telegram недоступно из-за приватности. Можно загрузить вручную.';
+      await applyUpdatedAvatarUser(user, message);
+    } catch (error) {
+      setAvatarNotice(error instanceof Error ? error.message : 'Не удалось получить фото Telegram');
+    } finally {
+      setAvatarBusy(false);
+      setAvatarTelegramConsentOpen(false);
+    }
+  };
+
+  const disableAvatar = async () => {
+    if (!currentUser?.id) return;
+    setAvatarBusy(true);
+    setAvatarNotice('');
+    try {
+      const user = await avatarApi.disable(currentUser.id);
+      await applyUpdatedAvatarUser(user, 'Фото отключено. Будут показаны инициалы.');
+    } catch (error) {
+      setAvatarNotice(error instanceof Error ? error.message : 'Не удалось отключить фото');
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const uploadManualAvatar = async (file: File | undefined) => {
+    if (!file || !currentUser?.id) return;
+    setAvatarBusy(true);
+    setAvatarNotice('');
+    try {
+      const dataUrl = await prepareAvatarDataUrl(file);
+      const user = await avatarApi.uploadManual(currentUser.id, dataUrl);
+      await applyUpdatedAvatarUser(user, 'Фото загружено вручную.');
+    } catch (error) {
+      setAvatarNotice(humanAvatarError(error, 'Не удалось загрузить фото'));
+    } finally {
+      setAvatarBusy(false);
+    }
   };
 
   const addMember = async () => {
@@ -156,7 +255,7 @@ export default function SettingsPage() {
   };
 
   const refreshProjectAccess = async () => {
-    if (!activeProject?.id || !currentUser?.id || !isActiveProjectOwner) return;
+    if (!activeProject?.id || !currentUser?.id || !canManageMembers) return;
     setInviteCode(await projectsApi.getInviteCode(activeProject.id, currentUser.id));
     setJoinRequests(await projectsApi.getJoinRequests(activeProject.id, currentUser.id));
   };
@@ -183,6 +282,14 @@ export default function SettingsPage() {
     }
   };
 
+  const showAppDialog = (
+    message: string,
+    title = 'Сообщение',
+    tone: 'info' | 'success' | 'danger' = 'info',
+  ) => {
+    setAppDialog({ title, message, tone });
+  };
+
   const sendJoinRequest = async () => {
     if (!joinCode.trim() || !currentUser?.id) return;
     setAccessLoading(true);
@@ -191,9 +298,9 @@ export default function SettingsPage() {
       const displayName = [currentUser.firstName, currentUser.lastName].filter(Boolean).join(' ') || username;
       await projectsApi.requestJoinByCode(joinCode, username, displayName, currentUser.id);
       setJoinCode('');
-      window.alert('Заявка отправлена владельцу проекта');
+      showAppDialog('Заявка отправлена владельцу проекта.', 'Заявка отправлена', 'success');
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Не удалось отправить заявку');
+      showAppDialog(error instanceof Error ? error.message : 'Не удалось отправить заявку.', 'Не удалось отправить заявку', 'danger');
     } finally {
       setAccessLoading(false);
     }
@@ -222,7 +329,7 @@ export default function SettingsPage() {
       await projectsApi.removeMember(activeProject.id, memberId, currentUser.id);
       await refreshActiveProject();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Не удалось удалить участника');
+      showAppDialog(error instanceof Error ? error.message : 'Не удалось удалить участника.', 'Ошибка удаления', 'danger');
     } finally {
       setMemberActionId(null);
     }
@@ -235,22 +342,23 @@ export default function SettingsPage() {
       await projectsApi.transferOwnership(activeProject.id, memberId, currentUser.id);
       await refreshActiveProject();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Не удалось передать права владельца');
+      showAppDialog(error instanceof Error ? error.message : 'Не удалось передать права владельца.', 'Ошибка передачи прав', 'danger');
     } finally {
       setMemberActionId(null);
     }
   };
 
-  const toggleAdmin = async (member: ProjectMember) => {
+  const changeMemberRole = async (member: ProjectMember, role: ProjectRoleName) => {
     if (!activeProject?.id || !currentUser?.id) return;
-    const enabled = member.role?.name !== 'admin';
+    const currentRole = member.role?.name ?? 'editor';
+    if (role === currentRole || role === 'owner') return;
     setMemberActionId(member.id);
     try {
-      await projectsApi.setMemberAdmin(activeProject.id, member.id, enabled, currentUser.id);
+      await projectsApi.setMemberRole(activeProject.id, member.id, role, currentUser.id);
       await refreshActiveProject();
-      setAccessNotice(enabled ? 'Администратор назначен' : 'Права администратора сняты');
+      setAccessNotice(`Роль обновлена: ${projectRoleLabel(role)}`);
     } catch (error) {
-      setAccessNotice(error instanceof Error ? error.message : 'Не удалось изменить роль администратора');
+      setAccessNotice(error instanceof Error ? error.message : 'Не удалось изменить роль участника');
     } finally {
       setMemberActionId(null);
     }
@@ -276,15 +384,19 @@ export default function SettingsPage() {
     const project = projectOverride ?? activeProject;
     if (!project?.id || !currentUser?.id) return;
     const member = project.members?.find((item) => String(item.userId) === String(currentUser.id));
+    const leavingActiveProject = String(activeProject?.id ?? activeProjectId ?? '') === String(project.id);
     setMemberActionId(member?.id ?? -1);
     try {
-      await projectsApi.leaveProject(project.id, currentUser.id);
-      const nextProjects = await projectsApi.getAll(currentUser.id);
-      await fetchProjects();
-      const nextProject = nextProjects.find((item) => item.id !== project.id);
-      navigate(nextProject ? `/project/${nextProject.id}/settings` : '/', { replace: true });
+      const nextProjects = await leaveProjectInStore(project.id);
+      const nextProject = nextProjects.find((item) => String(item.id) !== String(project.id)) ?? nextProjects[0];
+      if (leavingActiveProject) {
+        setActiveProjectId(nextProject?.id);
+        navigate(nextProject ? `/project/${nextProject.id}/settings` : '/', { replace: true });
+      } else {
+        await fetchProjects();
+      }
     } catch (error) {
-      setAccessNotice(error instanceof Error ? error.message : 'Не удалось покинуть проект');
+      showAppDialog(error instanceof Error ? error.message : 'Не удалось покинуть проект.', 'Не удалось покинуть проект', 'danger');
     } finally {
       setMemberActionId(null);
     }
@@ -292,7 +404,7 @@ export default function SettingsPage() {
 
   const loadDeletedProjects = async () => {
     const trash = await projectsApi.getTrash();
-    setDeletedProjects(trash.filter((project) => project.ownerId === currentUser?.id));
+    setDeletedProjects(trash.filter((project) => String(project.ownerId) === String(currentUser?.id ?? '_')));
   };
 
   const confirmDeleteProject = async () => {
@@ -301,18 +413,18 @@ export default function SettingsPage() {
     try {
       await removeProject(projectToDelete.id);
       await loadDeletedProjects();
-      const remainingProjects = projects.filter((project) => project.id !== projectToDelete.id);
+      const remainingProjects = projects.filter((project) => String(project.id) !== String(projectToDelete.id));
       setProjectToDelete(null);
 
-      if (activeProjectId === projectToDelete.id) {
+      if (String(activeProjectId) === String(projectToDelete.id)) {
         const nextProject = remainingProjects[0];
         setActiveProjectId(nextProject?.id);
-        if (!nextProject || selectedProjectId === projectToDelete.id) {
+        if (!nextProject || String(selectedProjectId) === String(projectToDelete.id)) {
           navigate('/');
         }
       }
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Удалить проект может только владелец');
+      showAppDialog(error instanceof Error ? error.message : 'Удалить проект может только владелец.', 'Не удалось удалить проект', 'danger');
     } finally {
       setDeletingProject(false);
     }
@@ -335,7 +447,7 @@ export default function SettingsPage() {
       await loadDeletedProjects();
       await fetchProjects();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Удалить проект навсегда может только владелец');
+      showAppDialog(error instanceof Error ? error.message : 'Удалить проект навсегда может только владелец.', 'Не удалось удалить проект', 'danger');
     } finally {
       setDeletingProject(false);
     }
@@ -361,25 +473,40 @@ export default function SettingsPage() {
   };
 
   const openAdminPanel = async () => {
-    if (!activeProject?.id) return;
+    if (!activeProject?.id || !canOpenAdminPanel) return;
     setAdminOpen(true);
-    setAdminTasks(await tasksApi.getAllProjectTasks(activeProject.id));
+    const [tasks, columns] = await Promise.all([
+      tasksApi.getByProject(activeProject.id, undefined, true),
+      projectsApi.getAllColumns(activeProject.id),
+    ]);
+    setAdminTasks(tasks);
+    setAdminColumns(columns);
     setActivityRetentionDays(activityApi.getRetentionDays(activeProject.id));
     setAdminEvents(await activityApi.load(activeProject.id));
   };
 
-  const exportActiveProject = async () => {
-    if (!activeProject) return;
+  const exportActiveProject = async (delivery: 'download' | 'telegram') => {
+    if (!activeProject || !canExportProject) return;
     setExportingProject(true);
+    setExportMessage('');
     try {
-      const result = createProjectExport(activeProject, {
+      const options = {
         format: exportFormat,
         scope: exportScope,
         targetId: exportTargetId || undefined,
-      });
-      if (exportFormat === 'pdf') openPrintableExport(result, result.fileName.replace(/\.html$/i, '.pdf'));
-      else downloadExportResult(result);
-      setExportResult(result);
+      };
+      if (delivery === 'telegram') {
+        const response = await sendProjectExportToTelegram(activeProject, options);
+        setExportMessage(response.message || `Файл ${response.fileName} отправится в Telegram-бота.`);
+        setExportResult(null);
+      } else {
+        const result = await createProjectExport(activeProject, options);
+        if (exportFormat === 'pdf') openPrintableExport(result, result.fileName.replace(/\.html$/i, '.pdf'));
+        else downloadExportResult(result);
+        setExportResult(result);
+      }
+    } catch (error) {
+      setExportMessage(error instanceof Error ? error.message : 'Не удалось сформировать экспорт');
     } finally {
       setExportingProject(false);
     }
@@ -412,6 +539,17 @@ export default function SettingsPage() {
               OK
             </button>
           </div>
+          {currentUser && (
+            <AvatarSettingsBlock
+              user={currentUser}
+              busy={avatarBusy}
+              notice={avatarNotice}
+              refreshKey={avatarRefreshKey}
+              onAskTelegram={() => setAvatarTelegramConsentOpen(true)}
+              onDisable={disableAvatar}
+              onUpload={uploadManualAvatar}
+            />
+          )}
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between gap-3">
               <p className="text-xs text-[var(--tg-theme-hint-color)]">Тема</p>
@@ -474,6 +612,7 @@ export default function SettingsPage() {
           </section>
         )}
 
+        {canExportProject && (
         <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -491,6 +630,7 @@ export default function SettingsPage() {
             </button>
           </div>
         </section>
+        )}
 
         <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
           <div className="mb-3 flex items-center justify-between gap-3">
@@ -545,7 +685,7 @@ export default function SettingsPage() {
                     </span>
                     <button
                       onClick={() => setMemberConfirm({ type: 'leave', member: projectMember, project })}
-                      disabled={projectMember ? memberActionId === projectMember.id : memberActionId === -1}
+                      disabled={projectMember ? isMemberActionLoading(projectMember.id) : isMemberActionLoading(-1)}
                       className={`rounded-[9px] px-2 py-1 text-[11px] font-semibold disabled:opacity-50 ${
                         isActive ? 'bg-white/15 text-white' : 'bg-red-500/10 text-red-500'
                       }`}
@@ -566,14 +706,14 @@ export default function SettingsPage() {
             {!isActiveProjectOwner && currentMember && (
               <button
                 onClick={() => setMemberConfirm({ type: 'leave', member: currentMember })}
-                disabled={memberActionId === currentMember.id}
+                disabled={isMemberActionLoading(currentMember.id)}
                 className="rounded-[9px] bg-red-500/15 px-3 py-2 text-xs font-semibold text-red-500 disabled:opacity-50"
               >
                 Покинуть проект
               </button>
             )}
           </div>
-          {isActiveProjectOwner && (
+          {canManageMembers && (
             <>
               <label className="block text-xs text-[var(--tg-theme-hint-color)] mb-1">
                 Добавить по Telegram username
@@ -662,7 +802,7 @@ export default function SettingsPage() {
               </div>
             </>
           )}
-          {!isActiveProjectOwner && (
+          {!canManageMembers && (
             <div className="mb-3 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
               <p className="mb-2 text-xs font-semibold text-[var(--tg-theme-text-color)]">Запросить доступ по коду</p>
               <div className="grid grid-cols-1 gap-2">
@@ -690,33 +830,48 @@ export default function SettingsPage() {
                     {member.user?.firstName ?? member.user?.username ?? `ID ${member.userId}`}
                   </p>
                   <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">
-                    @{member.user?.username ?? member.user?.telegramId} · {member.role?.name ?? 'viewer'}
+                    @{member.user?.username ?? member.user?.telegramId} · {projectRoleLabel(member.role?.name)}
                   </p>
                 </div>
-                {isActiveProjectOwner && member.userId !== currentUser?.id && (
-                  <div className="flex shrink-0 gap-2">
-                    <button
-                      onClick={() => toggleAdmin(member)}
-                      disabled={memberActionId === member.id}
-                      className="rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs font-medium text-[var(--tg-theme-text-color)] disabled:opacity-50"
-                    >
-                      {member.role?.name === 'admin' ? 'Снять админ' : 'Админ'}
-                    </button>
-                    <button
-                      onClick={() => setMemberConfirm({ type: 'transfer', member })}
-                      disabled={memberActionId === member.id}
-                      className="rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs font-medium text-[var(--tg-theme-text-color)] disabled:opacity-50"
-                    >
-                      Владелец
-                    </button>
-                    <button
-                      onClick={() => setMemberConfirm({ type: 'remove', member })}
-                      disabled={memberActionId === member.id}
-                      className="h-9 w-9 rounded-[9px] bg-red-500/10 text-base text-red-500 disabled:opacity-50"
-                      aria-label={`Удалить участника ${member.user?.username ?? member.userId}`}
-                    >
-                      ×
-                    </button>
+                {canManageMembers && member.userId !== currentUser?.id && (
+                  <div className="flex shrink-0 items-center gap-2">
+                    {!isProjectMemberOwner(activeProject, member) && (isActiveProjectOwner || !isAdminMember(member)) && (
+                      <select
+                        value={member.role?.name ?? 'editor'}
+                        onChange={(event) => changeMemberRole(member, event.target.value as ProjectRoleName)}
+                        disabled={isMemberActionLoading(member.id)}
+                        className="max-w-[116px] rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-xs font-medium text-[var(--tg-theme-text-color)] outline-none disabled:opacity-50"
+                        aria-label={`Роль участника ${memberName(member)}`}
+                      >
+                        <option value="viewer">Наблюдатель</option>
+                        <option value="editor">Редактор</option>
+                        {isActiveProjectOwner && <option value="admin">Админ</option>}
+                      </select>
+                    )}
+                    {!isActiveProjectOwner && isAdminMember(member) && (
+                      <span className="rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs font-medium text-[var(--tg-theme-hint-color)]">
+                        Админ
+                      </span>
+                    )}
+                    {isActiveProjectOwner && !isProjectMemberOwner(activeProject, member) && (
+                      <button
+                        onClick={() => setMemberConfirm({ type: 'transfer', member })}
+                        disabled={isMemberActionLoading(member.id)}
+                        className="rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs font-medium text-[var(--tg-theme-text-color)] disabled:opacity-50"
+                      >
+                        Владелец
+                      </button>
+                    )}
+                    {!isProjectMemberOwner(activeProject, member) && (!isAdminMember(member) || isActiveProjectOwner) && (
+                      <button
+                        onClick={() => setMemberConfirm({ type: 'remove', member })}
+                        disabled={isMemberActionLoading(member.id)}
+                        className="h-9 w-9 rounded-[9px] bg-red-500/10 text-base text-red-500 disabled:opacity-50"
+                        aria-label={`Удалить участника ${member.user?.username ?? member.userId}`}
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -896,7 +1051,7 @@ export default function SettingsPage() {
               </button>
               <button
                 onClick={confirmMemberAction}
-                disabled={memberActionId === (memberConfirm.member?.id ?? -1)}
+                disabled={isMemberActionLoading(memberConfirm.member?.id ?? -1)}
                 className={`flex-1 rounded-[12px] py-3 font-semibold text-white disabled:opacity-50 ${
                   memberConfirm.type === 'remove' || memberConfirm.type === 'leave' ? 'bg-red-500' : 'bg-[var(--tg-theme-button-color)]'
                 }`}
@@ -908,10 +1063,28 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {avatarTelegramConsentOpen && (
+        <TelegramAvatarConsentModal
+          busy={avatarBusy}
+          onCancel={() => setAvatarTelegramConsentOpen(false)}
+          onConfirm={useTelegramAvatar}
+        />
+      )}
+
+      {appDialog && (
+        <SettingsMessageDialog
+          title={appDialog.title}
+          message={appDialog.message}
+          tone={appDialog.tone}
+          onClose={() => setAppDialog(null)}
+        />
+      )}
+
       {adminOpen && activeProject && (
         <AdminPanel
           project={activeProject}
           tasks={adminTasks}
+          columns={adminColumns}
           events={adminEvents}
           retentionDays={activityRetentionDays}
           onRetentionChange={async (days) => {
@@ -923,7 +1096,7 @@ export default function SettingsPage() {
         />
       )}
 
-      {exportOpen && activeProject && (
+      {exportOpen && activeProject && canExportProject && (
         <ExportPanel
           project={activeProject}
           format={exportFormat}
@@ -931,18 +1104,22 @@ export default function SettingsPage() {
           targetId={exportTargetId}
           exporting={exportingProject}
           result={exportResult}
+          message={exportMessage}
           onFormatChange={(format) => {
             setExportFormat(format);
             setExportResult(null);
+            setExportMessage('');
           }}
           onScopeChange={(scope) => {
             setExportScope(scope);
             setExportTargetId('');
             setExportResult(null);
+            setExportMessage('');
           }}
           onTargetChange={(id) => {
             setExportTargetId(id);
             setExportResult(null);
+            setExportMessage('');
           }}
           onExport={exportActiveProject}
           onClose={() => setExportOpen(false)}
@@ -952,9 +1129,175 @@ export default function SettingsPage() {
   );
 }
 
+function AvatarSettingsBlock({
+  user,
+  busy,
+  notice,
+  refreshKey,
+  onAskTelegram,
+  onDisable,
+  onUpload,
+}: {
+  user: User;
+  busy: boolean;
+  notice: string;
+  refreshKey: number;
+  onAskTelegram: () => void;
+  onDisable: () => void;
+  onUpload: (file: File | undefined) => void;
+}) {
+  const statusText =
+    user.avatarStatus === 'ready'
+      ? user.avatarMode === 'telegram'
+        ? 'Фото Telegram подключено'
+        : 'Фото загружено вручную'
+      : user.avatarStatus === 'unavailable'
+        ? 'Фото Telegram недоступно'
+        : 'Показаны инициалы';
+
+  return (
+    <div className="mt-4 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
+      <div className="flex items-start gap-3">
+        <UserAvatarImage user={user} label={userDisplayName(user)} size="md" refreshKey={refreshKey} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Фото профиля</p>
+              <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">{statusText}</p>
+            </div>
+            {busy && <span className="text-xs text-[var(--tg-theme-hint-color)]">...</span>}
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={onAskTelegram}
+              disabled={busy}
+              className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-xs font-semibold text-[var(--tg-theme-text-color)] disabled:opacity-50"
+            >
+              Telegram
+            </button>
+            <label className={`cursor-pointer rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-center text-xs font-semibold text-[var(--tg-theme-text-color)] ${busy ? 'pointer-events-none opacity-50' : ''}`}>
+              Вручную
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                className="hidden"
+                onChange={(event) => {
+                  onUpload(event.target.files?.[0]);
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={onDisable}
+              disabled={busy}
+              className="rounded-[10px] bg-red-500/15 px-2 py-2 text-xs font-semibold text-red-200 disabled:opacity-50"
+            >
+              Выкл.
+            </button>
+          </div>
+          {notice && <p className="mt-2 text-xs text-[var(--tg-theme-hint-color)]">{notice}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TelegramAvatarConsentModal({
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[120] flex items-end bg-black/55 px-4 pb-4" onClick={onCancel}>
+      <section
+        className="w-full rounded-[18px] bg-[var(--tg-theme-bg-color)] p-5 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--tg-theme-button-color)]/15 text-2xl">
+          🖼️
+        </div>
+        <h2 className="text-lg font-bold text-[var(--tg-theme-text-color)]">Использовать фото Telegram?</h2>
+        <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">
+          Приложение попробует получить вашу аватарку через Telegram-бота и сохранит уменьшенную копию. Если фото скрыто настройками приватности, останутся инициалы.
+        </p>
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3 font-semibold text-[var(--tg-theme-text-color)] disabled:opacity-60"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+          >
+            {busy ? 'Получаю...' : 'Разрешаю'}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsMessageDialog({
+  title,
+  message,
+  tone = 'info',
+  onClose,
+}: {
+  title: string;
+  message: string;
+  tone?: 'info' | 'success' | 'danger';
+  onClose: () => void;
+}) {
+  const badgeClass =
+    tone === 'danger'
+      ? 'bg-red-500/15 text-red-300'
+      : tone === 'success'
+        ? 'bg-emerald-500/15 text-emerald-300'
+        : 'bg-[var(--tg-theme-button-color)]/15 text-[var(--tg-theme-button-color)]';
+  const icon = tone === 'danger' ? '!' : tone === 'success' ? '✓' : 'i';
+
+  return (
+    <div
+      className="fixed inset-0 z-[130] flex items-end bg-black/55 px-4 pb-4 sm:items-center sm:justify-center sm:pb-0"
+      onClick={onClose}
+    >
+      <section
+        className="w-full max-w-md rounded-[18px] bg-[var(--tg-theme-secondary-bg-color)] p-5 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className={`mb-4 flex h-12 w-12 items-center justify-center rounded-full text-xl font-bold ${badgeClass}`}>
+          {icon}
+        </div>
+        <h2 className="text-lg font-bold text-[var(--tg-theme-text-color)]">{title}</h2>
+        <p className="mt-2 whitespace-pre-wrap text-sm leading-5 text-[var(--tg-theme-hint-color)]">{message}</p>
+        <button
+          type="button"
+          onClick={onClose}
+          className="mt-5 w-full rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)]"
+        >
+          OK
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function AdminPanel({
   project,
   tasks,
+  columns,
   events,
   retentionDays,
   onRetentionChange,
@@ -962,21 +1305,29 @@ function AdminPanel({
 }: {
   project: Project;
   tasks: Task[];
+  columns: Column[];
   events: ActivityEvent[];
   retentionDays: number;
   onRetentionChange: (days: number) => void | Promise<void>;
   onClose: () => void;
 }) {
-  type AdminTab = 'overview' | 'people' | 'risks' | 'meeting' | 'reports' | 'bot';
+  type AdminTab = 'overview' | 'people' | 'responsibility' | 'risks' | 'meeting' | 'reports' | 'bot';
   const navigate = useNavigate();
+  const currentUserId = useAuthStore((state) => state.user?.id);
   const [openUserIds, setOpenUserIds] = useState<Set<number>>(new Set());
   const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>('overview');
   const [selectedMember, setSelectedMember] = useState<ProjectMember | null>(null);
+  const [responsibilityAreas, setResponsibilityAreas] = useState<ResponsibilityArea[]>(project.responsibilityAreas ?? []);
+  const [editingResponsibilityArea, setEditingResponsibilityArea] = useState<ResponsibilityArea | null>(null);
+  const [responsibilityFormOpen, setResponsibilityFormOpen] = useState(false);
+  const [responsibilityAreaToDelete, setResponsibilityAreaToDelete] = useState<ResponsibilityArea | null>(null);
+  const [responsibilitySaving, setResponsibilitySaving] = useState(false);
   const [digestText, setDigestText] = useState('');
+  const [digestCopied, setDigestCopied] = useState(false);
   const [botSettings, setBotSettings] = useState<ProjectBotSettings>(
     project.botSettings ?? cloneBotSettings(defaultProjectBotSettings),
   );
-  const { nodes, blocks, loadProjectSpace } = usePageStore();
+  const [changeSummary, setChangeSummary] = useState<AdminChangeSummary>(() => createEmptyAdminChangeSummary());
   const [savingBotSettings, setSavingBotSettings] = useState(false);
   const [botSettingsSaved, setBotSettingsSaved] = useState(false);
 
@@ -1000,25 +1351,66 @@ function AdminPanel({
   }, [project.id]);
 
   useEffect(() => {
-    void loadProjectSpace(String(project.id), project.title);
-  }, [loadProjectSpace, project.id, project.title]);
+    let cancelled = false;
+    adminSummaryApi
+      .get(project.id)
+      .then((summary) => {
+        if (!cancelled) setChangeSummary(summary);
+      })
+      .catch(() => {
+        if (!cancelled) setChangeSummary(createEmptyAdminChangeSummary());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, tasks.length, events.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResponsibilityAreas(project.responsibilityAreas ?? []);
+    projectsApi
+      .getResponsibilityAreas(project.id)
+      .then((areas) => {
+        if (!cancelled) setResponsibilityAreas(areas);
+      })
+      .catch(() => {
+        if (!cancelled) setResponsibilityAreas(project.responsibilityAreas ?? []);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id]);
 
   const now = Date.now();
-  const overdue = tasks.filter((task) => task.deadlineAt && new Date(task.deadlineAt).getTime() < now);
-  const highPriority = tasks.filter((task) => task.priority === 'HIGH' || task.priority === 'CRITICAL');
-  const dueSoon = tasks.filter((task) => {
+  const activeTasks = tasks.filter((task) => isTaskActiveForAdmin(task, columns, now));
+  const completedTasks = tasks.filter((task) => isTaskCompletedForAdmin(task, columns));
+  const deferredTasks = tasks.filter((task) => isTaskDeferredForAdmin(task, now) && !isTaskCompletedForAdmin(task, columns));
+  const significanceSettings = normalizeTaskSignificanceSettings(botSettings.taskSignificance);
+  const overdue = activeTasks.filter((task) => task.deadlineAt && new Date(task.deadlineAt).getTime() < now);
+  const highPriority = activeTasks.filter((task) => task.priority === 'HIGH' || task.priority === 'CRITICAL');
+  const dueSoon = activeTasks.filter((task) => {
     if (!task.deadlineAt) return false;
     const diffHours = (new Date(task.deadlineAt).getTime() - now) / 3600000;
     return diffHours >= 0 && diffHours <= 48;
   });
-  const unassigned = tasks.filter((task) => !task.assignee?.id && !task.assigneeId);
-  const noDeadline = tasks.filter((task) => !task.deadlineAt);
-  const weakTasks = tasks.filter((task) => !task.description?.trim() || !task.deadlineAt || (!task.assignee?.id && !task.assigneeId));
+  const unassigned = activeTasks.filter((task) => !task.assignee?.id && !task.assigneeId);
+  const noDeadline = activeTasks.filter((task) => !task.deadlineAt);
+  const weakTasks = activeTasks.filter((task) => !task.description?.trim() || !task.deadlineAt || (!task.assignee?.id && !task.assigneeId));
+  const activeSignificanceWeight = activeTasks.reduce((sum, task) => sum + calculateTaskSignificanceScore(task, now, significanceSettings), 0);
+  const overdueSignificanceWeight = overdue.reduce((sum, task) => sum + calculateTaskSignificanceScore(task, now, significanceSettings), 0);
+  const highSignificanceTasks = activeTasks.filter((task) => calculateTaskSignificanceScore(task, now, significanceSettings) >= significanceSettings.attentionThreshold);
   const byUser = (project.members ?? []).map((member) => {
-    const memberTasks = tasks.filter((task) => isTaskAssignedToMember(task, member.userId));
+    const memberTasks = activeTasks.filter((task) => isTaskAssignedToMember(task, member.userId));
+    const significance = memberTasks.reduce((sum, task) => sum + calculateTaskSignificanceScore(task, now, significanceSettings), 0);
+    const overdueSignificance = memberTasks.reduce((sum, task) => {
+      if (!task.deadlineAt || new Date(task.deadlineAt).getTime() >= now) return sum;
+      return sum + calculateTaskSignificanceScore(task, now, significanceSettings);
+    }, 0);
     return {
       member,
       total: memberTasks.length,
+      significance,
+      overdueSignificance,
       overdue: memberTasks.filter((task) => task.deadlineAt && new Date(task.deadlineAt).getTime() < now).length,
       dueSoon: memberTasks.filter((task) => {
         if (!task.deadlineAt) return false;
@@ -1029,29 +1421,54 @@ function AdminPanel({
       noDeadline: memberTasks.filter((task) => !task.deadlineAt).length,
     };
   });
+  const responsibilitySummaries = buildResponsibilityAreaSummaries({
+    areas: responsibilityAreas,
+    members: project.members ?? [],
+    tasks,
+    activeTasks,
+    completedTasks,
+    now,
+  });
+  const coveredActiveTaskIds = new Set(
+    responsibilitySummaries.flatMap((summary) => summary.activeTasks.map((task) => String(task.id))),
+  );
+  const uncoveredActiveTasks = activeTasks.filter((task) => !coveredActiveTaskIds.has(String(task.id)));
   const maxLoad = Math.max(1, ...byUser.map((item) => item.total));
+  const maxWeightedLoad = Math.max(1, ...byUser.map((item) => item.significance));
   const overloaded = byUser.filter((item) => item.total >= Math.max(4, Math.ceil(maxLoad * 0.7)) && item.total > 0);
-  const inactiveMembers = (project.members ?? []).filter((member) => !tasks.some((task) => isTaskAssignedToMember(task, member.userId)));
-  const riskTasks = [...tasks]
-    .map((task) => ({ task, score: getTaskRiskScore(task, now) }))
+  const workloadPlan = buildWorkloadRedistributionPlan({
+    byUser,
+    activeTasks,
+    now,
+    settings: significanceSettings,
+  });
+  const deadlineForecast = buildDeadlineForecast({
+    activeTasks,
+    byUser,
+    now,
+    settings: significanceSettings,
+  });
+  const inactiveMembers = (project.members ?? []).filter((member) => !activeTasks.some((task) => isTaskAssignedToMember(task, member.userId)));
+  const riskTasks = [...activeTasks]
+    .map((task) => ({ task, score: getTaskRiskScore(task, now, significanceSettings) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
-  const healthScore = Math.max(
-    0,
-    Math.min(
-      100,
-      100 -
-        overdue.length * 18 -
-        dueSoon.length * 8 -
-        unassigned.length * 7 -
-        noDeadline.length * 4 -
-        weakTasks.length * 3,
-    ),
-  );
-  const healthTone = healthScore >= 75 ? 'Проект в норме' : healthScore >= 45 ? 'Есть риски' : 'Нужен контроль';
+  const attentionQueue = buildTaskAttentionQueue(activeTasks, now, significanceSettings);
+  const reactionRules = buildAdminReactionRules(attentionQueue, significanceSettings);
+  const projectDiagnostics = buildProjectDiagnostics({
+    activeTasks,
+    overdue,
+    dueSoon,
+    unassigned,
+    noDeadline,
+    weakTasks,
+    inactiveMembers,
+    overloaded,
+    changeSummary,
+  });
   const assistantInsights = buildAssistantInsights({
-    tasks,
+    tasks: activeTasks,
     overdue,
     dueSoon,
     unassigned,
@@ -1070,15 +1487,12 @@ function AdminPanel({
     highPriority,
     overloaded,
   });
-  const recentActivity = [...tasks]
+  const recentActivity = [...activeTasks]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 6);
-  const projectNodes = nodes.filter((node) => node.projectId === String(project.id) && !node.isDeleted);
-  const projectBlocks = blocks.filter((block) => projectNodes.some((node) => node.id === block.pageId));
-  const changeSummary = buildChangeSummary({ tasks, events, nodes: projectNodes, blocks: projectBlocks, now });
-  const qualityReport = buildTaskQualityReport(tasks, now);
+  const qualityReport = buildTaskQualityReport(activeTasks, now);
   const meetingPlan = buildMeetingPlan({
-    tasks,
+    tasks: activeTasks,
     members: project.members ?? [],
     overdue,
     dueSoon,
@@ -1097,7 +1511,34 @@ function AdminPanel({
     byUser,
     riskTasks,
     changeSummary,
+    deadlineForecast,
+    workloadPlan,
+    reactionRules,
   });
+  const generateDigest = () => {
+    setDigestCopied(false);
+    setDigestText(buildAutoDigest({
+      project,
+      tasks,
+      overdue,
+      dueSoon,
+      unassigned,
+      noDeadline,
+      weakTasks,
+      byUser,
+      riskTasks,
+      changeSummary,
+      deadlineForecast,
+      workloadPlan,
+      reactionRules,
+    }));
+  };
+  const copyDigest = async () => {
+    const copied = await copyPlainText(digest);
+    if (!copied) return;
+    setDigestCopied(true);
+    window.setTimeout(() => setDigestCopied(false), 1600);
+  };
   const eventsByUser = groupActivityByUser(events, project.members ?? []);
   const toggleUserEvents = (userId: number) => {
     setOpenUserIds((current) => {
@@ -1135,6 +1576,87 @@ function AdminPanel({
       ),
     }));
   };
+  const updateReminderLabel = (id: string, label: string) => {
+    setBotSettings((current) => ({
+      ...current,
+      kanbanReminderPoints: current.kanbanReminderPoints.map((point) =>
+        point.id === id ? { ...point, label } : point,
+      ),
+    }));
+  };
+  const addReminderPoint = () => {
+    const id = `before_${Date.now()}`;
+    setBotSettings((current) => ({
+      ...current,
+      kanbanReminderPoints: [
+        ...current.kanbanReminderPoints,
+        {
+          id,
+          enabled: true,
+          kind: 'before_deadline',
+          offsetMinutes: 24 * 60,
+          label: 'За 24 часа',
+        },
+      ],
+    }));
+  };
+  const removeReminderPoint = (id: string) => {
+    setBotSettings((current) => ({
+      ...current,
+      kanbanReminderPoints: current.kanbanReminderPoints.filter((point) => point.id !== id),
+    }));
+  };
+  const toggleReportWeekday = (report: 'weekly' | 'overdue', day: number) => {
+    const currentDays = botSettings.reports[report].weekdays;
+    updateReport(report, {
+      weekdays: currentDays.includes(day)
+        ? currentDays.filter((item) => item !== day)
+        : [...currentDays, day].sort((left, right) => left - right),
+    });
+  };
+  const toggleReportRecipient = (report: 'weekly' | 'overdue', userId: number) => {
+    const currentRecipients = botSettings.reports[report].recipientUserIds ?? [];
+    updateReport(report, {
+      recipientUserIds: currentRecipients.includes(userId)
+        ? currentRecipients.filter((item) => item !== userId)
+        : [...currentRecipients, userId],
+    });
+  };
+  const toggleReportSection = (
+    report: 'weekly' | 'overdue',
+    section: keyof ProjectBotSettings['reports']['weekly']['sections'],
+  ) => {
+    updateReport(report, {
+      sections: {
+        ...botSettings.reports[report].sections,
+        [section]: !botSettings.reports[report].sections[section],
+      },
+    });
+  };
+  const updateSignificanceSettings = (patch: Partial<TaskSignificanceSettings>) => {
+    setBotSettings((current) => ({
+      ...current,
+      taskSignificance: normalizeTaskSignificanceSettings({
+        ...normalizeTaskSignificanceSettings(current.taskSignificance),
+        ...patch,
+      }),
+    }));
+  };
+  const updateSignificancePriorityBonus = (priority: keyof TaskSignificanceSettings['priorityBonus'], value: number) => {
+    setBotSettings((current) => {
+      const currentSignificance = normalizeTaskSignificanceSettings(current.taskSignificance);
+      return {
+        ...current,
+        taskSignificance: normalizeTaskSignificanceSettings({
+          ...currentSignificance,
+          priorityBonus: {
+            ...currentSignificance.priorityBonus,
+            [priority]: value,
+          },
+        }),
+      };
+    });
+  };
   const saveBotSettings = async () => {
     setSavingBotSettings(true);
     setBotSettingsSaved(false);
@@ -1146,6 +1668,40 @@ function AdminPanel({
     } finally {
       setSavingBotSettings(false);
     }
+  };
+  const openCreateResponsibilityArea = () => {
+    setEditingResponsibilityArea(null);
+    setResponsibilityFormOpen(true);
+  };
+  const openEditResponsibilityArea = (area: ResponsibilityArea) => {
+    setEditingResponsibilityArea(area);
+    setResponsibilityFormOpen(true);
+  };
+  const saveResponsibilityArea = async (draft: Partial<ResponsibilityArea>) => {
+    const actorUserId = currentUserId ?? project.ownerId;
+    setResponsibilitySaving(true);
+    try {
+      const saved = editingResponsibilityArea
+        ? await projectsApi.updateResponsibilityArea(project.id, editingResponsibilityArea.id, draft, actorUserId)
+        : await projectsApi.createResponsibilityArea(project.id, draft, actorUserId);
+      setResponsibilityAreas((current) =>
+        editingResponsibilityArea
+          ? current.map((area) => (String(area.id) === String(saved.id) ? saved : area))
+          : [...current, saved],
+      );
+      setResponsibilityFormOpen(false);
+      setEditingResponsibilityArea(null);
+    } finally {
+      setResponsibilitySaving(false);
+    }
+  };
+  const confirmDeleteResponsibilityArea = async () => {
+    if (!responsibilityAreaToDelete) return;
+    const actorUserId = currentUserId ?? project.ownerId;
+    const areaId = responsibilityAreaToDelete.id;
+    setResponsibilityAreaToDelete(null);
+    await projectsApi.deleteResponsibilityArea(project.id, areaId, actorUserId);
+    setResponsibilityAreas((current) => current.filter((area) => String(area.id) !== String(areaId)));
   };
 
   return (
@@ -1185,17 +1741,38 @@ function AdminPanel({
               {label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => setActiveAdminTab('responsibility')}
+            className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition ${
+              activeAdminTab === 'responsibility'
+                ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'
+            }`}
+          >
+            Ответственность
+          </button>
         </div>
 
-        <div className={`${activeAdminTab === 'overview' ? 'grid' : 'hidden'} grid-cols-2 gap-2`}>
-          <AdminMetric label={healthTone} value={healthScore} suffix="%" tone={healthScore < 45 ? 'danger' : healthScore < 75 ? 'warning' : undefined} />
+        <div className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'}`}>
+          <ProjectDiagnosticsPanel diagnostics={projectDiagnostics} />
+        </div>
+
+        <div className={`${activeAdminTab === 'overview' ? 'grid' : 'hidden'} mt-4 grid-cols-2 gap-2`}>
           <AdminMetric label="Задач" value={tasks.length} />
           <AdminMetric label="Просрочено" value={overdue.length} tone="danger" />
           <AdminMetric label="Скоро дедлайн" value={dueSoon.length} tone="warning" />
           <AdminMetric label="Без исполнителя" value={unassigned.length} />
           <AdminMetric label="Без дедлайна" value={noDeadline.length} />
           <AdminMetric label="Высокий приоритет" value={highPriority.length} tone="warning" />
+          <AdminMetric label="Вес активных" value={activeSignificanceWeight} tone={activeSignificanceWeight >= 30 ? 'warning' : undefined} />
+          <AdminMetric label="Существенных" value={highSignificanceTasks.length} tone={highSignificanceTasks.length ? 'warning' : undefined} />
+          <AdminMetric label="Вес просрочки" value={overdueSignificanceWeight} tone={overdueSignificanceWeight ? 'danger' : undefined} />
         </div>
+
+        {activeAdminTab === 'overview' && (
+          <DeadlineForecastPanel forecast={deadlineForecast} onOpenTask={openTaskInKanban} />
+        )}
 
         <section className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
           <h3 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">Умный помощник</h3>
@@ -1237,21 +1814,16 @@ function AdminPanel({
               <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Текст можно отправить в Telegram-чат команды.</p>
             </div>
             <button
-              onClick={() => setDigestText(buildAutoDigest({
-                project,
-                tasks,
-                overdue,
-                dueSoon,
-                unassigned,
-                noDeadline,
-                weakTasks,
-                byUser,
-                riskTasks,
-                changeSummary,
-              }))}
+              onClick={generateDigest}
               className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)]"
             >
               Сформировать
+            </button>
+            <button
+              onClick={copyDigest}
+              className="shrink-0 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)]"
+            >
+              {digestCopied ? 'Скопировано' : 'Копировать'}
             </button>
           </div>
           <textarea
@@ -1261,7 +1833,7 @@ function AdminPanel({
           />
         </section>
 
-        <section className={`${activeAdminTab === 'bot' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
+        <section className={`${false && activeAdminTab === 'bot' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Настройки Telegram-бота</h3>
@@ -1312,6 +1884,197 @@ function AdminPanel({
           </div>
         </section>
 
+        <section className={`${activeAdminTab === 'bot' ? 'block' : 'hidden'} mt-4 space-y-4`}>
+          <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Telegram-бот</h3>
+                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                  Управление уведомлениями, напоминаниями, отчетами и поведением бота в этом проекте.
+                </p>
+              </div>
+              <button
+                onClick={saveBotSettings}
+                disabled={savingBotSettings}
+                className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+              >
+                {savingBotSettings ? '...' : botSettingsSaved ? 'OK' : 'Сохранить'}
+              </button>
+            </div>
+
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                <p className="text-xs text-[var(--tg-theme-hint-color)]">Статус</p>
+                <p className="text-sm font-semibold text-[var(--tg-theme-text-color)]">{botSettingsApi.enabled ? 'API подключен' : 'Локальный режим'}</p>
+              </div>
+              <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Тон сообщений</span>
+                <select
+                  value={botSettings.kanbanReminderTone}
+                  onChange={(event) => setBotSettings((current) => ({ ...current, kanbanReminderTone: event.target.value as ProjectBotSettings['kanbanReminderTone'] }))}
+                  className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                >
+                  <option value="soft">Мягкий</option>
+                  <option value="neutral">Нейтральный</option>
+                  <option value="strict">Строгий</option>
+                  <option value="pastoral">Пасторский</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="space-y-2">
+              <BotToggle label="Уведомления по задачам Kanban" checked={botSettings.taskDeadlineNotificationsEnabled} onChange={(checked) => setBotSettings((current) => ({ ...current, taskDeadlineNotificationsEnabled: checked }))} />
+              <BotToggle label="Уведомления об упоминаниях @username" checked={botSettings.mentionNotificationsEnabled} onChange={(checked) => setBotSettings((current) => ({ ...current, mentionNotificationsEnabled: checked }))} />
+              <BotToggle label="Напоминания из графиков дежурств" checked={botSettings.dutyNotificationsEnabled} onChange={(checked) => setBotSettings((current) => ({ ...current, dutyNotificationsEnabled: checked }))} />
+            </div>
+          </section>
+
+          <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Точки уведомлений Kanban</h3>
+                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Новая задача, часы до дедлайна и момент дедлайна.</p>
+              </div>
+              <button
+                type="button"
+                onClick={addReminderPoint}
+                className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)]"
+              >
+                + точка
+              </button>
+            </div>
+            <div className="space-y-2">
+              {botSettings.kanbanReminderPoints.map((point) => {
+                const canDelete = point.kind === 'before_deadline' && !['before_15h', 'before_2h'].includes(point.id);
+                return (
+                  <div key={point.id} className="rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+                    <div className="mb-2 flex items-center gap-2">
+                      <input type="checkbox" checked={point.enabled} onChange={() => toggleReminderPoint(point.id)} />
+                      <input
+                        value={point.label}
+                        onChange={(event) => updateReminderLabel(point.id, event.target.value)}
+                        className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                        aria-label="Название точки уведомления"
+                      />
+                      {canDelete && (
+                        <button
+                          type="button"
+                          onClick={() => removeReminderPoint(point.id)}
+                          className="h-8 w-8 rounded-full bg-red-500/15 text-red-500"
+                          aria-label="Удалить точку уведомления"
+                        >
+                          x
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-xs text-[var(--tg-theme-hint-color)]">
+                        {point.kind === 'on_assign' ? 'При назначении' : point.kind === 'at_deadline' ? 'В дедлайн' : 'До дедлайна'}
+                      </div>
+                      {point.kind === 'before_deadline' ? (
+                        <label className="flex items-center gap-2 rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-1 text-xs text-[var(--tg-theme-hint-color)]">
+                          <span>часов</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={Math.max(1, Math.round((point.offsetMinutes ?? 60) / 60))}
+                            onChange={(event) => updateReminderOffset(point.id, Math.max(1, Number(event.target.value) || 1) * 60)}
+                            className="min-w-0 flex-1 bg-transparent text-right text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                          />
+                        </label>
+                      ) : (
+                        <div className="rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-xs text-[var(--tg-theme-hint-color)]">
+                          без задержки
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <label className="block">
+              <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Очистка архива Kanban</span>
+              <select
+                value={botSettings.archiveCleanupMode}
+                onChange={(event) => setBotSettings((current) => ({ ...current, archiveCleanupMode: event.target.value as ProjectBotSettings['archiveCleanupMode'] }))}
+                className="w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+              >
+                <option value="never">Не удалять автоматически</option>
+                <option value="2weeks">Раз в две недели</option>
+                <option value="1month">Раз в месяц</option>
+                <option value="3months">Раз в три месяца</option>
+              </select>
+            </label>
+          </section>
+
+          <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <div className="mb-3">
+              <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Формула значимости</h3>
+              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                Настрой, как проект оценивает тяжелые задачи, просрочки и блокеры. Баллы остаются целыми и компактными.
+              </p>
+            </div>
+
+            <div className="mb-3">
+              <BotToggle
+                label="Умные уведомления админу"
+                checked={botSettings.smartAdminNotificationsEnabled}
+                onChange={(checked) => setBotSettings((current) => ({ ...current, smartAdminNotificationsEnabled: checked }))}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <SignificanceNumberInput label="Порог внимания" value={significanceSettings.attentionThreshold} min={1} max={10} onChange={(value) => updateSignificanceSettings({ attentionThreshold: value })} />
+              <SignificanceNumberInput label="Критичный порог" value={significanceSettings.criticalThreshold} min={1} max={10} onChange={(value) => updateSignificanceSettings({ criticalThreshold: value })} />
+              <SignificanceNumberInput label="Просрочка" value={significanceSettings.overdueBonus} min={0} max={5} onChange={(value) => updateSignificanceSettings({ overdueBonus: value })} />
+              <SignificanceNumberInput label="Долгая просрочка" value={significanceSettings.longOverdueBonus} min={0} max={5} onChange={(value) => updateSignificanceSettings({ longOverdueBonus: value })} />
+              <SignificanceNumberInput label="Часов до долгой" value={significanceSettings.longOverdueHours} min={1} max={720} onChange={(value) => updateSignificanceSettings({ longOverdueHours: value })} />
+              <SignificanceNumberInput label="Блокер" value={significanceSettings.blockingBonus} min={0} max={5} onChange={(value) => updateSignificanceSettings({ blockingBonus: value })} />
+            </div>
+
+            <div className="mt-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+              <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Бонус приоритета</p>
+              <div className="grid grid-cols-2 gap-2">
+                {(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const).map((priority) => (
+                  <SignificanceNumberInput
+                    key={priority}
+                    label={priority}
+                    value={significanceSettings.priorityBonus[priority]}
+                    min={0}
+                    max={5}
+                    onChange={(value) => updateSignificancePriorityBonus(priority, value)}
+                  />
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <BotReportCard
+            title="Еженедельный отчет"
+            description="Завершенные задачи, статистика по людям, дедлайны и рекомендации за 7 дней."
+            report={botSettings.reports.weekly}
+            members={project.members ?? []}
+            onChange={(patch) => updateReport('weekly', patch)}
+            onToggleWeekday={(day) => toggleReportWeekday('weekly', day)}
+            onToggleRecipient={(userId) => toggleReportRecipient('weekly', userId)}
+            onToggleSection={(section) => toggleReportSection('weekly', section)}
+          />
+
+          <BotReportCard
+            title="Системные просрочки"
+            description="Раз в выбранные дни показывает участников с повторяющимися просрочками."
+            report={botSettings.reports.overdue}
+            members={project.members ?? []}
+            onChange={(patch) => updateReport('overdue', patch)}
+            onToggleWeekday={(day) => toggleReportWeekday('overdue', day)}
+            onToggleRecipient={(userId) => toggleReportRecipient('overdue', userId)}
+            onToggleSection={(section) => toggleReportSection('overdue', section)}
+          />
+        </section>
+
         <section className={`${activeAdminTab === 'reports' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
@@ -1358,7 +2121,12 @@ function AdminPanel({
               <AdminMetric label="скоро дедлайн" value={dueSoon.length} tone="warning" />
               <AdminMetric label="без исполнителя" value={unassigned.length} />
               <AdminMetric label="без дедлайна" value={noDeadline.length} />
+              <AdminMetric label="существенных" value={highSignificanceTasks.length} tone={highSignificanceTasks.length ? 'warning' : undefined} />
+              <AdminMetric label="вес просрочки" value={overdueSignificanceWeight} tone={overdueSignificanceWeight ? 'danger' : undefined} />
             </div>
+
+            <TaskAttentionQueuePanel queue={attentionQueue} onOpenTask={openTaskInKanban} />
+            <AdminReactionRulesPanel rules={reactionRules} onOpenTask={openTaskInKanban} />
 
             <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
               <div className="mb-2 flex items-center justify-between gap-3">
@@ -1399,7 +2167,7 @@ function AdminPanel({
                 >
                   <p className="truncate text-sm font-medium text-[var(--tg-theme-text-color)]">{task.title}</p>
                   <p className="text-xs text-[var(--tg-theme-hint-color)]">
-                    риск: {score} · {task.assignee?.firstName ?? task.assignee?.username ?? 'без исполнителя'} · {task.deadlineAt ? new Date(task.deadlineAt).toLocaleDateString('ru-RU') : 'без дедлайна'}
+                    существенность: {score}/10 · {getTaskSignificanceLabel(score)} · {task.assignee?.firstName ?? task.assignee?.username ?? 'без исполнителя'} · {task.deadlineAt ? new Date(task.deadlineAt).toLocaleDateString('ru-RU') : 'без дедлайна'}
                   </p>
                 </button>
               ))}
@@ -1434,6 +2202,17 @@ function AdminPanel({
           </section>
         )}
 
+        {activeAdminTab === 'responsibility' && (
+          <ResponsibilityMapPanel
+            summaries={responsibilitySummaries}
+            uncoveredTasks={uncoveredActiveTasks}
+            onCreate={openCreateResponsibilityArea}
+            onEdit={openEditResponsibilityArea}
+            onDelete={setResponsibilityAreaToDelete}
+            onOpenTask={openTaskInKanban}
+          />
+        )}
+
         <section className={`${activeAdminTab === 'people' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
           <h3 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">Активность пользователей</h3>
           <div className="space-y-2">
@@ -1445,18 +2224,22 @@ function AdminPanel({
               >
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-medium text-[var(--tg-theme-text-color)]">{memberName(item.member)}</p>
-                  <span className="text-xs text-[var(--tg-theme-hint-color)]">{Math.round((item.total / maxLoad) * 100)}% нагрузки</span>
+                  <span className="text-xs text-[var(--tg-theme-hint-color)]">{Math.round((item.significance / maxWeightedLoad) * 100)}% веса</span>
                 </div>
                 <p className="text-xs text-[var(--tg-theme-hint-color)]">
-                  задач: {item.total} · просрочено: {item.overdue} · скоро дедлайн: {item.dueSoon} · важных: {item.highPriority}
+                  задач: {item.total} · вес: {item.significance} · просрочка: {item.overdueSignificance} · скоро дедлайн: {item.dueSoon}
                 </p>
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--tg-theme-secondary-bg-color)]">
-                  <div className="h-full rounded-full bg-[var(--tg-theme-button-color)]" style={{ width: `${Math.round((item.total / maxLoad) * 100)}%` }} />
+                  <div className="h-full rounded-full bg-[var(--tg-theme-button-color)]" style={{ width: `${Math.round((item.significance / maxWeightedLoad) * 100)}%` }} />
                 </div>
               </button>
             ))}
           </div>
         </section>
+
+        {activeAdminTab === 'people' && (
+          <WorkloadRedistributionPanel plan={workloadPlan} onOpenTask={openTaskInKanban} />
+        )}
 
         <section className={`${activeAdminTab === 'people' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
           <div className="mb-3 flex items-center justify-between gap-3">
@@ -1514,17 +2297,388 @@ function AdminPanel({
             </p>
           )}
         </section>
+        {responsibilityFormOpen && (
+          <ResponsibilityAreaModal
+            area={editingResponsibilityArea}
+            members={project.members ?? []}
+            saving={responsibilitySaving}
+            onSave={saveResponsibilityArea}
+            onClose={() => {
+              setResponsibilityFormOpen(false);
+              setEditingResponsibilityArea(null);
+            }}
+          />
+        )}
+
+        {responsibilityAreaToDelete && (
+          <div className="fixed inset-0 z-[140] flex items-end bg-black/55" onClick={() => setResponsibilityAreaToDelete(null)}>
+            <section
+              className="w-full rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 className="text-lg font-bold text-[var(--tg-theme-text-color)]">Удалить зону?</h3>
+              <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">
+                Зона «{responsibilityAreaToDelete.title}» исчезнет из карты ответственности. Задачи и участники не удалятся.
+              </p>
+              <div className="mt-5 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setResponsibilityAreaToDelete(null)}
+                  className="flex-1 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3 font-semibold text-[var(--tg-theme-text-color)]"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteResponsibilityArea}
+                  className="flex-1 rounded-[12px] bg-red-500 py-3 font-semibold text-white"
+                >
+                  Удалить
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+
         {selectedMember && (
           <MemberProfileModal
             project={project}
             member={selectedMember}
             tasks={tasks}
+            columns={columns}
             events={events}
             now={now}
+            taskSignificanceSettings={significanceSettings}
             onClose={() => setSelectedMember(null)}
           />
         )}
       </div>
+    </div>
+  );
+}
+
+type ResponsibilityAreaSummary = {
+  area: ResponsibilityArea;
+  owners: ProjectMember[];
+  activeTasks: Task[];
+  completedTasks: Task[];
+  overdueTasks: Task[];
+  dueSoonTasks: Task[];
+  tone: 'good' | 'warning' | 'danger';
+  status: string;
+};
+
+const RESPONSIBILITY_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#64748B'];
+const RESPONSIBILITY_ICONS = ['📌', '🎯', '🧭', '🛠', '📣', '📚', '💬', '⚙'];
+
+function ResponsibilityMapPanel({
+  summaries,
+  uncoveredTasks,
+  onCreate,
+  onEdit,
+  onDelete,
+  onOpenTask,
+}: {
+  summaries: ResponsibilityAreaSummary[];
+  uncoveredTasks: Task[];
+  onCreate: () => void;
+  onEdit: (area: ResponsibilityArea) => void;
+  onDelete: (area: ResponsibilityArea) => void;
+  onOpenTask: (task: Task) => void;
+}) {
+  const dangerCount = summaries.filter((summary) => summary.tone === 'danger').length;
+  const warningCount = summaries.filter((summary) => summary.tone === 'warning').length;
+  const coveredTasksCount = summaries.reduce((sum, summary) => sum + summary.activeTasks.length, 0);
+
+  return (
+    <section className="mt-4 space-y-4">
+      <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-bold text-[var(--tg-theme-text-color)]">Карта ответственности</h3>
+            <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+              Зоны показывают, кто за что отвечает, где есть перегруз и какие задачи выпадают из поля внимания.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCreate}
+            className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)]"
+          >
+            + Зона
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <AdminMetric label="зон" value={summaries.length} />
+          <AdminMetric label="задач в зонах" value={coveredTasksCount} />
+          <AdminMetric label="риски" value={dangerCount} tone={dangerCount ? 'danger' : undefined} />
+          <AdminMetric label="внимание" value={warningCount + uncoveredTasks.length} tone={warningCount || uncoveredTasks.length ? 'warning' : undefined} />
+        </div>
+      </div>
+
+      {summaries.length === 0 ? (
+        <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4 text-sm text-[var(--tg-theme-hint-color)]">
+          Создайте первую зону, например «Медиа», «Встречи», «Финансы» или «Подростки», и назначьте ответственных.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {summaries.map((summary) => (
+            <ResponsibilityAreaCard
+              key={summary.area.id}
+              summary={summary}
+              onEdit={() => onEdit(summary.area)}
+              onDelete={() => onDelete(summary.area)}
+              onOpenTask={onOpenTask}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h4 className="text-sm font-bold text-[var(--tg-theme-text-color)]">Задачи вне зон</h4>
+          <span className="rounded-full bg-yellow-500/15 px-2 py-1 text-xs font-semibold text-yellow-300">{uncoveredTasks.length}</span>
+        </div>
+        {uncoveredTasks.length === 0 ? (
+          <p className="text-sm text-[var(--tg-theme-hint-color)]">Все активные задачи покрыты зонами ответственности.</p>
+        ) : (
+          <div className="space-y-2">
+            {uncoveredTasks.slice(0, 8).map((task) => (
+              <button
+                key={task.id}
+                type="button"
+                onClick={() => onOpenTask(task)}
+                disabled={!task.pageId}
+                className="block w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-left text-sm transition active:scale-[0.99] disabled:opacity-60"
+              >
+                <p className="truncate font-semibold text-[var(--tg-theme-text-color)]">{task.title}</p>
+                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                  {task.assignee?.firstName ?? task.assignee?.username ?? 'без исполнителя'} · {task.deadlineAt ? new Date(task.deadlineAt).toLocaleDateString('ru-RU') : 'без дедлайна'}
+                </p>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ResponsibilityAreaCard({
+  summary,
+  onEdit,
+  onDelete,
+  onOpenTask,
+}: {
+  summary: ResponsibilityAreaSummary;
+  onEdit: () => void;
+  onDelete: () => void;
+  onOpenTask: (task: Task) => void;
+}) {
+  const toneClass =
+    summary.tone === 'danger'
+      ? 'border-red-500/40 bg-red-500/10 text-red-300'
+      : summary.tone === 'warning'
+        ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200'
+        : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200';
+
+  return (
+    <article className="overflow-hidden rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)]">
+      <div className="h-1.5" style={{ backgroundColor: summary.area.color }} />
+      <div className="p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-xl">{summary.area.icon}</span>
+              <h4 className="truncate text-base font-bold text-[var(--tg-theme-text-color)]">{summary.area.title}</h4>
+            </div>
+            {summary.area.description && (
+              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">{summary.area.description}</p>
+            )}
+          </div>
+          <span className={`shrink-0 rounded-full border px-2 py-1 text-[11px] font-bold ${toneClass}`}>
+            {summary.status}
+          </span>
+        </div>
+
+        <div className="mb-3 flex flex-wrap gap-2">
+          {summary.owners.length ? (
+            summary.owners.map((owner) => (
+              <span key={owner.id} className="rounded-full bg-[var(--tg-theme-bg-color)] px-3 py-1 text-xs text-[var(--tg-theme-text-color)]">
+                {memberName(owner)}
+              </span>
+            ))
+          ) : (
+            <span className="rounded-full bg-red-500/15 px-3 py-1 text-xs text-red-300">нет ответственного</span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-3 gap-2">
+          <AdminMetric label="активных" value={summary.activeTasks.length} />
+          <AdminMetric label="просрочено" value={summary.overdueTasks.length} tone={summary.overdueTasks.length ? 'danger' : undefined} />
+          <AdminMetric label="закрыто" value={summary.completedTasks.length} />
+        </div>
+
+        <div className="mt-3 space-y-2">
+          {summary.activeTasks.slice(0, 5).map((task) => (
+            <button
+              key={task.id}
+              type="button"
+              onClick={() => onOpenTask(task)}
+              disabled={!task.pageId}
+              className="block w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-left transition active:scale-[0.99] disabled:opacity-60"
+            >
+              <p className="truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">{task.title}</p>
+              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                {task.priority} · {task.deadlineAt ? new Date(task.deadlineAt).toLocaleDateString('ru-RU') : 'без дедлайна'}
+              </p>
+            </button>
+          ))}
+          {summary.activeTasks.length === 0 && (
+            <p className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-hint-color)]">
+              Активных задач в этой зоне нет.
+            </p>
+          )}
+        </div>
+
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={onEdit}
+            className="flex-1 rounded-[10px] bg-[var(--tg-theme-bg-color)] py-2 text-sm font-semibold text-[var(--tg-theme-text-color)]"
+          >
+            Редактировать
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="h-10 w-10 rounded-[10px] bg-red-500/15 font-bold text-red-400"
+            aria-label="Удалить зону"
+          >
+            x
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function ResponsibilityAreaModal({
+  area,
+  members,
+  saving,
+  onSave,
+  onClose,
+}: {
+  area: ResponsibilityArea | null;
+  members: ProjectMember[];
+  saving: boolean;
+  onSave: (draft: Partial<ResponsibilityArea>) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = useState(area?.title ?? '');
+  const [description, setDescription] = useState(area?.description ?? '');
+  const [color, setColor] = useState(area?.color ?? RESPONSIBILITY_COLORS[0]);
+  const [icon, setIcon] = useState(area?.icon ?? RESPONSIBILITY_ICONS[0]);
+  const [ownerUserIds, setOwnerUserIds] = useState<string[]>((area?.ownerUserIds ?? []).map(String));
+  const toggleOwner = (userId: number | string) => {
+    const id = String(userId);
+    setOwnerUserIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[140] flex items-end bg-black/55" onClick={onClose}>
+      <section
+        className="max-h-[90vh] w-full overflow-y-auto rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-bold text-[var(--tg-theme-text-color)]">{area ? 'Редактировать зону' : 'Новая зона'}</h3>
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">Ответственные, цвет и смысл зоны ответственности.</p>
+          </div>
+          <button type="button" onClick={onClose} className="h-9 w-9 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]">
+            x
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Название зоны"
+            className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+          />
+          <textarea
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder="Что входит в эту зону"
+            className="h-24 w-full resize-none rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+          />
+
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Иконка</p>
+            <div className="flex flex-wrap gap-2">
+              {RESPONSIBILITY_ICONS.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setIcon(item)}
+                  className={`h-10 w-10 rounded-[10px] text-lg ${icon === item ? 'bg-[var(--tg-theme-button-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)]'}`}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Цвет</p>
+            <div className="flex flex-wrap gap-2">
+              {RESPONSIBILITY_COLORS.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setColor(item)}
+                  className={`h-9 w-9 rounded-full border-2 ${color === item ? 'border-white' : 'border-transparent'}`}
+                  style={{ backgroundColor: item }}
+                  aria-label={`Цвет ${item}`}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Ответственные</p>
+            <div className="space-y-2">
+              {members.map((member) => (
+                <button
+                  key={member.id}
+                  type="button"
+                  onClick={() => toggleOwner(member.userId)}
+                  className={`flex w-full items-center justify-between rounded-[10px] px-3 py-3 text-left text-sm ${
+                    ownerUserIds.includes(String(member.userId))
+                      ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                      : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'
+                  }`}
+                >
+                  <span>{memberName(member)}</span>
+                  <span>{ownerUserIds.includes(String(member.userId)) ? 'OK' : '+'}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => onSave({ title, description, color, icon, ownerUserIds })}
+          disabled={!title.trim() || saving}
+          className="mt-5 w-full rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-50"
+        >
+          {saving ? 'Сохраняю...' : 'Сохранить'}
+        </button>
+      </section>
     </div>
   );
 }
@@ -1539,43 +2693,405 @@ function AdminMetric({ label, value, suffix = '', tone }: { label: string; value
   );
 }
 
+type DeadlineForecast = ReturnType<typeof buildDeadlineForecast>;
+
+function DeadlineForecastPanel({
+  forecast,
+  onOpenTask,
+}: {
+  forecast: DeadlineForecast;
+  onOpenTask: (task: Task) => void;
+}) {
+  const toneClass =
+    forecast.tone === 'danger'
+      ? 'border-red-500/40 bg-red-500/10 text-red-300'
+      : forecast.tone === 'warning'
+        ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200'
+        : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200';
+
+  return (
+    <section className={`mt-4 rounded-[14px] border p-4 ${toneClass}`}>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase opacity-80">Прогноз 7 дней</p>
+          <h3 className="mt-1 text-base font-bold">{forecast.title}</h3>
+          <p className="mt-1 text-xs opacity-90">{forecast.summary}</p>
+        </div>
+        <span className="shrink-0 rounded-full bg-black/15 px-3 py-1 text-xs font-bold">{forecast.riskScore}/10</span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-center text-[var(--tg-theme-text-color)]">
+          <p className="text-lg font-bold">{forecast.dueWeek.length}</p>
+          <p className="text-[11px] text-[var(--tg-theme-hint-color)]">дедлайнов</p>
+        </div>
+        <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-center text-[var(--tg-theme-text-color)]">
+          <p className="text-lg font-bold">{forecast.likelyOverdue.length}</p>
+          <p className="text-[11px] text-[var(--tg-theme-hint-color)]">риск срыва</p>
+        </div>
+        <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-center text-[var(--tg-theme-text-color)]">
+          <p className="text-lg font-bold">{forecast.peopleAtRisk.length}</p>
+          <p className="text-[11px] text-[var(--tg-theme-hint-color)]">людей</p>
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-[var(--tg-theme-text-color)]">
+        <p className="text-xs font-semibold text-[var(--tg-theme-hint-color)]">Что сделать заранее</p>
+        <p className="mt-1 text-sm font-semibold">{forecast.nextAction}</p>
+      </div>
+
+      {forecast.likelyOverdue.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {forecast.likelyOverdue.slice(0, 4).map(({ task, score, reason }) => (
+            <button
+              key={task.id}
+              type="button"
+              onClick={() => onOpenTask(task)}
+              disabled={!task.pageId}
+              className="block w-full rounded-[10px] bg-black/10 px-3 py-2 text-left active:scale-[0.99] disabled:opacity-60"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="min-w-0 truncate text-sm font-semibold">{task.title}</p>
+                <span className="shrink-0 rounded-full bg-black/15 px-2 py-0.5 text-xs font-bold">{score}/10</span>
+              </div>
+              <p className="mt-1 text-xs opacity-85">{reason}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type WorkloadRedistributionPlan = ReturnType<typeof buildWorkloadRedistributionPlan>;
+
+function WorkloadRedistributionPanel({
+  plan,
+  onOpenTask,
+}: {
+  plan: WorkloadRedistributionPlan;
+  onOpenTask: (task: Task) => void;
+}) {
+  return (
+    <section className="mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+      <div className="mb-3">
+        <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Баланс нагрузки</h3>
+        <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+          Считает не только количество задач, но и их значимость, просрочки и близкие дедлайны.
+        </p>
+      </div>
+
+      <div className="mb-3 grid grid-cols-2 gap-2">
+        <AdminMetric label="перегружены" value={plan.overloaded.length} tone={plan.overloaded.length ? 'warning' : undefined} />
+        <AdminMetric label="можно догрузить" value={plan.available.length} />
+      </div>
+
+      <div className="space-y-2">
+        {plan.summary.map((line) => (
+          <p key={line} className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-hint-color)]">
+            {line}
+          </p>
+        ))}
+      </div>
+
+      {plan.suggestions.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {plan.suggestions.map((suggestion) => (
+            <button
+              key={`${suggestion.from.member.id}-${suggestion.task.id}`}
+              type="button"
+              onClick={() => onOpenTask(suggestion.task)}
+              disabled={!suggestion.task.pageId}
+              className="block w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-left active:scale-[0.99] disabled:opacity-60"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="min-w-0 truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">{suggestion.task.title}</p>
+                <span className="shrink-0 rounded-full bg-yellow-500/15 px-2 py-0.5 text-xs font-semibold text-yellow-300">
+                  {suggestion.score}/10
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                Передать от {memberName(suggestion.from.member)} к {suggestion.to ? memberName(suggestion.to.member) : 'менее загруженному участнику'}
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TaskAttentionQueuePanel({
+  queue,
+  onOpenTask,
+}: {
+  queue: ReturnType<typeof buildTaskAttentionQueue>;
+  onOpenTask: (task: Task) => void;
+}) {
+  const groups = [
+    { id: 'now', title: 'Разобрать сейчас', tone: 'danger', items: queue.now },
+    { id: 'today', title: 'Сегодня в фокус', tone: 'warning', items: queue.today },
+    { id: 'plan', title: 'Планово', tone: 'neutral', items: queue.plan },
+  ] as const;
+
+  return (
+    <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
+      <div className="mb-3">
+        <h4 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Очередь внимания</h4>
+        <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+          Задачи разложены по существенности: важность, приоритет, дедлайн и блокировка других.
+        </p>
+      </div>
+      <div className="space-y-2">
+        {groups.map((group) => (
+          <details key={group.id} className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2" open={group.id !== 'plan'}>
+            <summary className="cursor-pointer list-none">
+              <span
+                className={
+                  group.tone === 'danger'
+                    ? 'text-sm font-semibold text-red-400'
+                    : group.tone === 'warning'
+                      ? 'text-sm font-semibold text-yellow-300'
+                      : 'text-sm font-semibold text-[var(--tg-theme-text-color)]'
+                }
+              >
+                {group.title} · {group.items.length}
+              </span>
+            </summary>
+            <div className="mt-2 space-y-2">
+              {group.items.length === 0 ? (
+                <p className="text-xs text-[var(--tg-theme-hint-color)]">Пока пусто.</p>
+              ) : (
+                group.items.map(({ task, score, reason }) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => onOpenTask(task)}
+                    disabled={!task.pageId}
+                    className="block w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-left transition active:scale-[0.99] disabled:opacity-60"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="min-w-0 truncate text-sm font-medium text-[var(--tg-theme-text-color)]">{task.title}</p>
+                      <span className="shrink-0 rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-semibold text-red-300">
+                        {score}/10
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">{reason}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type AdminReactionRule = {
+  id: string;
+  title: string;
+  timing: string;
+  action: string;
+  threshold: string;
+  tone: 'danger' | 'warning' | 'good';
+  items: ReturnType<typeof buildTaskAttentionQueue>['now'];
+};
+
+function AdminReactionRulesPanel({
+  rules,
+  onOpenTask,
+}: {
+  rules: AdminReactionRule[];
+  onOpenTask: (task: Task) => void;
+}) {
+  const toneClass = (tone: AdminReactionRule['tone']) => {
+    if (tone === 'danger') return 'border-red-500/35 bg-red-500/10 text-red-300';
+    if (tone === 'warning') return 'border-yellow-500/35 bg-yellow-500/10 text-yellow-200';
+    return 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200';
+  };
+
+  return (
+    <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
+      <div className="mb-3">
+        <h4 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Правила реакции</h4>
+        <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+          Подсказывает, как быстро администратору нужно вмешаться по задачам из очереди внимания.
+        </p>
+      </div>
+      <div className="space-y-2">
+        {rules.map((rule) => (
+          <div key={rule.id} className={`rounded-[12px] border p-3 ${toneClass(rule.tone)}`}>
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-bold">{rule.title}</p>
+                <p className="mt-0.5 text-xs opacity-80">{rule.timing} · {rule.threshold}</p>
+              </div>
+              <span className="shrink-0 rounded-full bg-black/15 px-2 py-0.5 text-xs font-bold">{rule.items.length}</span>
+            </div>
+            <p className="text-xs leading-relaxed opacity-90">{rule.action}</p>
+            {rule.items.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {rule.items.slice(0, 3).map(({ task, score }) => (
+                  <button
+                    key={`${rule.id}-${task.id}`}
+                    type="button"
+                    onClick={() => onOpenTask(task)}
+                    disabled={!task.pageId}
+                    className="max-w-full truncate rounded-full bg-black/15 px-2 py-1 text-left text-xs font-semibold active:scale-[0.98] disabled:opacity-60"
+                  >
+                    {task.title} · {score}/10
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type ProjectDiagnosticTone = 'good' | 'warning' | 'danger';
+
+type ProjectDiagnostics = {
+  title: string;
+  summary: string;
+  nextAction: string;
+  tone: ProjectDiagnosticTone;
+  dimensions: Array<{
+    title: string;
+    status: string;
+    detail: string;
+    action: string;
+    tone: ProjectDiagnosticTone;
+  }>;
+};
+
+function ProjectDiagnosticsPanel({ diagnostics }: { diagnostics: ProjectDiagnostics }) {
+  const toneClass =
+    diagnostics.tone === 'danger'
+      ? 'border-red-500/40 bg-red-500/10 text-red-300'
+      : diagnostics.tone === 'warning'
+        ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200'
+        : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200';
+
+  return (
+    <section className={`rounded-[14px] border p-4 ${toneClass}`}>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide opacity-80">Состояние проекта</p>
+          <h3 className="mt-1 text-lg font-bold">{diagnostics.title}</h3>
+          <p className="mt-1 text-sm opacity-90">{diagnostics.summary}</p>
+        </div>
+        <span className="shrink-0 rounded-full bg-black/15 px-3 py-1 text-xs font-bold">
+          {diagnostics.tone === 'danger' ? 'критично' : diagnostics.tone === 'warning' ? 'внимание' : 'спокойно'}
+        </span>
+      </div>
+
+      <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-[var(--tg-theme-text-color)]">
+        <p className="text-xs font-semibold text-[var(--tg-theme-hint-color)]">Ближайшее действие</p>
+        <p className="mt-1 text-sm font-semibold">{diagnostics.nextAction}</p>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        {diagnostics.dimensions.map((dimension) => (
+          <div key={dimension.title} className="rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-[var(--tg-theme-text-color)]">
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <p className="text-sm font-bold">{dimension.title}</p>
+              <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                dimension.tone === 'danger'
+                  ? 'bg-red-500/15 text-red-400'
+                  : dimension.tone === 'warning'
+                    ? 'bg-yellow-500/15 text-yellow-500'
+                    : 'bg-emerald-500/15 text-emerald-500'
+              }`}>
+                {dimension.status}
+              </span>
+            </div>
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">{dimension.detail}</p>
+            <p className="mt-2 text-xs font-semibold text-[var(--tg-theme-link-color)]">{dimension.action}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function MemberProfileModal({
   project,
   member,
   tasks,
+  columns,
   events,
   now,
+  taskSignificanceSettings,
   onClose,
 }: {
   project: Project;
   member: ProjectMember;
   tasks: Task[];
+  columns: Column[];
   events: ActivityEvent[];
   now: number;
+  taskSignificanceSettings: TaskSignificanceSettings;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
+  const currentUserId = useAuthStore((state) => state.user?.id);
   const userId = member.userId;
   const activeTasks = tasks
-    .filter((task) => !task.isArchived && isTaskAssignedToMember(task, userId))
+    .filter((task) => isTaskActiveForAdmin(task, columns, now) && isTaskAssignedToMember(task, userId))
     .sort((a, b) => {
+      const scoreDiff =
+        calculateTaskSignificanceScore(b, now, taskSignificanceSettings) -
+        calculateTaskSignificanceScore(a, now, taskSignificanceSettings);
+      if (scoreDiff !== 0) return scoreDiff;
       const left = a.deadlineAt ? new Date(a.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
       const right = b.deadlineAt ? new Date(b.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
       return left - right;
     });
   const overdueTasks = activeTasks.filter((task) => task.deadlineAt && new Date(task.deadlineAt).getTime() < now);
+  const activeSignificance = activeTasks.reduce((sum, task) => sum + calculateTaskSignificanceScore(task, now, taskSignificanceSettings), 0);
+  const overdueSignificance = overdueTasks.reduce((sum, task) => sum + calculateTaskSignificanceScore(task, now, taskSignificanceSettings), 0);
   const memberEvents = events.filter((event) => String(event.userId) === String(userId));
   const isActive = activeTasks.length > 0 || memberEvents.length > 0;
   const zones = getResponsibilityZones(activeTasks);
-  const notesKey = `workspace-admin-member-notes:${project.id}:${userId}`;
-  const [notes, setNotes] = useState(() => localStorage.getItem(notesKey) ?? '');
-  const photoUrl = (member.user as any)?.photoUrl || (member.user as any)?.avatarUrl;
+  const canSeeAdminNotes =
+    String(project.ownerId) === String(currentUserId) ||
+    (project.members ?? []).some((item) => String(item.userId) === String(currentUserId) && item.role?.name === 'admin');
+  const [notes, setNotes] = useState('');
+  const [notesStatus, setNotesStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const username = member.user?.username ? `@${member.user.username}` : 'не указан';
   const addedAt = (member as any).createdAt || (member as any).joinedAt || project.createdAt;
 
-  const saveNotes = (value: string) => {
-    setNotes(value);
-    localStorage.setItem(notesKey, value);
+  useEffect(() => {
+    if (!canSeeAdminNotes || !currentUserId) return;
+    let cancelled = false;
+    setNotesStatus('idle');
+    projectsApi
+      .getMemberAdminNotes(project.id, member.id, currentUserId)
+      .then((value) => {
+        if (!cancelled) setNotes(value);
+      })
+      .catch(() => {
+        if (!cancelled) setNotesStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canSeeAdminNotes, currentUserId, member.id, project.id]);
+
+  const saveNotes = async () => {
+    if (!canSeeAdminNotes || !currentUserId) return;
+    setNotesStatus('saving');
+    try {
+      const savedNotes = await projectsApi.updateMemberAdminNotes(project.id, member.id, notes, currentUserId);
+      setNotes(savedNotes);
+      setNotesStatus('saved');
+    } catch {
+      setNotesStatus('error');
+    }
   };
 
   const openTaskInKanban = (task: Task) => {
@@ -1592,13 +3108,7 @@ function MemberProfileModal({
       <div className="max-h-[88vh] w-full overflow-y-auto rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-4" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4 flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            {photoUrl ? (
-              <img src={photoUrl} alt="" className="h-14 w-14 rounded-full object-cover" />
-            ) : (
-              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--tg-theme-button-color)] text-xl font-bold text-[var(--tg-theme-button-text-color)]">
-                {memberName(member).slice(0, 1).toUpperCase()}
-              </div>
-            )}
+            <UserAvatarImage user={member.user} label={memberName(member)} size="lg" />
             <div className="min-w-0">
               <h3 className="truncate text-lg font-bold text-[var(--tg-theme-text-color)]">{memberName(member)}</h3>
               <p className="text-sm text-[var(--tg-theme-hint-color)]">{username}</p>
@@ -1613,6 +3123,8 @@ function MemberProfileModal({
           <MemberCardMetric label="Добавлен" value={new Date(addedAt).toLocaleDateString('ru-RU')} />
           <MemberCardMetric label="Активных задач" value={String(activeTasks.length)} />
           <MemberCardMetric label="Просрочено" value={String(overdueTasks.length)} tone={overdueTasks.length ? 'danger' : undefined} />
+          <MemberCardMetric label="Вес задач" value={String(activeSignificance)} tone={activeSignificance >= 20 ? 'warning' : undefined} />
+          <MemberCardMetric label="Вес просрочки" value={String(overdueSignificance)} tone={overdueSignificance ? 'danger' : undefined} />
           <MemberCardMetric label="Зон ответственности" value={String(zones.length)} />
         </div>
 
@@ -1643,7 +3155,7 @@ function MemberProfileModal({
                 >
                   <p className="text-sm font-semibold text-[var(--tg-theme-text-color)]">{task.title}</p>
                   <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
-                    {task.priority} · {task.deadlineAt ? new Date(task.deadlineAt).toLocaleString('ru-RU') : 'без дедлайна'}
+                    {task.priority} · {calculateTaskSignificanceScore(task, now, taskSignificanceSettings)}/10 · {task.deadlineAt ? new Date(task.deadlineAt).toLocaleString('ru-RU') : 'без дедлайна'}
                   </p>
                 </button>
               ))}
@@ -1653,15 +3165,21 @@ function MemberProfileModal({
           )}
         </section>
 
+        {canSeeAdminNotes && (
         <section className="mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
           <h4 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">Заметки администратора</h4>
           <textarea
             value={notes}
-            onChange={(event) => saveNotes(event.target.value)}
+            onChange={(event) => {
+              setNotes(event.target.value);
+              setNotesStatus('idle');
+            }}
+            onBlur={saveNotes}
             placeholder="Внутренние заметки владельца или администратора"
             className="h-28 w-full resize-none rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3 text-sm text-[var(--tg-theme-text-color)] placeholder:text-[var(--tg-theme-hint-color)] outline-none"
           />
         </section>
+        )}
       </div>
     </div>
   );
@@ -1718,6 +3236,177 @@ function BotToggle({ label, checked, onChange }: { label: string; checked: boole
   );
 }
 
+function SignificanceNumberInput({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  const updateValue = (nextValue: number) => {
+    onChange(Math.max(min, Math.min(max, Math.round(nextValue))));
+  };
+  return (
+    <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+      <span className="mb-1 block truncate text-xs text-[var(--tg-theme-hint-color)]">{label}</span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => updateValue(value - 1)}
+          className="h-8 w-8 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-sm font-bold text-[var(--tg-theme-text-color)]"
+        >
+          -
+        </button>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          value={value}
+          onChange={(event) => updateValue(Number(event.target.value))}
+          className="min-w-0 flex-1 bg-transparent text-center text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => updateValue(value + 1)}
+          className="h-8 w-8 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-sm font-bold text-[var(--tg-theme-text-color)]"
+        >
+          +
+        </button>
+      </div>
+    </label>
+  );
+}
+
+function BotReportCard({
+  title,
+  description,
+  report,
+  members,
+  onChange,
+  onToggleWeekday,
+  onToggleRecipient,
+  onToggleSection,
+}: {
+  title: string;
+  description: string;
+  report: ProjectBotSettings['reports']['weekly'];
+  members: ProjectMember[];
+  onChange: (patch: Partial<ProjectBotSettings['reports']['weekly']>) => void;
+  onToggleWeekday: (day: number) => void;
+  onToggleRecipient: (userId: number) => void;
+  onToggleSection: (section: keyof ProjectBotSettings['reports']['weekly']['sections']) => void;
+}) {
+  const weekdays = [
+    [1, 'Пн'],
+    [2, 'Вт'],
+    [3, 'Ср'],
+    [4, 'Чт'],
+    [5, 'Пт'],
+    [6, 'Сб'],
+    [7, 'Вс'],
+  ] as const;
+  const sections = [
+    ['createdTasks', 'Новые задачи'],
+    ['completedTasks', 'Завершенные'],
+    ['overdueTasks', 'Просрочки'],
+    ['approachingDeadlines', 'Скоро дедлайн'],
+    ['inactiveUsers', 'Неактивные'],
+    ['userActivity', 'Активность'],
+    ['kanbanMovement', 'Движение Kanban'],
+    ['mentions', 'Упоминания'],
+    ['recommendations', 'Рекомендации'],
+  ] as const;
+
+  return (
+    <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">{title}</h3>
+          <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">{description}</p>
+        </div>
+        <input type="checkbox" checked={report.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+          <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Время МСК</span>
+          <input
+            type="time"
+            value={report.time}
+            onChange={(event) => onChange({ time: event.target.value })}
+            className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+          />
+        </label>
+        <label className="flex items-center justify-between gap-2 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-text-color)]">
+          <span>Только если есть изменения</span>
+          <input type="checkbox" checked={report.sendOnlyIfChanged} onChange={(event) => onChange({ sendOnlyIfChanged: event.target.checked })} />
+        </label>
+      </div>
+
+      <div className="mt-3">
+        <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Дни отправки</p>
+        <div className="flex flex-wrap gap-2">
+          {weekdays.map(([day, label]) => (
+            <button
+              key={day}
+              type="button"
+              onClick={() => onToggleWeekday(day)}
+              className={`rounded-full px-3 py-2 text-xs font-semibold ${
+                report.weekdays.includes(day)
+                  ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                  : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Получатели</p>
+        <div className="flex flex-wrap gap-2">
+          {members.map((member) => (
+            <button
+              key={member.id}
+              type="button"
+              onClick={() => onToggleRecipient(member.userId)}
+              className={`rounded-full px-3 py-2 text-xs font-semibold ${
+                report.recipientUserIds.includes(member.userId)
+                  ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                  : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]'
+              }`}
+            >
+              {memberName(member)}
+            </button>
+          ))}
+        </div>
+        {!report.recipientUserIds.length && (
+          <p className="mt-2 text-xs text-[var(--tg-theme-hint-color)]">Если никого не выбрать, отчет уходит владельцу проекта.</p>
+        )}
+      </div>
+
+      <div className="mt-3">
+        <p className="mb-2 text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Что включать</p>
+        <div className="grid grid-cols-2 gap-2">
+          {sections.map(([section, label]) => (
+            <label key={section} className="flex items-center gap-2 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-text-color)]">
+              <input type="checkbox" checked={report.sections[section]} onChange={() => onToggleSection(section)} />
+              <span>{label}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function BotReportRow({
   title,
   report,
@@ -1768,20 +3457,384 @@ function parseWeekdays(value: string) {
     .filter((day) => Number.isInteger(day) && day >= 1 && day <= 7);
 }
 
-function getTaskRiskScore(task: Task, now: number) {
-  let score = 0;
-  if (task.priority === 'CRITICAL') score += 35;
-  if (task.priority === 'HIGH') score += 22;
-  if (!task.assignee?.id && !task.assigneeId) score += 18;
-  if (!task.description?.trim()) score += 8;
-  if (!task.deadlineAt) score += 10;
-  if (task.deadlineAt) {
-    const diffHours = (new Date(task.deadlineAt).getTime() - now) / 3600000;
-    if (diffHours < 0) score += 40;
-    else if (diffHours <= 24) score += 24;
-    else if (diffHours <= 48) score += 14;
+function buildProjectDiagnostics({
+  activeTasks,
+  overdue,
+  dueSoon,
+  unassigned,
+  noDeadline,
+  weakTasks,
+  inactiveMembers,
+  overloaded,
+  changeSummary,
+}: {
+  activeTasks: Task[];
+  overdue: Task[];
+  dueSoon: Task[];
+  unassigned: Task[];
+  noDeadline: Task[];
+  weakTasks: Task[];
+  inactiveMembers: ProjectMember[];
+  overloaded: Array<{ member: ProjectMember; total: number }>;
+  changeSummary: AdminChangeSummary;
+}): ProjectDiagnostics {
+  const activeCount = activeTasks.length;
+  const weakRatio = activeCount ? weakTasks.length / activeCount : 0;
+  const inactiveRatio = inactiveMembers.length ? inactiveMembers.length / Math.max(1, inactiveMembers.length + overloaded.length) : 0;
+  const closedCount = changeSummary.closedTasks.length;
+  const newCount = changeSummary.newTasks.length;
+  const staleCount = changeSummary.staleTasks.length;
+
+  const dimensions: ProjectDiagnostics['dimensions'] = [
+    {
+      title: 'Сроки',
+      status: overdue.length ? 'горит' : dueSoon.length ? 'скоро сроки' : 'чисто',
+      tone: overdue.length ? 'danger' : dueSoon.length ? 'warning' : 'good',
+      detail: `${overdue.length} просрочено, ${dueSoon.length} в ближайшие 48 часов.`,
+      action: overdue.length
+        ? 'Сначала пересмотреть просроченные задачи: закрыть, перенести срок или назначить ответственного.'
+        : dueSoon.length
+          ? 'Поставить ближайшие дедлайны в фокус дня.'
+          : 'Дедлайны сейчас не требуют срочного вмешательства.',
+    },
+    {
+      title: 'Поток работы',
+      status: staleCount && !closedCount ? 'застой' : newCount > closedCount + 4 ? 'копится входящий поток' : 'движется',
+      tone: staleCount && !closedCount ? 'danger' : newCount > closedCount + 4 || staleCount ? 'warning' : 'good',
+      detail: `${newCount} новых, ${closedCount} закрытых, ${staleCount} без движения за период.`,
+      action: staleCount
+        ? 'Разобрать задачи без движения и решить: делать, делегировать, перенести или удалить.'
+        : 'Поддерживать текущий темп и не копить новые задачи без разбора.',
+    },
+    {
+      title: 'Качество задач',
+      status: weakRatio >= 0.4 ? 'много неясного' : weakTasks.length ? 'есть пробелы' : 'понятно',
+      tone: weakRatio >= 0.4 ? 'danger' : weakTasks.length ? 'warning' : 'good',
+      detail: `${weakTasks.length} задач требуют уточнения: ${unassigned.length} без исполнителя, ${noDeadline.length} без дедлайна.`,
+      action: weakTasks.length
+        ? 'Привести задачи к стандарту: исполнитель, срок, описание результата.'
+        : 'Формулировки задач выглядят достаточно ясными.',
+    },
+    {
+      title: 'Нагрузка',
+      status: overloaded.length ? 'перекос' : 'ровно',
+      tone: overloaded.length ? 'warning' : 'good',
+      detail: overloaded.length ? `Перегружены: ${overloaded.map((item) => memberName(item.member)).join(', ')}.` : 'Явного перегруза по людям не видно.',
+      action: overloaded.length
+        ? 'Передать часть задач людям с меньшей нагрузкой или снизить приоритеты.'
+        : 'Нагрузка выглядит приемлемо.',
+    },
+    {
+      title: 'Вовлеченность',
+      status: inactiveMembers.length ? 'не все вовлечены' : 'команда в работе',
+      tone: inactiveRatio > 0.5 ? 'warning' : 'good',
+      detail: inactiveMembers.length ? `Без активных задач: ${inactiveMembers.map(memberName).join(', ')}.` : 'Участники вовлечены через задачи.',
+      action: inactiveMembers.length
+        ? 'Проверить роли людей: им нужны задачи, доступ или их стоит убрать из активной команды.'
+        : 'Командная вовлеченность выглядит нормально.',
+    },
+  ];
+
+  const dangerCount = dimensions.filter((dimension) => dimension.tone === 'danger').length;
+  const warningCount = dimensions.filter((dimension) => dimension.tone === 'warning').length;
+  const firstProblem = dimensions.find((dimension) => dimension.tone === 'danger') ?? dimensions.find((dimension) => dimension.tone === 'warning');
+
+  if (dangerCount >= 2) {
+    return {
+      title: 'Проект требует немедленного разбора',
+      summary: 'Проблемы есть сразу в нескольких зонах. Сейчас важнее не добавлять новые задачи, а стабилизировать текущие.',
+      nextAction: firstProblem?.action ?? 'Провести короткую планерку и обновить задачи.',
+      tone: 'danger',
+      dimensions,
+    };
   }
-  return score;
+  if (dangerCount === 1) {
+    return {
+      title: 'Есть критический участок',
+      summary: `Главная проблема сейчас: ${firstProblem?.title.toLowerCase()}. Остальные зоны можно смотреть после неё.`,
+      nextAction: firstProblem?.action ?? 'Начать с самой проблемной зоны.',
+      tone: 'danger',
+      dimensions,
+    };
+  }
+  if (warningCount > 0) {
+    return {
+      title: 'Проект рабочий, но требует настройки',
+      summary: 'Критики нет, но есть места, где проект может начать буксовать через несколько дней.',
+      nextAction: firstProblem?.action ?? 'Уточнить задачи и ближайшие дедлайны.',
+      tone: 'warning',
+      dimensions,
+    };
+  }
+  return {
+    title: 'Проект под контролем',
+    summary: 'Нет явных сигналов, что проект проседает по срокам, нагрузке или качеству задач.',
+    nextAction: 'Поддерживать текущий ритм и разбирать новые задачи без накопления.',
+    tone: 'good',
+    dimensions,
+  };
+}
+
+function getTaskRiskScore(task: Task, now: number, settings?: TaskSignificanceSettings) {
+  const hasAssignee = Boolean(task.assignee?.id || task.assigneeId);
+  const hasDescription = Boolean(task.description?.trim());
+  const deadlineTime = task.deadlineAt ? new Date(task.deadlineAt).getTime() : undefined;
+  const diffHours = deadlineTime ? (deadlineTime - now) / 3600000 : undefined;
+  const needsAttention =
+    task.priority === 'CRITICAL' ||
+    task.priority === 'HIGH' ||
+    task.isBlocking ||
+    !hasAssignee ||
+    !hasDescription ||
+    !task.deadlineAt ||
+    (diffHours !== undefined && diffHours <= 48);
+
+  return needsAttention ? calculateTaskSignificanceScore(task, now, settings) : 0;
+}
+
+function buildTaskAttentionQueue(tasks: Task[], now: number, settings: TaskSignificanceSettings) {
+  const ranked = tasks
+    .map((task) => {
+      const score = calculateTaskSignificanceScore(task, now, settings);
+      const deadlineTime = task.deadlineAt ? new Date(task.deadlineAt).getTime() : undefined;
+      const diffHours = deadlineTime ? (deadlineTime - now) / 3600000 : undefined;
+      return {
+        task,
+        score,
+        diffHours,
+        reason: buildTaskAttentionReason(task, score, diffHours),
+      };
+    })
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      const leftDeadline = left.task.deadlineAt ? new Date(left.task.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightDeadline = right.task.deadlineAt ? new Date(right.task.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftDeadline - rightDeadline;
+    });
+  const used = new Set<number>();
+  const take = (predicate: (item: (typeof ranked)[number]) => boolean, limit: number) => {
+    const items: typeof ranked = [];
+    for (const item of ranked) {
+      if (items.length >= limit) break;
+      if (used.has(item.task.id) || !predicate(item)) continue;
+      used.add(item.task.id);
+      items.push(item);
+    }
+    return items;
+  };
+
+  return {
+    now: take((item) => item.score >= settings.criticalThreshold || (item.diffHours !== undefined && item.diffHours < 0 && item.score >= settings.attentionThreshold), 6),
+    today: take((item) => item.score >= settings.attentionThreshold || (item.diffHours !== undefined && item.diffHours >= 0 && item.diffHours <= 24), 6),
+    plan: take((item) => item.score >= 4, 6),
+  };
+}
+
+function buildDeadlineForecast({
+  activeTasks,
+  byUser,
+  now,
+  settings,
+}: {
+  activeTasks: Task[];
+  byUser: Array<{ member: ProjectMember; significance: number; overdueSignificance: number; dueSoon: number }>;
+  now: number;
+  settings: TaskSignificanceSettings;
+}) {
+  const weekEnd = now + 7 * 24 * 3600000;
+  const dueWeek = activeTasks
+    .filter((task) => {
+      if (!task.deadlineAt) return false;
+      const deadline = new Date(task.deadlineAt).getTime();
+      return deadline >= now && deadline <= weekEnd;
+    })
+    .sort((left, right) => new Date(left.deadlineAt!).getTime() - new Date(right.deadlineAt!).getTime());
+
+  const likelyOverdue = dueWeek
+    .map((task) => {
+      const score = calculateTaskSignificanceScore(task, now, settings);
+      const deadlineTime = new Date(task.deadlineAt!).getTime();
+      const hoursLeft = (deadlineTime - now) / 3600000;
+      const hasWeakSetup = !task.description?.trim() || (!task.assigneeId && !task.assignee?.id);
+      const reasonParts = [
+        `${formatHours(hoursLeft)} до срока`,
+        `${score}/10 значимость`,
+      ];
+      if (hasWeakSetup) reasonParts.push('нужно уточнение');
+      if (task.isBlocking) reasonParts.push('блокирует других');
+      return {
+        task,
+        score,
+        hoursLeft,
+        reason: reasonParts.join(' · '),
+        risky: score >= settings.attentionThreshold || hoursLeft <= 24 || hasWeakSetup || task.isBlocking,
+      };
+    })
+    .filter((item) => item.risky)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.hoursLeft - right.hoursLeft;
+    });
+
+  const peopleAtRisk = byUser
+    .filter((item) => item.dueSoon > 0 || item.overdueSignificance > 0)
+    .sort((left, right) => right.overdueSignificance + right.significance - (left.overdueSignificance + left.significance));
+  const riskScore = Math.min(10, Math.max(1, likelyOverdue.length * 2 + Math.ceil(dueWeek.length / 3) + peopleAtRisk.length));
+  const tone: ProjectDiagnosticTone = riskScore >= 7 ? 'danger' : riskScore >= 4 ? 'warning' : 'good';
+  const title =
+    tone === 'danger'
+      ? 'Неделя требует ручного контроля'
+      : tone === 'warning'
+        ? 'Есть риски на неделе'
+        : 'Неделя выглядит спокойно';
+  const summary =
+    dueWeek.length > 0
+      ? `${dueWeek.length} задач со сроком в ближайшие 7 дней, ${likelyOverdue.length} из них лучше проверить заранее.`
+      : 'В ближайшие 7 дней нет активных задач с дедлайном.';
+  const nextAction =
+    likelyOverdue[0]
+      ? `Начать с задачи «${likelyOverdue[0].task.title}»: ${likelyOverdue[0].reason}.`
+      : peopleAtRisk[0]
+        ? `Проверить нагрузку участника ${memberName(peopleAtRisk[0].member)}.`
+        : 'Поддерживать текущий ритм и не копить задачи без дедлайна.';
+
+  return {
+    title,
+    summary,
+    nextAction,
+    tone,
+    riskScore,
+    dueWeek,
+    likelyOverdue,
+    peopleAtRisk,
+  };
+}
+
+function buildWorkloadRedistributionPlan({
+  byUser,
+  activeTasks,
+  now,
+  settings,
+}: {
+  byUser: Array<{
+    member: ProjectMember;
+    total: number;
+    significance: number;
+    overdueSignificance: number;
+    overdue: number;
+    dueSoon: number;
+  }>;
+  activeTasks: Task[];
+  now: number;
+  settings: TaskSignificanceSettings;
+}) {
+  const activeLoads = byUser.filter((item) => item.total > 0 || item.significance > 0);
+  const averageWeight = activeLoads.length
+    ? activeLoads.reduce((sum, item) => sum + item.significance, 0) / activeLoads.length
+    : 0;
+  const overloaded = [...byUser]
+    .filter((item) => item.significance >= Math.max(6, averageWeight * 1.35) && item.total > 0)
+    .sort((a, b) => b.significance - a.significance);
+  const available = [...byUser]
+    .filter((item) => item.significance <= Math.max(2, averageWeight * 0.7))
+    .sort((a, b) => a.significance - b.significance);
+  const candidates = overloaded.flatMap((from) => {
+    const target = available.find((item) => item.member.userId !== from.member.userId);
+    return activeTasks
+      .filter((task) => isTaskAssignedToMember(task, from.member.userId))
+      .map((task) => ({
+        from,
+        to: target,
+        task,
+        score: calculateTaskSignificanceScore(task, now, settings),
+      }))
+      .filter((item) => item.score >= settings.attentionThreshold || item.task.priority === 'HIGH' || item.task.priority === 'CRITICAL')
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 2);
+  });
+  const suggestions = candidates.slice(0, 4);
+  const summary = [
+    overloaded.length
+      ? `Есть перекос нагрузки: ${overloaded.map((item) => `${memberName(item.member)} (${item.significance})`).join(', ')}.`
+      : 'Явного перегруза по значимости задач сейчас нет.',
+    available.length
+      ? `Резерв по нагрузке: ${available.slice(0, 3).map((item) => `${memberName(item.member)} (${item.significance})`).join(', ')}.`
+      : 'Свободного резерва по участникам не видно.',
+    suggestions.length
+      ? 'Ниже показаны задачи, которые лучше проверить первыми для возможной передачи.'
+      : 'Кандидатов на передачу задач по текущим правилам не найдено.',
+  ];
+
+  return {
+    averageWeight,
+    overloaded,
+    available,
+    suggestions,
+    summary,
+  };
+}
+
+function buildAdminReactionRules(
+  queue: ReturnType<typeof buildTaskAttentionQueue>,
+  settings: TaskSignificanceSettings,
+): AdminReactionRule[] {
+  return [
+    {
+      id: 'critical-now',
+      title: 'Немедленно разобрать',
+      timing: 'сегодня, без откладывания',
+      threshold: `${settings.criticalThreshold}+ баллов или просрочка`,
+      tone: queue.now.length ? 'danger' : 'good',
+      items: queue.now,
+      action: queue.now.length
+        ? 'Открыть задачи, принять решение: закрыть, переназначить, перенести срок или снять блокер.'
+        : 'Критичных задач для немедленного вмешательства сейчас нет.',
+    },
+    {
+      id: 'daily-focus',
+      title: 'Поставить в фокус дня',
+      timing: 'в течение 24 часов',
+      threshold: `${settings.attentionThreshold}+ баллов или близкий дедлайн`,
+      tone: queue.today.length ? 'warning' : 'good',
+      items: queue.today,
+      action: queue.today.length
+        ? 'Проверить исполнителя, ближайший следующий шаг и реальность дедлайна.'
+        : 'На сегодня нет задач, которые требуют отдельного административного фокуса.',
+    },
+    {
+      id: 'weekly-plan',
+      title: 'Держать в недельном плане',
+      timing: 'на планерке или при обзоре недели',
+      threshold: '4+ балла',
+      tone: queue.plan.length ? 'warning' : 'good',
+      items: queue.plan,
+      action: queue.plan.length
+        ? 'Проверить, не превращаются ли эти задачи в будущую просрочку, и заранее уточнить формулировку.'
+        : 'Плановая зона спокойная: значимых задач без срочной реакции нет.',
+    },
+  ];
+}
+
+function buildTaskAttentionReason(task: Task, score: number, diffHours?: number) {
+  const reasons: string[] = [getTaskSignificanceLabel(score)];
+  if (diffHours !== undefined) {
+    if (diffHours < 0) reasons.push(`просрочено на ${formatHours(Math.abs(diffHours))}`);
+    else if (diffHours <= 24) reasons.push(`дедлайн через ${formatHours(diffHours)}`);
+    else if (diffHours <= 48) reasons.push('дедлайн в ближайшие 48 часов');
+  } else {
+    reasons.push('без дедлайна');
+  }
+  if (task.isBlocking) reasons.push('блокирует других');
+  if (task.priority === 'CRITICAL') reasons.push('критичный приоритет');
+  else if (task.priority === 'HIGH') reasons.push('высокий приоритет');
+  if (!task.assigneeId && !task.assignee?.id) reasons.push('нет исполнителя');
+  return reasons.join(' · ');
+}
+
+function formatHours(hours: number) {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} мин.`;
+  if (hours < 48) return `${Math.round(hours)} ч.`;
+  return `${Math.round(hours / 24)} дн.`;
 }
 
 function buildAssistantInsights({
@@ -1892,12 +3945,14 @@ function buildActionPlan({
 
 function buildChangeSummary({
   tasks,
+  columns,
   events,
   nodes,
   blocks,
   now,
 }: {
   tasks: Task[];
+  columns: Column[];
   events: ActivityEvent[];
   nodes: PageNode[];
   blocks: Block[];
@@ -1905,9 +3960,9 @@ function buildChangeSummary({
 }) {
   const since = now - 7 * 24 * 3600000;
   const newTasks = tasks.filter((task) => new Date(task.createdAt).getTime() >= since);
-  const closedTasks = tasks.filter((task) => task.isArchived || hasRecentEvent(events, task.id, ['task_complete'], since));
+  const closedTasks = tasks.filter((task) => isTaskCompletedForAdmin(task, columns) || hasRecentEvent(events, task.id, ['task_complete'], since));
   const newOverdueTasks = tasks.filter((task) => {
-    if (!task.deadlineAt || task.isArchived) return false;
+    if (!task.deadlineAt || isTaskCompletedForAdmin(task, columns)) return false;
     const deadline = new Date(task.deadlineAt).getTime();
     return deadline < now && deadline >= since;
   });
@@ -1924,7 +3979,7 @@ function buildChangeSummary({
   );
   const updatedPages = nodes.filter((node) => updatedPageIds.has(node.id) || new Date(node.updatedAt).getTime() >= since);
   const staleTasks = tasks.filter((task) => {
-    if (task.isArchived) return false;
+    if (isTaskCompletedForAdmin(task, columns) || isTaskDeferredForAdmin(task, now)) return false;
     const changedAt = new Date(task.updatedAt ?? task.createdAt).getTime();
     return now - changedAt > 7 * 24 * 3600000;
   });
@@ -1936,6 +3991,19 @@ function buildChangeSummary({
   ];
 
   return { newTasks, closedTasks, newOverdueTasks, activePeople, updatedPages, staleTasks, highlights };
+}
+
+function createEmptyAdminChangeSummary(): AdminChangeSummary {
+  return {
+    days: 7,
+    newTasks: [],
+    closedTasks: [],
+    newOverdueTasks: [],
+    activePeople: [],
+    updatedPages: [],
+    staleTasks: [],
+    highlights: [],
+  };
 }
 
 function buildTaskQualityReport(tasks: Task[], now: number) {
@@ -2028,6 +4096,9 @@ function buildAutoDigest({
   byUser,
   riskTasks,
   changeSummary,
+  deadlineForecast,
+  workloadPlan,
+  reactionRules,
 }: {
   project: Project;
   tasks: Task[];
@@ -2038,9 +4109,16 @@ function buildAutoDigest({
   weakTasks: Task[];
   byUser: Array<{ member: ProjectMember; total: number; overdue: number; dueSoon: number }>;
   riskTasks: Array<{ task: Task; score: number }>;
-  changeSummary: ReturnType<typeof buildChangeSummary>;
+  changeSummary: AdminChangeSummary;
+  deadlineForecast: DeadlineForecast;
+  workloadPlan: WorkloadRedistributionPlan;
+  reactionRules: AdminReactionRule[];
 }) {
   const topPeople = [...byUser].sort((a, b) => b.total - a.total).slice(0, 3);
+  const criticalReaction = reactionRules.find((rule) => rule.id === 'critical-now');
+  const focusReaction = reactionRules.find((rule) => rule.id === 'daily-focus');
+  const workloadSuggestion = workloadPlan.suggestions[0];
+  const forecastTask = deadlineForecast.likelyOverdue[0];
   const lines = [
     `Сводка проекта: ${project.title}`,
     '',
@@ -2058,6 +4136,24 @@ function buildAutoDigest({
     `- без дедлайна: ${noDeadline.length}`,
     `- требуют уточнения: ${weakTasks.length}`,
     ...(riskTasks.length ? riskTasks.slice(0, 3).map(({ task }) => `- ${task.title}`) : ['- критичных задач не найдено']),
+    '',
+    'Прогноз на 7 дней:',
+    `- риск недели: ${deadlineForecast.riskScore}/10`,
+    `- дедлайнов на неделе: ${deadlineForecast.dueWeek.length}`,
+    `- риск срыва: ${deadlineForecast.likelyOverdue.length}`,
+    forecastTask ? `- первая задача для проверки: ${forecastTask.task.title}` : '- срочных задач для прогноза нет',
+    '',
+    'Нагрузка:',
+    `- перегружены: ${workloadPlan.overloaded.length ? workloadPlan.overloaded.map((item) => memberName(item.member)).join(', ') : 'нет'}`,
+    `- можно догрузить: ${workloadPlan.available.length ? workloadPlan.available.slice(0, 3).map((item) => memberName(item.member)).join(', ') : 'нет'}`,
+    workloadSuggestion
+      ? `- кандидат на передачу: ${workloadSuggestion.task.title} от ${memberName(workloadSuggestion.from.member)} к ${workloadSuggestion.to ? memberName(workloadSuggestion.to.member) : 'менее загруженному участнику'}`
+      : '- явных кандидатов на передачу нет',
+    '',
+    'Правила реакции:',
+    `- немедленно: ${criticalReaction?.items.length ?? 0}`,
+    `- фокус дня: ${focusReaction?.items.length ?? 0}`,
+    `- действие: ${deadlineForecast.nextAction}`,
     '',
     'Фокус:',
     dueSoon[0] ? `- ближайший дедлайн: ${dueSoon[0].title}` : '- ближайших дедлайнов нет',
@@ -2094,6 +4190,7 @@ function ExportPanel({
   targetId,
   exporting,
   result,
+  message,
   onFormatChange,
   onScopeChange,
   onTargetChange,
@@ -2106,20 +4203,46 @@ function ExportPanel({
   targetId: string;
   exporting: boolean;
   result: ExportResult | null;
+  message: string;
   onFormatChange: (format: ExportFormat) => void;
   onScopeChange: (scope: ExportScope) => void;
   onTargetChange: (id: string) => void;
-  onExport: () => void;
+  onExport: (delivery: 'download' | 'telegram') => void;
   onClose: () => void;
 }) {
-  const { branches, pages, kanbanPages } = getProjectExportTargets(project);
+  const [targets, setTargets] = useState<{ branches: PageNode[]; pages: PageNode[]; kanbanPages: PageNode[] }>({
+    branches: [],
+    pages: [],
+    kanbanPages: [],
+  });
+  const [targetsLoading, setTargetsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTargetsLoading(true);
+    getProjectExportTargets(project)
+      .then((nextTargets) => {
+        if (!cancelled) setTargets(nextTargets);
+      })
+      .catch(() => {
+        if (!cancelled) setTargets({ branches: [], pages: [], kanbanPages: [] });
+      })
+      .finally(() => {
+        if (!cancelled) setTargetsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id]);
+
+  const { branches, pages, kanbanPages } = targets;
   const targetOptions =
     scope === 'branch' ? branches :
     scope === 'page' ? pages :
     scope === 'kanban' ? kanbanPages :
     [];
   const needsTarget = scope !== 'project';
-  const canExport = !needsTarget || Boolean(targetId);
+  const canExport = !targetsLoading && (!needsTarget || Boolean(targetId));
 
   return (
     <div className="fixed inset-0 z-[120] bg-black/50 flex items-end" onClick={onClose}>
@@ -2145,6 +4268,8 @@ function ExportPanel({
               { value: 'json', label: 'JSON', hint: 'полные данные' },
               { value: 'pdf', label: 'PDF', hint: 'печать/отчёт' },
               { value: 'html', label: 'HTML', hint: 'страница архива' },
+              { value: 'excel', label: 'Excel', hint: 'таблицы в CSV' },
+              { value: 'backup', label: 'Backup', hint: 'резервная копия' },
             ] as const).map((item) => (
               <button
                 key={item.value}
@@ -2193,6 +4318,7 @@ function ExportPanel({
               <select
                 value={targetId}
                 onChange={(event) => onTargetChange(event.target.value)}
+                disabled={targetsLoading}
                 className="w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
               >
                 <option value="">Выбрать</option>
@@ -2206,13 +4332,31 @@ function ExportPanel({
           )}
         </section>
 
-        <button
-          onClick={onExport}
-          disabled={!canExport || exporting}
-          className="w-full rounded-[14px] bg-[var(--tg-theme-button-color)] px-4 py-3 text-sm font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-50"
-        >
-          {exporting ? 'Готовлю...' : `Скачать ${exportLabel(format)}`}
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => onExport('download')}
+            disabled={!canExport || exporting}
+            className="rounded-[14px] bg-[var(--tg-theme-button-color)] px-4 py-3 text-sm font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-50"
+          >
+            {exporting ? 'Готовлю...' : 'Скачать здесь'}
+          </button>
+          <button
+            onClick={() => onExport('telegram')}
+            disabled={!canExport || exporting}
+            className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-3 text-sm font-semibold text-[var(--tg-theme-link-color)] disabled:opacity-50"
+          >
+            Через Telegram-бота
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-[var(--tg-theme-hint-color)]">
+          Формат: {exportLabel(format)}. PDF откроется как печатная версия.
+        </p>
+
+        {message && (
+          <div className="mt-3 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-text-color)]">
+            {message}
+          </div>
+        )}
 
         {result && (
           <section className="mt-4 rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
@@ -2231,7 +4375,7 @@ function ExportPanel({
             </div>
             <textarea
               readOnly
-              value={result.content}
+              value={result.content.length > 6000 ? `${result.content.slice(0, 6000)}\n\n...` : result.content}
               className="h-36 w-full resize-none rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-xs text-[var(--tg-theme-text-color)] outline-none"
             />
           </section>
@@ -2239,6 +4383,79 @@ function ExportPanel({
       </div>
     </div>
   );
+}
+
+function buildResponsibilityAreaSummaries({
+  areas,
+  members,
+  tasks,
+  activeTasks,
+  completedTasks,
+  now,
+}: {
+  areas: ResponsibilityArea[];
+  members: ProjectMember[];
+  tasks: Task[];
+  activeTasks: Task[];
+  completedTasks: Task[];
+  now: number;
+}): ResponsibilityAreaSummary[] {
+  return areas.map((area) => {
+    const owners = members.filter((member) =>
+      (area.ownerUserIds ?? []).some((userId) => String(userId) === String(member.userId)),
+    );
+    const areaActiveTasks = activeTasks
+      .filter((task) => isTaskInResponsibilityArea(task, area))
+      .sort((a, b) => {
+        const left = a.deadlineAt ? new Date(a.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+        const right = b.deadlineAt ? new Date(b.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+        return left - right;
+      });
+    const areaCompletedTasks = completedTasks.filter((task) => isTaskInResponsibilityArea(task, area));
+    const overdueTasks = areaActiveTasks.filter((task) => task.deadlineAt && new Date(task.deadlineAt).getTime() < now);
+    const dueSoonTasks = areaActiveTasks.filter((task) => {
+      if (!task.deadlineAt) return false;
+      const diffHours = (new Date(task.deadlineAt).getTime() - now) / 3600000;
+      return diffHours >= 0 && diffHours <= 48;
+    });
+    const loadLimit = Math.max(4, owners.length * 4);
+    const tone: ResponsibilityAreaSummary['tone'] =
+      overdueTasks.length > 0 || owners.length === 0
+        ? 'danger'
+        : dueSoonTasks.length > 0 || areaActiveTasks.length > loadLimit
+          ? 'warning'
+          : 'good';
+    const status =
+      owners.length === 0
+        ? 'нет владельца'
+        : overdueTasks.length > 0
+          ? 'риск'
+          : dueSoonTasks.length > 0
+            ? 'дедлайн'
+            : areaActiveTasks.length > loadLimit
+              ? 'перегруз'
+              : 'норма';
+
+    return {
+      area,
+      owners,
+      activeTasks: areaActiveTasks,
+      completedTasks: areaCompletedTasks,
+      overdueTasks,
+      dueSoonTasks,
+      tone,
+      status,
+    };
+  }).sort((left, right) => {
+    const toneWeight = { danger: 0, warning: 1, good: 2 };
+    return toneWeight[left.tone] - toneWeight[right.tone] || right.activeTasks.length - left.activeTasks.length;
+  });
+}
+
+function isTaskInResponsibilityArea(task: Task, area: ResponsibilityArea) {
+  const linkedTaskIds = area.linkedTaskIds ?? [];
+  if (linkedTaskIds.some((taskId) => String(taskId) === String(task.id))) return true;
+  return (area.ownerUserIds ?? []).some((userId) => isTaskAssignedToMember(task, userId));
 }
 
 function groupActivityByUser(events: ActivityEvent[], members: ProjectMember[]) {
@@ -2270,9 +4487,97 @@ function memberName(member: ProjectMember) {
   return member.user?.firstName ?? member.user?.username ?? `ID ${member.userId}`;
 }
 
+function userDisplayName(user: Pick<User, 'firstName' | 'lastName' | 'username' | 'telegramId'>) {
+  return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || user.telegramId || 'Пользователь';
+}
+
+async function prepareAvatarDataUrl(file: File) {
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    throw new Error('Поддерживаются только JPG, PNG и WebP.');
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    throw new Error('Выберите изображение до 8 МБ.');
+  }
+
+  const sourceUrl = URL.createObjectURL(file);
+  try {
+    const image = await loadImage(sourceUrl);
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Не удалось обработать изображение.');
+
+    context.fillStyle = '#111827';
+    context.fillRect(0, 0, size, size);
+    const scale = Math.max(size / image.width, size / image.height);
+    const width = image.width * scale;
+    const height = image.height * scale;
+    context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height);
+    return canvas.toDataURL('image/jpeg', 0.86);
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Не удалось прочитать изображение.'));
+    image.src = src;
+  });
+}
+
+function humanAvatarError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : '';
+  if (/404|not found/i.test(message)) return 'Маршрут загрузки фото не найден. Обновите страницу или перезапустите локальный backend.';
+  if (/413|too large/i.test(message)) return 'Фото слишком большое. Выберите изображение поменьше.';
+  if (/unsupported/i.test(message)) return 'Поддерживаются только JPG, PNG и WebP.';
+  return message || fallback;
+}
+
+function projectRoleLabel(role: ProjectRoleName | string | undefined) {
+  if (role === 'owner') return 'Владелец';
+  if (role === 'admin') return 'Админ';
+  if (role === 'viewer') return 'Наблюдатель';
+  return 'Редактор';
+}
+
+function isProjectMemberOwner(project: Project | null | undefined, member: ProjectMember) {
+  return String(project?.ownerId ?? '') === String(member.userId);
+}
+
+function isAdminMember(member: ProjectMember) {
+  return member.role?.name === 'admin';
+}
+
 function isTaskAssignedToMember(task: Task, userId: number | string) {
   const assigneeId = task.assigneeId ?? task.assignee?.id;
   return assigneeId !== undefined && assigneeId !== null && String(assigneeId) === String(userId);
+}
+
+function isTaskDeferredForAdmin(task: Task, now: number) {
+  return Boolean(task.scheduledAt && new Date(task.scheduledAt).getTime() > now);
+}
+
+function isTaskCompletedForAdmin(task: Task, columns: Column[]) {
+  if (task.isArchived) return true;
+  const boardColumns = columns
+    .filter((column) =>
+      String(column.projectId) === String(task.projectId) &&
+      String(column.pageId ?? '') === String(task.pageId ?? '') &&
+      !column.isHidden &&
+      !column.isArchive,
+    )
+    .sort((a, b) => a.position - b.position);
+  const lastColumn = boardColumns[boardColumns.length - 1];
+  return Boolean(lastColumn && String(task.columnId) === String(lastColumn.id));
+}
+
+function isTaskActiveForAdmin(task: Task, columns: Column[], now: number) {
+  return !isTaskCompletedForAdmin(task, columns) && !isTaskDeferredForAdmin(task, now);
 }
 
 function daysLeft(deletedAt?: string) {

@@ -1,7 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { tasksApi, type ArchiveCleanupMode } from '../api/tasks';
+import { botSettingsApi } from '../api/botSettings';
 import type { Task } from '../types';
+import { useAuthStore } from '../store/authStore';
+import { useProjectStore } from '../store/projectStore';
+import { getProjectPermissions } from '../utils/projectPermissions';
 
 const CLEANUP_OPTIONS: Array<{ value: ArchiveCleanupMode; label: string }> = [
   { value: 'never', label: 'Не удалять' },
@@ -14,8 +18,15 @@ export default function ArchivePage() {
   const navigate = useNavigate();
   const { projectId } = useParams<{ projectId: string }>();
   const pid = Number(projectId);
+  const currentUserId = useAuthStore((state) => state.user?.id);
+  const currentProject = useProjectStore((state) => state.currentProject);
+  const permissions = useMemo(
+    () => getProjectPermissions(currentProject, currentUserId),
+    [currentProject, currentUserId],
+  );
+  const canManageArchive = Boolean(permissions.deleteTask || permissions.manageProject);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [cleanupMode, setCleanupMode] = useState<ArchiveCleanupMode>(() => tasksApi.getArchiveCleanupMode());
+  const [cleanupMode, setCleanupMode] = useState<ArchiveCleanupMode>('never');
   const [confirmClear, setConfirmClear] = useState(false);
 
   const loadArchive = async () => {
@@ -27,12 +38,29 @@ export default function ArchivePage() {
     loadArchive();
   }, [pid, cleanupMode]);
 
-  const updateCleanupMode = (mode: ArchiveCleanupMode) => {
-    tasksApi.setArchiveCleanupMode(mode);
+  useEffect(() => {
+    if (!pid) return;
+    let cancelled = false;
+    botSettingsApi
+      .getArchiveCleanupMode(pid)
+      .then((mode) => {
+        if (!cancelled) setCleanupMode(mode);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [pid]);
+
+  const updateCleanupMode = async (mode: ArchiveCleanupMode) => {
+    if (!canManageArchive) return;
     setCleanupMode(mode);
+    const savedMode = await botSettingsApi.setArchiveCleanupMode(pid, mode);
+    setCleanupMode(savedMode);
   };
 
   const clearArchive = async () => {
+    if (!canManageArchive) return;
     await tasksApi.clearArchive(pid);
     setConfirmClear(false);
     await loadArchive();
@@ -55,6 +83,8 @@ export default function ArchivePage() {
       </div>
 
       <div className="space-y-4 overflow-y-auto px-4 py-4">
+        {canManageArchive ? (
+          <>
         <section className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
           <label className="mb-2 block text-sm font-semibold text-[var(--tg-theme-text-color)]">
             Автоочистка архива
@@ -82,6 +112,13 @@ export default function ArchivePage() {
         >
           Очистить архив
         </button>
+
+          </>
+        ) : (
+          <section className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-4 text-sm text-[var(--tg-theme-hint-color)]">
+            Архив доступен для просмотра. Очистка и автоочистка доступны владельцу или администратору.
+          </section>
+        )}
 
         {tasks.length === 0 ? (
           <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-10 text-center text-sm text-[var(--tg-theme-hint-color)]">

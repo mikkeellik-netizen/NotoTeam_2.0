@@ -1,10 +1,9 @@
 import { activityApi } from '../api/activity';
-import { readDb } from '../api/mockDb';
-import { tasksApi } from '../api/tasks';
-import { usePageStore } from '../store/pageStore';
+import { apiRequest, getEffectiveAuthHeader, normalizeArray, workspaceApiUrl } from '../api/httpClient';
+import { workspaceApi } from '../api/workspace';
 import type { ActivityEvent, Block, PageNode, Project, ProjectMember, Subtask, Task, Column } from '../types';
 
-export type ExportFormat = 'markdown' | 'json' | 'pdf' | 'html';
+export type ExportFormat = 'markdown' | 'json' | 'pdf' | 'html' | 'excel' | 'backup';
 export type ExportScope = 'project' | 'branch' | 'page' | 'kanban';
 
 export type ExportResult = {
@@ -12,6 +11,15 @@ export type ExportResult = {
   content: string;
   mimeType: string;
 };
+
+interface ExportDataSource {
+  pages: PageNode[];
+  blocks: Block[];
+  columns: Column[];
+  tasks: Task[];
+  subtasks: Subtask[];
+  activity: ActivityEvent[];
+}
 
 export interface ProjectExportPayload {
   schemaVersion: number;
@@ -30,57 +38,54 @@ export interface ProjectExportPayload {
   };
 }
 
-export function getProjectExportTargets(project: Project) {
-  usePageStore.getState().loadProjectSpace(String(project.id), project.title);
-  const pageState = usePageStore.getState();
-  const nodes = pageState.nodes.filter((node) => node.projectId === String(project.id) && !node.isDeleted);
+export async function getProjectExportTargets(project: Project) {
+  const { nodes } = await workspaceApi.getNodes(project.id);
+  const projectNodes = nodes.filter((node) => node.projectId === String(project.id) && !node.isDeleted);
 
   return {
-    branches: nodes.filter((node) => node.type === 'folder'),
-    pages: nodes.filter((node) => node.type === 'page'),
-    kanbanPages: nodes.filter((node) => node.type === 'kanban'),
+    branches: projectNodes.filter((node) => node.type === 'folder'),
+    pages: projectNodes.filter((node) => node.type === 'page'),
+    kanbanPages: projectNodes.filter((node) => node.type === 'kanban'),
   };
 }
 
-export function createProjectExport(
+export async function createProjectExport(
   project: Project,
   options: { format: ExportFormat; scope?: ExportScope; targetId?: string },
-): ExportResult {
-  const payload = buildProjectExportPayload(project, {
-    scope: options.scope,
-    targetId: options.targetId,
+): Promise<ExportResult> {
+  const params = new URLSearchParams({
+    format: options.format,
+    scope: options.scope ?? 'project',
   });
-  const baseName = `${safeFileName(project.title)}-export`;
+  if (options.targetId) params.set('targetId', options.targetId);
 
-  if (options.format === 'json') {
-    return {
-      fileName: `${baseName}.json`,
-      content: JSON.stringify(payload, null, 2),
-      mimeType: 'application/json;charset=utf-8',
-    };
-  }
+  const headers: Record<string, string> = {};
+  const authHeader = getEffectiveAuthHeader();
+  if (authHeader) headers.Authorization = authHeader;
 
-  if (options.format === 'html') {
-    return {
-      fileName: `${baseName}.html`,
-      content: renderProjectHtml(payload),
-      mimeType: 'text/html;charset=utf-8',
-    };
-  }
-
-  if (options.format === 'pdf') {
-    return {
-      fileName: `${baseName}.html`,
-      content: renderProjectHtml(payload, true),
-      mimeType: 'text/html;charset=utf-8',
-    };
-  }
+  const response = await fetch(`${workspaceApiUrl}/projects/${project.id}/export?${params.toString()}`, { headers });
+  const content = await response.text();
+  if (!response.ok) throw new Error(content || `Workspace API ${response.status}`);
 
   return {
-    fileName: `${baseName}.md`,
-    content: renderProjectMarkdown(payload),
-    mimeType: 'text/markdown;charset=utf-8',
+    fileName: fileNameFromContentDisposition(response.headers.get('Content-Disposition')) ?? defaultExportFileName(project, options.format),
+    content,
+    mimeType: response.headers.get('Content-Type') ?? 'application/octet-stream',
   };
+}
+
+export async function sendProjectExportToTelegram(
+  project: Project,
+  options: { format: ExportFormat; scope?: ExportScope; targetId?: string },
+): Promise<{ ok: boolean; fileName: string; message: string }> {
+  return apiRequest(`/projects/${project.id}/export/telegram`, {
+    method: 'POST',
+    body: {
+      format: options.format,
+      scope: options.scope ?? 'project',
+      targetId: options.targetId,
+    },
+  });
 }
 
 export function downloadExportResult(result: ExportResult) {
@@ -105,19 +110,38 @@ export function exportLabel(format: ExportFormat) {
   if (format === 'json') return 'JSON';
   if (format === 'pdf') return 'PDF';
   if (format === 'html') return 'HTML';
+  if (format === 'excel') return 'Excel';
+  if (format === 'backup') return 'Backup';
   return 'Markdown';
 }
 
-function buildProjectExportPayload(project: Project, options?: { scope?: ExportScope; targetId?: string }): ProjectExportPayload {
-  usePageStore.getState().loadProjectSpace(String(project.id), project.title);
-  const pageState = usePageStore.getState();
-  const db = readDb();
-  const allPages = pageState.nodes.filter((node) => node.projectId === String(project.id));
+function fileNameFromContentDisposition(value: string | null) {
+  if (!value) return undefined;
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(value)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  }
+  return /filename="([^"]+)"/i.exec(value)?.[1];
+}
+
+function defaultExportFileName(project: Project, format: ExportFormat) {
+  const extension = format === 'excel' ? 'csv' : format === 'pdf' ? 'html' : format === 'backup' ? 'json' : format;
+  return `${safeFileName(project.title)}-export.${extension}`;
+}
+
+async function buildProjectExportPayload(project: Project, options?: { scope?: ExportScope; targetId?: string }): Promise<ProjectExportPayload> {
+  const { nodes } = await workspaceApi.getNodes(project.id);
+  const allPages = nodes.filter((node) => node.projectId === String(project.id) && !node.isDeleted);
   const scopedPageIds = getScopedPageIds(allPages, options);
   const pages = scopedPageIds ? allPages.filter((node) => scopedPageIds.has(node.id)) : allPages;
+  const source = await loadExportData(project, pages, scopedPageIds);
   const pageIds = new Set(pages.map((node) => node.id));
-  const tasks = db.tasks.filter((task) => {
-    if (task.projectId !== project.id) return false;
+  const tasks = source.tasks.filter((task) => {
+    if (String(task.projectId) !== String(project.id)) return false;
     if (!scopedPageIds) return true;
     return task.pageId ? scopedPageIds.has(task.pageId) : options?.scope === 'project';
   });
@@ -129,20 +153,74 @@ function buildProjectExportPayload(project: Project, options?: { scope?: ExportS
     project,
     members: project.members ?? [],
     pages,
-    blocks: pageState.blocks.filter((block) => pageIds.has(block.pageId)),
-    columns: db.columns.filter((column) => {
-      if (column.projectId !== project.id) return false;
+    blocks: source.blocks.filter((block) => pageIds.has(block.pageId)),
+    columns: source.columns.filter((column) => {
+      if (String(column.projectId) !== String(project.id)) return false;
       if (!scopedPageIds) return true;
       return column.pageId ? scopedPageIds.has(column.pageId) : options?.scope === 'project';
     }),
     tasks,
-    subtasks: db.subtasks.filter((subtask) => taskIds.has(subtask.taskId)),
-    activity: activityApi.list(project.id),
+    subtasks: source.subtasks.filter((subtask) => taskIds.has(subtask.taskId)),
+    activity: source.activity,
     settings: {
-      archiveCleanupMode: tasksApi.getArchiveCleanupMode(),
+      archiveCleanupMode: project.botSettings?.archiveCleanupMode ?? 'never',
       activityRetentionDays: activityApi.getRetentionDays(project.id),
     },
   };
+}
+
+async function loadExportData(
+  project: Project,
+  pages: PageNode[],
+  scopedPageIds: Set<string> | null,
+): Promise<ExportDataSource> {
+  const blocksPromise = scopedPageIds
+    ? loadBlocksForPages(project.id, pages.map((page) => page.id))
+    : apiRequest<Block[]>(`/projects/${project.id}/blocks`);
+  const [blocks, columns, tasks, activity] = await Promise.all([
+    blocksPromise,
+    apiRequest<Column[]>(`/projects/${project.id}/columns?allBoards=1`),
+    apiRequest<Task[]>(`/projects/${project.id}/tasks?allBoards=1&includeArchived=1`),
+    activityApi.load(project.id),
+  ]);
+  const normalizedTasks = normalizeArray(tasks);
+  return {
+    pages,
+    blocks: blocks ?? [],
+    columns: normalizeArray(columns),
+    tasks: normalizedTasks,
+    subtasks: normalizedTasks.flatMap((task) => task.subtasks ?? []),
+    activity,
+  };
+}
+
+async function loadBlocksForPages(projectId: string | number, pageIds: string[]) {
+  const results: Block[] = [];
+  const queue = [...pageIds];
+  const workers = Array.from({ length: Math.min(6, Math.max(1, queue.length)) }, async () => {
+    while (queue.length) {
+      const pageId = queue.shift();
+      if (!pageId) continue;
+      results.push(...await loadAllPageBlocks(projectId, pageId));
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function loadAllPageBlocks(projectId: string | number, pageId: string) {
+  const blocks: Block[] = [];
+  const limit = 500;
+  let offset = 0;
+
+  while (true) {
+    const response = await workspaceApi.getPageBlocks(projectId, pageId, { offset, limit });
+    blocks.push(...response.blocks);
+    offset += response.blocks.length;
+    if (offset >= response.total || response.blocks.length === 0) break;
+  }
+
+  return blocks;
 }
 
 function getScopedPageIds(

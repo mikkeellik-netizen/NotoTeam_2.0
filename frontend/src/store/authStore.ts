@@ -21,6 +21,7 @@ interface AuthState {
   requestCode: (username: string) => Promise<{ ok: boolean; message: string }>;
   verifyCode: (username: string, code: string) => Promise<void>;
   logout: () => Promise<void>;
+  setUser: (user: User) => void;
 }
 
 function getTelegramInitData(): string | undefined {
@@ -117,5 +118,9 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
     setSessionToken(undefined);
     set({ user: null, isAuthed: false, isLoading: false, needsWebLogin: true });
+  },
+
+  setUser: (user: User) => {
+    set({ user, isAuthed: true, isLoading: false });
   },
 }));

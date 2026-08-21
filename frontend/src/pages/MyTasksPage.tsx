@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { tasksApi } from '../api/tasks';
 import { useTaskStore } from '../store/taskStore';
+import { useAuthStore } from '../store/authStore';
 import TaskModal from '../components/task/TaskModal';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
@@ -19,12 +20,19 @@ interface MyTasksData {
 export default function MyTasksPage() {
   const navigate = useNavigate();
   const { openTask, closeTask, selectedTask } = useTaskStore();
+  const currentUser = useAuthStore((state) => state.user);
   const [data, setData] = useState<MyTasksData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    tasksApi.getMyTasks().then(setData).finally(() => setLoading(false));
-  }, []);
+    if (!currentUser?.id) {
+      setData({ red: [], yellow: [], green: [], noDate: [], stats: { completed: 0, total: 0 } });
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    tasksApi.getMyTasks(currentUser.id).then(setData).finally(() => setLoading(false));
+  }, [currentUser?.id]);
 
   const allTasks = data
     ? [...data.red, ...data.yellow, ...data.green, ...data.noDate]

@@ -15,6 +15,7 @@ interface ProjectState {
   updateProject: (id: number, data: Partial<Project>) => Promise<void>;
   removeProject: (id: number) => Promise<void>;
   restoreProject: (id: number) => Promise<void>;
+  leaveProject: (id: number) => Promise<Project[]>;
   fetchColumns: (projectId: number, pageId?: string) => Promise<void>;
   createColumn: (projectId: number, title: string, pageId?: string) => Promise<void>;
   updateColumn: (id: number, data: { title?: string }) => Promise<void>;
@@ -32,6 +33,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ isLoading: true });
     try {
       const userId = useAuthStore.getState().user?.id;
+      if (!userId) {
+        set({ projects: [] });
+        return;
+      }
       const projects = await projectsApi.getAll(userId);
       set({ projects });
     } finally {
@@ -59,19 +64,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   updateProject: async (id, data) => {
     const updated = await projectsApi.update(id, data);
     set((s) => ({
-      projects: s.projects.map((p) => (p.id === id ? updated : p)),
-      currentProject: s.currentProject?.id === id ? updated : s.currentProject,
+      projects: s.projects.map((p) => (String(p.id) === String(id) ? updated : p)),
+      currentProject: String(s.currentProject?.id ?? '') === String(id) ? updated : s.currentProject,
     }));
   },
 
   removeProject: async (id) => {
     await projectsApi.remove(id);
-    set((s) => ({ projects: s.projects.filter((p) => p.id !== id) }));
+    set((s) => ({ projects: s.projects.filter((p) => String(p.id) !== String(id)) }));
   },
 
   restoreProject: async (id) => {
     const project = await projectsApi.restore(id);
-    set((s) => ({ projects: [...s.projects.filter((p) => p.id !== id), project] }));
+    set((s) => ({ projects: [...s.projects.filter((p) => String(p.id) !== String(id)), project] }));
+  },
+
+  leaveProject: async (id) => {
+    const userId = useAuthStore.getState().user?.id;
+    if (!userId) throw new Error('User is not authorized');
+    await projectsApi.leaveProject(id, userId);
+    const projects = await projectsApi.getAll(userId);
+    set((s) => ({
+      projects,
+      currentProject: String(s.currentProject?.id ?? '') === String(id) ? null : s.currentProject,
+    }));
+    return projects;
   },
 
   fetchColumns: async (projectId, pageId) => {

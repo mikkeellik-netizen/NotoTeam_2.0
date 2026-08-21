@@ -9,7 +9,7 @@ interface Props {
   column: Column;
   tasks: Task[];
   onTaskClick: (task: Task) => void;
-  onAddTask: (columnId: number) => void;
+  onAddTask?: (columnId: number) => void;
   onRenameColumn?: (columnId: number, title: string) => void | Promise<void>;
   onDuplicateColumn?: (columnId: number) => void | Promise<void>;
   onMoveColumn?: (columnId: number, direction: -1 | 1) => void | Promise<void>;
@@ -41,6 +41,7 @@ export default function KanbanColumn({
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const taskIds = tasks.map((t) => t.id);
+  const hasColumnActions = Boolean(onRenameColumn || onDuplicateColumn || onMoveColumn || onDeleteColumn);
 
   useEffect(() => {
     if (!isEditingTitle) setDraftTitle(column.title);
@@ -69,7 +70,7 @@ export default function KanbanColumn({
   };
 
   const startLongPress = () => {
-    if (isEditingTitle) return;
+    if (isEditingTitle || !hasColumnActions) return;
     clearLongPress();
     longPressTimerRef.current = window.setTimeout(() => {
       didLongPressRef.current = true;
@@ -85,11 +86,15 @@ export default function KanbanColumn({
   };
 
   return (
-    <div className="flex w-[260px] shrink-0 snap-start flex-col self-start">
+    <div
+      data-kanban-column-id={column.id}
+      className="flex w-[260px] shrink-0 snap-start flex-col self-start"
+    >
       {/* Заголовок колонки */}
       <div
         className="flex items-center justify-between px-1 mb-2"
         onContextMenu={(event) => {
+          if (!hasColumnActions) return;
           event.preventDefault();
           setShowColumnMenu(true);
         }}
@@ -144,14 +149,15 @@ export default function KanbanColumn({
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              setShowColumnMenu(true);
+              if (hasColumnActions) setShowColumnMenu(true);
             }}
-            className="flex h-6 w-6 items-center justify-center rounded-full text-lg leading-none text-[var(--tg-theme-hint-color)] transition-colors hover:bg-[var(--tg-theme-secondary-bg-color)] hover:text-[var(--tg-theme-button-color)]"
+            className={`${hasColumnActions ? 'flex' : 'hidden'} h-6 w-6 items-center justify-center rounded-full text-lg leading-none text-[var(--tg-theme-hint-color)] transition-colors hover:bg-[var(--tg-theme-secondary-bg-color)] hover:text-[var(--tg-theme-button-color)]`}
             title="Действия со столбцом"
             aria-label="Действия со столбцом"
           >
             ⋯
           </button>
+        {onAddTask && (
         <button
           onClick={() => onAddTask(column.id)}
           className="w-6 h-6 flex items-center justify-center text-[var(--tg-theme-hint-color)] hover:text-[var(--tg-theme-button-color)] transition-colors"
@@ -160,13 +166,13 @@ export default function KanbanColumn({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
         </button>
+        )}
         </div>
       </div>
 
       {/* Зона дропа */}
       <div
         ref={setNodeRef}
-        data-kanban-column-id={column.id}
         className={`rounded-[12px] p-2 min-h-[240px] transition-colors ${
           isOver
             ? 'bg-[var(--tg-theme-button-color)]/10 ring-2 ring-[var(--tg-theme-button-color)]/30'
@@ -192,7 +198,7 @@ export default function KanbanColumn({
         )}
       </div>
 
-      {showColumnMenu && (
+      {showColumnMenu && hasColumnActions && (
         <div
           className="fixed inset-0 z-[80] flex items-end bg-black/50"
           onClick={() => {

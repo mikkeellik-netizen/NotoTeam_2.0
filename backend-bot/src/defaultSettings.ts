@@ -2,6 +2,7 @@ import type { ProjectBotSettings } from "./types.js";
 
 export const defaultBotSettings: ProjectBotSettings = {
   timezone: "Europe/Moscow",
+  archiveCleanupMode: "never",
   taskDeadlineNotificationsEnabled: true,
   mentionNotificationsEnabled: true,
   dutyNotificationsEnabled: true,
@@ -53,3 +54,31 @@ export const defaultBotSettings: ProjectBotSettings = {
     },
   },
 };
+
+export function mergeBotSettings(settings?: Partial<ProjectBotSettings> | null): ProjectBotSettings {
+  return {
+    ...defaultBotSettings,
+    ...(settings ?? {}),
+    kanbanReminderPoints: Array.isArray(settings?.kanbanReminderPoints)
+      ? settings.kanbanReminderPoints
+      : defaultBotSettings.kanbanReminderPoints,
+    reports: {
+      weekly: {
+        ...defaultBotSettings.reports.weekly,
+        ...(settings?.reports?.weekly ?? {}),
+        sections: {
+          ...defaultBotSettings.reports.weekly.sections,
+          ...(settings?.reports?.weekly?.sections ?? {}),
+        },
+      },
+      overdue: {
+        ...defaultBotSettings.reports.overdue,
+        ...(settings?.reports?.overdue ?? {}),
+        sections: {
+          ...defaultBotSettings.reports.overdue.sections,
+          ...(settings?.reports?.overdue?.sections ?? {}),
+        },
+      },
+    },
+  };
+}

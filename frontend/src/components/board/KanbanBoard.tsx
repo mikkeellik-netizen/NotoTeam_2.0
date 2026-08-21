@@ -27,6 +27,9 @@ interface Props {
   onDuplicateColumn?: (columnId: number) => void | Promise<void>;
   onMoveColumn?: (columnId: number, direction: -1 | 1) => void | Promise<void>;
   onDeleteColumn?: (columnId: number) => void | Promise<void>;
+  canCreateTask?: boolean;
+  canMoveTask?: boolean;
+  canManageColumns?: boolean;
 }
 
 export default function KanbanBoard({
@@ -39,6 +42,9 @@ export default function KanbanBoard({
   onDuplicateColumn,
   onMoveColumn,
   onDeleteColumn,
+  canCreateTask = true,
+  canMoveTask = true,
+  canManageColumns = true,
 }: Props) {
   const { moveTask, reorderTasks } = useTaskStore();
   const [activeDragTask, setActiveDragTask] = useState<Task | null>(null);
@@ -126,14 +132,18 @@ export default function KanbanBoard({
   const getTasksByColumn = useCallback(
     (columnId: number) =>
       localTasks
-        .filter((t) => t.columnId === columnId)
-        .sort((a, b) => a.position - b.position),
+        .filter((t) => sameId(t.columnId, columnId))
+        .sort((a, b) => Number(a.position) - Number(b.position)),
     [localTasks],
   );
+  const visibleColumns = [...columns]
+    .filter((c) => !c.isHidden && !c.isArchive)
+    .sort((a, b) => Number(a.position) - Number(b.position));
 
   // в”Ђв”Ђв”Ђ РќР°С‡Р°Р»Рѕ РїРµСЂРµС‚Р°СЃРєРёРІР°РЅРёСЏ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
   const onDragStart = ({ active, activatorEvent }: DragStartEvent) => {
-    const task = localTasks.find((t) => t.id === active.id);
+    if (!canMoveTask) return;
+    const task = localTasks.find((t) => sameId(t.id, active.id));
     if (activatorEvent instanceof MouseEvent) {
       dragPointerXRef.current = activatorEvent.clientX;
       dragPointerYRef.current = activatorEvent.clientY;
@@ -150,6 +160,7 @@ export default function KanbanBoard({
   };
 
   const onDragMove = ({ delta }: DragMoveEvent) => {
+    if (!canMoveTask) return;
     if (dragStartPointerXRef.current === null) return;
     dragPointerXRef.current = dragStartPointerXRef.current + delta.x;
     if (dragStartPointerYRef.current !== null) {
@@ -163,89 +174,110 @@ export default function KanbanBoard({
     const pointerY = dragPointerYRef.current;
     if (!container || pointerX === null) return undefined;
 
-    const columnNodes = Array.from(container.querySelectorAll<HTMLElement>('[data-kanban-column-id]'));
-    const hit = columnNodes.find((node) => {
-      const rect = node.getBoundingClientRect();
+    const visibleColumnIds = new Set(visibleColumns.map((column) => String(column.id)));
+    const columnRects = Array.from(container.querySelectorAll<HTMLElement>('[data-kanban-column-id]'))
+      .map((node) => ({
+        id: Number(node.dataset.kanbanColumnId),
+        rect: node.getBoundingClientRect(),
+      }))
+      .filter((item) => Number.isFinite(item.id) && visibleColumnIds.has(String(item.id)));
+
+    const hit = columnRects.find(({ rect }) => {
       const isInsideX = pointerX >= rect.left && pointerX <= rect.right;
-      const isInsideY = pointerY === null || (pointerY >= rect.top - 24 && pointerY <= rect.bottom + 24);
+      const isInsideY = pointerY === null || (pointerY >= rect.top - 96 && pointerY <= rect.bottom + 96);
       return isInsideX && isInsideY;
     });
-    if (hit?.dataset.kanbanColumnId) return Number(hit.dataset.kanbanColumnId);
+    if (hit) return hit.id;
 
-    const nearest = columnNodes
-      .map((node) => {
-        const rect = node.getBoundingClientRect();
-        const centerX = rect.left + rect.width / 2;
-        return { id: Number(node.dataset.kanbanColumnId), distance: Math.abs(pointerX - centerX) };
-      })
-      .filter((item) => Number.isFinite(item.id))
+    if (columnRects.length === 0) return undefined;
+    const leftEdge = Math.min(...columnRects.map((item) => item.rect.left));
+    const rightEdge = Math.max(...columnRects.map((item) => item.rect.right));
+    const isBetweenColumns = pointerX >= leftEdge && pointerX <= rightEdge;
+    const isNearColumnVertically = pointerY === null || columnRects.some(
+      ({ rect }) => pointerY >= rect.top - 96 && pointerY <= rect.bottom + 96,
+    );
+    if (!isBetweenColumns || !isNearColumnVertically) return undefined;
+
+    const nearest = columnRects
+      .map(({ id, rect }) => ({ id, distance: Math.abs(pointerX - (rect.left + rect.width / 2)) }))
       .sort((a, b) => a.distance - b.distance)[0];
     return nearest?.id;
   };
 
+  const getTaskInsertPosition = (columnId: number, activeTaskId: number) => {
+    const columnTasks = getTasksByColumn(columnId).filter((task) => !sameId(task.id, activeTaskId));
+    const pointerY = dragPointerYRef.current;
+    if (pointerY === null) return columnTasks.length;
+
+    for (let index = 0; index < columnTasks.length; index += 1) {
+      const task = columnTasks[index];
+      const node = scrollContainerRef.current?.querySelector<HTMLElement>(
+        `[data-kanban-task-id="${task.id}"]`,
+      );
+      if (!node) continue;
+      const rect = node.getBoundingClientRect();
+      if (pointerY < rect.top + rect.height / 2) return index;
+    }
+
+    return columnTasks.length;
+  };
+
   // в”Ђв”Ђв”Ђ РџРµСЂРµС‚Р°СЃРєРёРІР°РЅРёРµ РЅР°Рґ РЅРѕРІРѕР№ РєРѕР»РѕРЅРєРѕР№ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
   const onDragEnd = async ({ active, over }: DragEndEvent) => {
+    if (!canMoveTask) return;
     const originalTask = activeDragTask;
     setActiveDragTask(null);
     setIsDragging(false);
-    if (!over) return;
 
-    const activeTask = originalTask ?? localTasks.find((t) => t.id === active.id);
+    const activeTask = originalTask ?? localTasks.find((t) => sameId(t.id, active.id));
     if (!activeTask) return;
 
-    const overId = over.id;
-    const overData = over.data.current;
-
-    let targetColumnId = activeTask.columnId;
-    let targetPosition: number | undefined;
     const pointerColumnId = getPointerColumnId();
+    const overId = over?.id;
+    const overData = over?.data.current;
+    const overTask = overData?.type === 'task' && overId !== undefined
+      ? localTasks.find((t) => sameId(t.id, overId))
+      : undefined;
+    const overColumnId = overData?.type === 'column' ? toNumberId(overData.columnId) : undefined;
+    const targetColumnId = pointerColumnId ?? toNumberId(overTask?.columnId) ?? overColumnId ?? toNumberId(activeTask.columnId);
 
-    if (overData?.type === 'task') {
-      const overTask = localTasks.find((t) => t.id === overId);
-      if (overTask) {
-        targetColumnId = pointerColumnId ?? overTask.columnId;
-        // РџРµСЂРµСѓРїРѕСЂСЏРґРѕС‡РёРІР°РЅРёРµ РІРЅСѓС‚СЂРё РєРѕР»РѕРЅРєРё
-        const colTasks = getTasksByColumn(targetColumnId);
-        const oldIdx = colTasks.findIndex((t) => t.id === active.id);
-        const newIdx = colTasks.findIndex((t) => t.id === overId);
+    if (targetColumnId === undefined || !visibleColumns.some((column) => sameId(column.id, targetColumnId))) return;
 
-        if (activeTask.columnId === overTask.columnId && targetColumnId === overTask.columnId && oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
-          const reordered = arrayMove(colTasks, oldIdx, newIdx);
-          const orderedIds = reordered.map((t) => t.id);
-
-          setLocalTasks((prev) => {
-            const others = prev.filter((t) => t.columnId !== targetColumnId);
-            return [...others, ...reordered.map((t, i) => ({ ...t, position: i }))];
-          });
-
-          await reorderTasks(targetColumnId, orderedIds);
-          return;
-        }
-      }
-    } else if (pointerColumnId !== undefined) {
-      targetColumnId = pointerColumnId;
-    } else if (overData?.type === 'column') {
-      targetColumnId = overData.columnId;
-    }
+    const targetPosition = getTaskInsertPosition(targetColumnId, activeTask.id);
 
     // РџРµСЂРµРјРµС‰РµРЅРёРµ РјРµР¶РґСѓ РєРѕР»РѕРЅРєР°РјРё
-    if (targetColumnId !== activeTask.columnId || targetPosition !== undefined) {
-      const colTasks = getTasksByColumn(targetColumnId).filter((t) => t.id !== activeTask.id);
-      targetPosition = colTasks.length;
+    if (sameId(targetColumnId, activeTask.columnId)) {
+      const colTasks = getTasksByColumn(targetColumnId);
+      const oldIdx = colTasks.findIndex((task) => sameId(task.id, activeTask.id));
+      const newIdx = Math.max(0, Math.min(targetPosition, Math.max(0, colTasks.length - 1)));
 
-      setLocalTasks((prev) =>
-        prev.map((t) =>
-          t.id === activeTask.id
-            ? { ...t, columnId: targetColumnId, position: targetPosition! }
-            : t,
-        ),
-      );
+      if (oldIdx !== -1 && oldIdx !== newIdx) {
+        const reordered = arrayMove(colTasks, oldIdx, newIdx);
+        const orderedIds = reordered.map((task) => task.id);
+        setLocalTasks((prev) => reindexColumnTasks(prev, targetColumnId, orderedIds));
+        try {
+          await reorderTasks(targetColumnId, orderedIds);
+        } catch (error) {
+          setLocalTasks(tasks);
+          console.error('Failed to reorder task', error);
+        }
+      }
+      return;
+    }
 
-      await moveTask(activeTask.id, targetColumnId, targetPosition);
+    if (!sameId(targetColumnId, activeTask.columnId)) {
+      const colTasks = getTasksByColumn(targetColumnId).filter((t) => !sameId(t.id, activeTask.id));
+      const insertPosition = Math.max(0, Math.min(targetPosition, colTasks.length));
+
+      setLocalTasks((prev) => moveTaskInList(prev, activeTask, targetColumnId, insertPosition));
+      try {
+        await moveTask(activeTask.id, targetColumnId, insertPosition);
+      } catch (error) {
+        setLocalTasks(tasks);
+        console.error('Failed to move task', error);
+      }
     }
   };
-
-  const visibleColumns = columns.filter((c) => !c.isHidden);
 
   return (
     <DndContext
@@ -271,16 +303,16 @@ export default function KanbanBoard({
             column={column}
             tasks={getTasksByColumn(column.id)}
             onTaskClick={onTaskClick}
-            onAddTask={onAddTask}
-            onRenameColumn={onRenameColumn}
-            onDuplicateColumn={onDuplicateColumn}
-            onMoveColumn={onMoveColumn}
-            onDeleteColumn={onDeleteColumn}
+            onAddTask={canCreateTask ? onAddTask : undefined}
+            onRenameColumn={canManageColumns ? onRenameColumn : undefined}
+            onDuplicateColumn={canManageColumns ? onDuplicateColumn : undefined}
+            onMoveColumn={canManageColumns ? onMoveColumn : undefined}
+            onDeleteColumn={canManageColumns ? onDeleteColumn : undefined}
             canDeleteColumn={visibleColumns.length > 1}
           />
         ))}
 
-        {onAddColumn && (
+        {onAddColumn && canManageColumns && (
           <button
             type="button"
             onClick={() => onAddColumn()}
@@ -303,5 +335,51 @@ export default function KanbanBoard({
       </DragOverlay>
     </DndContext>
   );
+}
+
+function sameId(a: unknown, b: unknown) {
+  return String(a) === String(b);
+}
+
+function toNumberId(value: unknown) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const normalized = typeof value === 'string' && value.startsWith('column:') ? value.slice('column:'.length) : value;
+  const numberValue = Number(normalized);
+  return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
+function reindexColumnTasks(tasks: Task[], columnId: number, orderedIds: number[]) {
+  const order = new Map(orderedIds.map((id, index) => [String(id), index]));
+  return tasks.map((task) => {
+    const position = order.get(String(task.id));
+    return position === undefined ? task : { ...task, columnId, position };
+  });
+}
+
+function moveTaskInList(tasks: Task[], activeTask: Task, targetColumnId: number, targetPosition: number) {
+  const sourceColumnId = activeTask.columnId;
+  const withoutActive = tasks.filter((task) => !sameId(task.id, activeTask.id));
+  const targetTasks = withoutActive
+    .filter((task) => sameId(task.columnId, targetColumnId))
+    .sort((a, b) => Number(a.position) - Number(b.position));
+  const insertPosition = Math.max(0, Math.min(targetPosition, targetTasks.length));
+  const movedTask = { ...activeTask, columnId: targetColumnId, position: insertPosition };
+  targetTasks.splice(insertPosition, 0, movedTask);
+
+  const changed = new Map<string, Task>();
+  targetTasks.forEach((task, index) => {
+    changed.set(String(task.id), { ...task, columnId: targetColumnId, position: index });
+  });
+
+  if (!sameId(sourceColumnId, targetColumnId)) {
+    withoutActive
+      .filter((task) => sameId(task.columnId, sourceColumnId))
+      .sort((a, b) => Number(a.position) - Number(b.position))
+      .forEach((task, index) => {
+        changed.set(String(task.id), { ...task, position: index });
+      });
+  }
+
+  return [...withoutActive, movedTask].map((task) => changed.get(String(task.id)) ?? task);
 }
 

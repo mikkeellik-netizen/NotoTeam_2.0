@@ -1,27 +1,30 @@
 import { useEffect, useMemo, useState } from 'react';
 import { activityApi } from '../../api/activity';
 import { templatesApi } from '../../api/templates';
-import type { PageNode, PageNodeType, Template } from '../../types';
+import type { PageNode, PageNodeType, RolePermissions, Template } from '../../types';
 import { usePageStore } from '../../store/pageStore';
 import { PAGE_TEMPLATES } from './templates';
 import TemplateBuilderModal from './TemplateBuilderModal';
 import IconPickerModal from './IconPickerModal';
 import ContextMenu from '../common/ContextMenu';
 import HierarchyDnd from './HierarchyDnd';
-import { copyPlainText } from '../../utils/clipboard';
 
 interface Props {
   projectId: string;
   selectedPageId: string | null;
   onOpenPage: (pageId: string) => void;
   onCloseDrawer?: () => void;
+  permissions?: RolePermissions;
 }
 
-export default function PageTree({ projectId, selectedPageId, onOpenPage, onCloseDrawer }: Props) {
+export default function PageTree({ projectId, selectedPageId, onOpenPage, onCloseDrawer, permissions = {} }: Props) {
   const {
     nodes,
     collapsedIds,
     recentPages,
+    loadedTreeParentIds,
+    loadingTreeParentIds,
+    ensureFolderChildrenLoaded,
     createNode,
     createPageFromTemplate,
     renameNode,
@@ -69,6 +72,10 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
     [nodes],
   );
   const allTemplates = useMemo(() => [...PAGE_TEMPLATES, ...customTemplates], [customTemplates]);
+  const canCreate = Boolean(permissions.createPage);
+  const canUpdate = Boolean(permissions.updatePage);
+  const canDelete = Boolean(permissions.deletePage);
+  const canManageTemplates = Boolean(permissions.manageTemplates);
 
   useEffect(() => {
     if (!templatesOpen) return;
@@ -76,16 +83,22 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   }, [projectId, templatesOpen]);
 
   const startRename = (node: PageNode) => {
+    if (!canUpdate) return;
     setEditingId(node.id);
     setDraftTitle(node.title);
   };
 
   const finishRename = () => {
+    if (!canUpdate) {
+      setEditingId(null);
+      return;
+    }
     if (editingId && draftTitle.trim()) renameNode(editingId, draftTitle.trim());
     setEditingId(null);
   };
 
   const addNode = (type: PageNodeType, parentId?: string | null) => {
+    if (!canCreate) return null;
     const node = createNode({ projectId, parentId: parentId ?? null, type });
     if (node.type !== 'folder') {
       onOpenPage(node.id);
@@ -95,6 +108,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   };
 
   const createFromTemplate = (templateId: string) => {
+    if (!canCreate) return;
     const template = allTemplates.find((item) => item.id === templateId);
     if (!template) return;
     const activeNode = nodes.find((node) => node.id === selectedPageId);
@@ -108,6 +122,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   };
 
   const moveTemplate = async (templateId: string, direction: -1 | 1) => {
+    if (!canManageTemplates) return;
     const from = customTemplates.findIndex((template) => template.id === templateId);
     const to = from + direction;
     if (from < 0 || to < 0 || to >= customTemplates.length) return;
@@ -124,6 +139,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   };
 
   const deleteTemplate = async (template: Template) => {
+    if (!canManageTemplates) return;
     if (!template.isCustom) return;
     await templatesApi.remove(projectId, template.id);
     setCustomTemplates((items) => items.filter((item) => item.id !== template.id));
@@ -136,49 +152,73 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   };
 
   const openNodeMenu = (node: PageNode, x: number, y: number) => {
+    if (!canUpdate && !canCreate && !canDelete) return;
     setContextNode({ node, x, y });
   };
 
   const renderQuickNode = (node: PageNode, prefix?: string) => (
-    <button
+    <div
       key={node.id}
-      onClick={() => openNode(node)}
-      className="w-full flex items-center gap-2 rounded-[8px] px-2 py-1.5 text-left active:bg-[var(--tg-theme-secondary-bg-color)]"
+      className="w-full flex items-center gap-1 rounded-[8px] px-1.5 py-1 active:bg-[var(--tg-theme-secondary-bg-color)]"
     >
-      <span className="shrink-0">{prefix ?? node.icon}</span>
-      <span className="min-w-0 flex-1 truncate text-sm text-[var(--tg-theme-text-color)]">
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          if (canUpdate) setIconTarget(node);
+        }}
+        disabled={!canUpdate}
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-base active:scale-[0.95] disabled:opacity-80"
+        aria-label="Сменить иконку"
+        title="Сменить иконку"
+      >
+        {prefix ?? node.icon}
+      </button>
+      <button
+        type="button"
+        onClick={() => openNode(node)}
+        className="min-w-0 flex-1 truncate py-1 text-left text-sm text-[var(--tg-theme-text-color)]"
+      >
         {node.title}
-      </span>
-    </button>
+      </button>
+    </div>
   );
 
-  const renderLevel = (siblings: PageNode[], parentId: string | null, depth: number) => (
-    <HierarchyDnd
-      items={siblings}
-      parentId={parentId}
-      allNodes={nodes}
-      onReorder={(id, index) => moveNode(id, parentId, index)}
-      onNest={(id, targetId) => {
-        const count = nodes.filter((n) => !n.isDeleted && n.parentId === targetId).length;
-        moveNode(id, targetId, count);
-      }}
-      onOutdent={(id) => {
-        if (parentId === null) return; // уже в корне — вытаскивать некуда
-        const parentNode = nodes.find((n) => n.id === parentId);
-        const grandParentId = parentNode?.parentId ?? null;
-        const count = nodes.filter((n) => !n.isDeleted && n.parentId === grandParentId).length;
-        moveNode(id, grandParentId, count);
-      }}
-      renderRow={(node, isNestTarget) => renderNodeRow(node, depth, isNestTarget)}
-    />
-  );
+  const renderLevel = (siblings: PageNode[], parentId: string | null, depth: number) => {
+    if (!canUpdate) {
+      return <>{siblings.map((node) => <div key={node.id}>{renderNodeRow(node, depth, false)}</div>)}</>;
+    }
+
+    return (
+      <HierarchyDnd
+        items={siblings}
+        parentId={parentId}
+        allNodes={nodes}
+        onReorder={(id, index) => moveNode(id, parentId, index)}
+        onNest={(id, targetId) => {
+          const count = nodes.filter((n) => !n.isDeleted && n.parentId === targetId).length;
+          moveNode(id, targetId, count);
+        }}
+        onOutdent={(id) => {
+          if (parentId === null) return; // уже в корне — вытаскивать некуда
+          const parentNode = nodes.find((n) => n.id === parentId);
+          const grandParentId = parentNode?.parentId ?? null;
+          const count = nodes.filter((n) => !n.isDeleted && n.parentId === grandParentId).length;
+          moveNode(id, grandParentId, count);
+        }}
+        renderRow={(node, isNestTarget) => renderNodeRow(node, depth, isNestTarget)}
+      />
+    );
+  };
 
   const renderNodeRow = (node: PageNode, depth: number, isNestTarget: boolean) => {
     const children = nodes
       .filter((n) => !n.isDeleted && n.parentId === node.id)
       .sort((a, b) => a.order - b.order);
     const isFolder = node.type === 'folder';
-    const isCollapsed = collapsedIds.has(node.id);
+    const isTreeLoaded = loadedTreeParentIds.has(node.id);
+    const isTreeLoading = loadingTreeParentIds.has(node.id);
+    const isCollapsed = isFolder && !isTreeLoaded ? true : collapsedIds.has(node.id);
     const isSelected = selectedPageId === node.id;
     const hasChildren = children.length > 0;
     const showChildren = isFolder || hasChildren; // вложенные страницы тоже разворачиваются
@@ -187,6 +227,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
       <div>
         <div
           onContextMenu={(event) => {
+            if (!canUpdate && !canCreate && !canDelete) return;
             event.preventDefault();
             openNodeMenu(node, event.clientX, event.clientY);
           }}
@@ -200,37 +241,36 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
         >
           {showChildren ? (
             <button
-              onClick={() => toggleCollapsed(node.id)}
+              onClick={() => {
+                if (isFolder && !isTreeLoaded) {
+                  void ensureFolderChildrenLoaded(projectId, node.id);
+                  return;
+                }
+                toggleCollapsed(node.id);
+              }}
               className="w-5 h-5 text-[var(--tg-theme-hint-color)]"
             >
-              {isCollapsed ? '›' : '⌄'}
+              {isTreeLoading ? '…' : isCollapsed ? '›' : '⌄'}
             </button>
           ) : (
             <span className="w-5" />
           )}
 
           <button
-            onClick={() => openNode(node)}
-            className="flex-1 min-w-0 flex items-center gap-2 text-left"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              if (canUpdate) setIconTarget(node);
+            }}
+            disabled={!canUpdate}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-base active:scale-[0.95]"
+            aria-label="Сменить иконку"
+            title="Сменить иконку"
           >
-            <span
-              role="button"
-              tabIndex={0}
-              onClick={(event) => {
-                event.stopPropagation();
-                setIconTarget(node);
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return;
-                event.preventDefault();
-                event.stopPropagation();
-                setIconTarget(node);
-              }}
-              className="shrink-0 rounded-[6px] px-1 active:scale-[0.95]"
-              aria-label="Сменить иконку"
-            >
-              {node.icon}
-            </span>
+            {node.icon}
+          </button>
+
+          <div className="flex-1 min-w-0 flex items-center gap-2 text-left">
             {editingId === node.id ? (
               <input
                 autoFocus
@@ -244,40 +284,50 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
                 className="min-w-0 flex-1 bg-transparent text-sm text-[var(--tg-theme-text-color)] outline-none"
               />
             ) : (
-              <span className="truncate text-sm text-[var(--tg-theme-text-color)]">
+              <button
+                type="button"
+                onClick={() => openNode(node)}
+                className="min-w-0 flex-1 truncate text-left text-sm text-[var(--tg-theme-text-color)]"
+              >
                 {node.title}
-              </span>
+              </button>
             )}
-          </button>
+          </div>
 
-          <button
-            onClick={() => togglePinned(node.id)}
-            className="w-7 h-7 text-xs text-[var(--tg-theme-hint-color)]"
-            aria-label={node.isPinned ? 'Открепить' : 'Закрепить'}
-          >
-            {node.isPinned ? '★' : '☆'}
-          </button>
+          {canUpdate && (
+            <button
+              onClick={() => togglePinned(node.id)}
+              className="w-7 h-7 text-xs text-[var(--tg-theme-hint-color)]"
+              aria-label={node.isPinned ? 'Открепить' : 'Закрепить'}
+            >
+              {node.isPinned ? '★' : '☆'}
+            </button>
+          )}
 
-          <button
-            onClick={() => startRename(node)}
-            className="w-7 h-7 text-xs text-[var(--tg-theme-hint-color)]"
-            aria-label="Переименовать"
-          >
-            ✎
-          </button>
-          <button
-            onClick={() => setNodeToDelete(node)}
-            className="w-7 h-7 text-xs text-[var(--tg-theme-hint-color)]"
-            aria-label="Удалить"
-          >
-            ×
-          </button>
+          {canUpdate && (
+            <button
+              onClick={() => startRename(node)}
+              className="w-7 h-7 text-xs text-[var(--tg-theme-hint-color)]"
+              aria-label="Переименовать"
+            >
+              ✎
+            </button>
+          )}
+          {canDelete && (
+            <button
+              onClick={() => setNodeToDelete(node)}
+              className="w-7 h-7 text-xs text-[var(--tg-theme-hint-color)]"
+              aria-label="Удалить"
+            >
+              ×
+            </button>
+          )}
         </div>
 
         {showChildren && !isCollapsed && (
           <div className="ml-3 border-l border-[var(--tg-theme-secondary-bg-color)] pl-1">
             {hasChildren && renderLevel(children, node.id, depth + 1)}
-            {isFolder && (
+            {isFolder && canCreate && (
               <div className="flex gap-2 mt-1 pl-2">
                 <button onClick={() => addNode('page', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
                   + страница
@@ -302,9 +352,11 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Страницы</h2>
           <div className="flex items-center gap-2">
-            <button onClick={() => setTemplatesOpen(true)} className="text-xs text-[var(--tg-theme-link-color)]">
-              Шаблоны
-            </button>
+            {canCreate && (
+              <button onClick={() => setTemplatesOpen(true)} className="text-xs text-[var(--tg-theme-link-color)]">
+                Шаблоны
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -317,8 +369,8 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
             {pinned.map((node) => (
               <div key={node.id} className="flex items-center">
                 <div className="flex-1 min-w-0">{renderQuickNode(node)}</div>
-                <button onClick={() => movePinned(node.id, -1)} className="w-6 h-6 text-xs text-[var(--tg-theme-hint-color)]">↑</button>
-                <button onClick={() => movePinned(node.id, 1)} className="w-6 h-6 text-xs text-[var(--tg-theme-hint-color)]">↓</button>
+                {canUpdate && <button onClick={() => movePinned(node.id, -1)} className="w-6 h-6 text-xs text-[var(--tg-theme-hint-color)]">↑</button>}
+                {canUpdate && <button onClick={() => movePinned(node.id, 1)} className="w-6 h-6 text-xs text-[var(--tg-theme-hint-color)]">↓</button>}
               </div>
             ))}
           </div>
@@ -328,7 +380,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
       </div>
 
       <div className="shrink-0 border-t border-[var(--tg-theme-secondary-bg-color)] p-2 space-y-2">
-        {trash.length > 0 && (
+        {trash.length > 0 && canDelete && (
           <button
             onClick={() => setTrashOpen(true)}
             className="w-full rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-left text-sm font-medium text-[var(--tg-theme-text-color)]"
@@ -405,15 +457,17 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
               Создать из шаблона
             </h3>
             <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setTemplateBuilderOpen(true)}
-                className="rounded-[12px] border border-dashed border-[var(--tg-theme-button-color)] bg-[var(--tg-theme-secondary-bg-color)] p-3 text-left active:scale-[0.98]"
-              >
-                <span className="block text-2xl mb-2">+</span>
-                <span className="block text-sm font-medium text-[var(--tg-theme-button-color)]">
-                  Создать шаблон
-                </span>
-              </button>
+              {canManageTemplates && (
+                <button
+                  onClick={() => setTemplateBuilderOpen(true)}
+                  className="rounded-[12px] border border-dashed border-[var(--tg-theme-button-color)] bg-[var(--tg-theme-secondary-bg-color)] p-3 text-left active:scale-[0.98]"
+                >
+                  <span className="block text-2xl mb-2">+</span>
+                  <span className="block text-sm font-medium text-[var(--tg-theme-button-color)]">
+                    Создать шаблон
+                  </span>
+                </button>
+              )}
               {allTemplates.map((template) => {
                 const customIndex = customTemplates.findIndex((item) => item.id === template.id);
                 return (
@@ -437,7 +491,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
                         </span>
                       )}
                     </button>
-                    {template.isCustom && (
+                    {template.isCustom && canManageTemplates && (
                       <div className="mt-3 flex items-center gap-1 border-t border-[var(--tg-theme-bg-color)] pt-2">
                         <button
                           onClick={(event) => {
@@ -481,7 +535,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
         </div>
       )}
 
-      {templateToDelete && (
+      {templateToDelete && canManageTemplates && (
         <div className="fixed inset-0 z-[91] flex items-end bg-black/50" onClick={() => setTemplateToDelete(null)}>
           <div
             className="w-full rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5"
@@ -509,7 +563,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
         </div>
       )}
 
-      {templateBuilderOpen && (
+      {templateBuilderOpen && canManageTemplates && (
         <TemplateBuilderModal
           projectId={projectId}
           onClose={() => setTemplateBuilderOpen(false)}
@@ -606,30 +660,41 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
           y={contextNode.y}
           onClose={() => setContextNode(null)}
           items={[
-            { label: 'Открыть', onClick: () => openNode(contextNode.node) },
-            { label: 'Переименовать', onClick: () => startRename(contextNode.node) },
-            {
-              label: contextNode.node.isPinned ? 'Открепить' : 'Закрепить',
-              onClick: () => togglePinned(contextNode.node.id),
-            },
-            {
-              label: 'Копировать название',
-              onClick: () => copyPlainText(`${contextNode.node.icon} ${contextNode.node.title}`),
-            },
+            ...(canUpdate ? [
+              { label: 'Сменить иконку', onClick: () => setIconTarget(contextNode.node) },
+              { label: 'Редактировать название', onClick: () => startRename(contextNode.node) },
+              {
+                label: contextNode.node.isPinned ? 'Открепить' : 'Закрепить',
+                onClick: () => togglePinned(contextNode.node.id),
+              },
+            ] : []),
             {
               label: 'Дублировать',
+              disabled: !canCreate,
               onClick: () => {
+                if (!canCreate) return;
                 const node = duplicateNode(contextNode.node.id);
                 if (node && node.type !== 'folder') openNode(node);
               },
             },
-            { label: 'Переместить...', onClick: () => setNodeToMove(contextNode.node) },
-            { label: 'Переместить в корзину', danger: true, onClick: () => setNodeToDelete(contextNode.node) },
+            { label: 'Переместить...', disabled: !canUpdate, onClick: () => setNodeToMove(contextNode.node) },
+            { label: 'Переместить в корзину', danger: true, disabled: !canDelete, onClick: () => setNodeToDelete(contextNode.node) },
           ]}
         />
       )}
 
-      {nodeToMove && (
+      {iconTarget && canUpdate && (
+        <IconPickerModal
+          node={iconTarget}
+          onSelect={(icon) => {
+            updateNodeIcon(iconTarget.id, icon);
+            setIconTarget(null);
+          }}
+          onClose={() => setIconTarget(null)}
+        />
+      )}
+
+      {nodeToMove && canUpdate && (
         <div className="fixed inset-0 z-[86] flex items-end bg-black/50" onClick={() => setNodeToMove(null)}>
           <div
             className="max-h-[75vh] w-full overflow-y-auto rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-4"

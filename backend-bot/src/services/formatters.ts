@@ -92,6 +92,13 @@ export function formatTaskNotification(input: {
 }
 
 function taskBanner(kind: string) {
+  const customBeforeDeadline = kind.match(/^task_deadline_(\d+)m$/);
+  if (customBeforeDeadline) {
+    const minutes = Number(customBeforeDeadline[1]);
+    const label = minutes % 60 === 0 ? `${minutes / 60} ч` : `${minutes} мин`;
+    return `🟡 *СКОРО ДЕДЛАЙН* — осталось ${escapeMarkdown(label)}`;
+  }
+
   switch (kind) {
     case "task_assigned":
       return "📋 *НОВАЯ ЗАДАЧА*";

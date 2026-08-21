@@ -1,4 +1,5 @@
 import type { BotMessenger, WorkspaceRepository } from "./ports.js";
+import { mergeBotSettings } from "./defaultSettings.js";
 import { NotificationService } from "./services/notificationService.js";
 import { ReportService } from "./services/reportService.js";
 
@@ -61,7 +62,7 @@ export class BotScheduler {
       const messages = await this.repo.fetchPendingOutbox();
       for (const message of messages) {
         try {
-          await this.messenger.sendMessage(message.telegramId, message.text);
+          await this.messenger.sendMessage(message.telegramId, message.text, { attachment: message.attachment });
         } catch (error) {
           console.error("Outbox send failed", error instanceof Error ? error.message : error);
         } finally {
@@ -86,7 +87,7 @@ export class BotScheduler {
     const projects = await this.repo.listProjects();
 
     for (const project of projects) {
-      const settings = project.botSettings;
+      const settings = mergeBotSettings(project.botSettings);
       let changed = false;
 
       // Надёжная логика: сегодня нужный день недели, время УЖЕ наступило и сегодня ещё не слали.

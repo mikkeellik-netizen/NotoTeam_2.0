@@ -1,8 +1,10 @@
-import type { WorkspaceRepository } from "../ports.js";
+import type { BotOutboxMessage, WorkspaceRepository } from "../ports.js";
 import type {
   Column,
   NotificationEvent,
   PageBlock,
+  PageNode,
+  PageNodeInput,
   ParsedTask,
   Project,
   ProjectBotSettings,
@@ -15,11 +17,17 @@ import type {
   CalendarEvent,
 } from "../types.js";
 
+interface ProjectSpaceMeta {
+  collapsedIds: string[];
+  recentPages: string[];
+  dailyNotes: Record<string, string>;
+}
+
 export class HttpWorkspaceRepository implements WorkspaceRepository {
   constructor(private baseUrl: string, private internalApiToken: string = "") {}
 
   fetchPendingOutbox() {
-    return this.request<Array<{ id: string; telegramId: string; text: string }>>("/outbox/pending");
+    return this.request<BotOutboxMessage[]>("/outbox/pending");
   }
 
   async markOutboxSent(id: string) {
@@ -85,11 +93,14 @@ export class HttpWorkspaceRepository implements WorkspaceRepository {
   }
 
   getAssignedActiveTasks(userId: string) {
-    return this.request<Task[]>(`/users/${encodeURIComponent(userId)}/assigned-tasks`);
+    return this.requestAllPages<Task>(`/users/${encodeURIComponent(userId)}/assigned-tasks`, "tasks");
   }
 
   getTasksByProject(projectId: string) {
-    return this.request<Task[]>(`/projects/${encodeURIComponent(projectId)}/tasks?allBoards=1&includeArchived=1`);
+    return this.requestAllPages<Task>(
+      `/projects/${encodeURIComponent(projectId)}/tasks?allBoards=1&includeArchived=1`,
+      "tasks",
+    );
   }
 
   getProjectCalendarEvents(projectId: string) {
@@ -108,18 +119,54 @@ export class HttpWorkspaceRepository implements WorkspaceRepository {
   }
 
   getProjectBlocks(projectId: string) {
-    return this.request<PageBlock[]>(`/projects/${encodeURIComponent(projectId)}/blocks`);
+    return this.requestAllPages<PageBlock>(`/projects/${encodeURIComponent(projectId)}/blocks`, "blocks");
   }
 
-  getProjectSpace(projectId: string) {
-    return this.request<WorkspaceSpace>(`/projects/${encodeURIComponent(projectId)}/space`);
+  async getProjectNodes(projectId: string) {
+    return this.fetchProjectNodes(projectId);
   }
 
-  saveProjectSpace(projectId: string, space: WorkspaceSpace) {
-    return this.request<WorkspaceSpace>(`/projects/${encodeURIComponent(projectId)}/space`, {
-      method: "PUT",
-      body: space,
+  createProjectNode(projectId: string, input: PageNodeInput) {
+    return this.request<PageNode>(`/projects/${encodeURIComponent(projectId)}/space/nodes`, {
+      method: "POST",
+      body: {
+        ...input,
+        actorUserId: input.actorUserId ?? input.properties?.author,
+      },
     });
+  }
+
+  async getProjectSpace(projectId: string) {
+    const encodedProjectId = encodeURIComponent(projectId);
+    const [meta, nodes, blocks] = await Promise.all([
+      this.request<ProjectSpaceMeta>(`/projects/${encodedProjectId}/space/meta`),
+      this.fetchProjectNodes(projectId, { includeDeleted: true }),
+      this.getProjectBlocks(projectId),
+    ]);
+
+    return {
+      nodes,
+      blocks: blocks.map(stripProjectId),
+      collapsedIds: meta.collapsedIds ?? [],
+      recentPages: meta.recentPages ?? [],
+      dailyNotes: meta.dailyNotes ?? {},
+    };
+  }
+
+  async saveProjectSpace(projectId: string, space: WorkspaceSpace) {
+    const encodedProjectId = encodeURIComponent(projectId);
+    await this.request<ProjectSpaceMeta>(`/projects/${encodedProjectId}/space/meta`, {
+      method: "PATCH",
+      body: {
+        collapsedIds: space.collapsedIds ?? [],
+        recentPages: space.recentPages ?? [],
+        dailyNotes: space.dailyNotes ?? {},
+      },
+    });
+
+    await this.syncNodes(projectId, space.nodes ?? []);
+    await this.syncBlocks(projectId, space.blocks ?? []);
+    return this.getProjectSpace(projectId);
   }
 
   createReminder(projectId: string, reminder: ReminderInput) {
@@ -142,7 +189,10 @@ export class HttpWorkspaceRepository implements WorkspaceRepository {
   }
 
   findPendingNotifications(nowIso: string) {
-    return this.request<NotificationEvent[]>(`/notifications/pending?before=${encodeURIComponent(nowIso)}`);
+    return this.requestAllPages<NotificationEvent>(
+      `/notifications/pending?before=${encodeURIComponent(nowIso)}`,
+      "notifications",
+    );
   }
 
   async markNotificationSent(id: string) {
@@ -182,8 +232,166 @@ export class HttpWorkspaceRepository implements WorkspaceRepository {
 
     return (await response.json()) as T;
   }
+
+  private async requestAllPages<T>(path: string, key: string, pageSize = 500): Promise<T[]> {
+    const items: T[] = [];
+    let offset = 0;
+
+    while (true) {
+      const separator = path.includes("?") ? "&" : "?";
+      const page = await this.request<T[] | Record<string, unknown>>(
+        `${path}${separator}paginated=1&offset=${offset}&limit=${pageSize}`,
+      );
+
+      if (Array.isArray(page)) {
+        return offset === 0 ? page : items.concat(page);
+      }
+
+      const chunk = Array.isArray(page[key]) ? (page[key] as T[]) : [];
+      items.push(...chunk);
+
+      if (!page.hasMore || chunk.length === 0) return items;
+      offset += typeof page.limit === "number" && page.limit > 0 ? page.limit : chunk.length;
+    }
+  }
+
+  private async fetchProjectNodes(projectId: string, options: { includeDeleted?: boolean } = {}) {
+    const encodedProjectId = encodeURIComponent(projectId);
+    const query = options.includeDeleted ? "?includeDeleted=1" : "";
+    const response = await this.request<{ nodes: PageNode[] }>(`/projects/${encodedProjectId}/space/nodes${query}`);
+    return response.nodes;
+  }
+
+  private async syncNodes(projectId: string, nodes: PageNode[]) {
+    const current = await this.fetchProjectNodes(projectId, { includeDeleted: true });
+    const currentById = new Map(current.map((node) => [node.id, node]));
+    const orderedNodes = [...nodes].sort((a, b) => nodeDepth(nodes, a) - nodeDepth(nodes, b));
+
+    for (const node of orderedNodes) {
+      const existing = currentById.get(node.id);
+      if (!existing) {
+        await this.createProjectNode(projectId, {
+          id: node.id,
+          parentId: node.parentId ?? null,
+          type: node.type,
+          title: node.title,
+          icon: node.icon,
+          order: node.order,
+        });
+        continue;
+      }
+
+      if (existing.isDeleted && !node.isDeleted) {
+        await this.request(`/projects/${encodeURIComponent(projectId)}/space/nodes/${encodeURIComponent(node.id)}/restore`, {
+          method: "POST",
+        });
+      } else if (!existing.isDeleted && node.isDeleted) {
+        await this.request(`/projects/${encodeURIComponent(projectId)}/space/nodes/${encodeURIComponent(node.id)}/trash`, {
+          method: "POST",
+        });
+        continue;
+      }
+
+      if (nodeNeedsPatch(existing, node)) {
+        await this.request<PageNode>(`/projects/${encodeURIComponent(projectId)}/space/nodes/${encodeURIComponent(node.id)}`, {
+          method: "PATCH",
+          body: {
+            title: node.title,
+            icon: node.icon,
+            isPinned: Boolean(node.isPinned),
+            pinnedOrder: node.pinnedOrder,
+          },
+        });
+      }
+
+      if ((existing.parentId ?? null) !== (node.parentId ?? null) || Number(existing.order) !== Number(node.order)) {
+        await this.request<PageNode>(`/projects/${encodeURIComponent(projectId)}/space/nodes/${encodeURIComponent(node.id)}/move`, {
+          method: "POST",
+          body: {
+            parentId: node.parentId ?? null,
+            order: node.order,
+          },
+        });
+      }
+    }
+  }
+
+  private async syncBlocks(projectId: string, blocks: Array<Omit<PageBlock, "projectId">>) {
+    const currentBlocks = await this.getProjectBlocks(projectId);
+    const currentById = new Map(currentBlocks.map((block) => [block.id, block]));
+
+    for (const block of blocks) {
+      const existing = currentById.get(block.id);
+      if (!existing) {
+        await this.request<PageBlock>(
+          `/projects/${encodeURIComponent(projectId)}/space/pages/${encodeURIComponent(block.pageId)}/blocks`,
+          {
+            method: "POST",
+            body: {
+              id: block.id,
+              type: block.type,
+              content: block.content,
+              order: block.order,
+            },
+          },
+        );
+        continue;
+      }
+
+      if (blockNeedsPatch(existing, block)) {
+        await this.request<PageBlock>(`/projects/${encodeURIComponent(projectId)}/space/blocks/${encodeURIComponent(block.id)}`, {
+          method: "PATCH",
+          body: {
+            type: block.type,
+            content: block.content,
+          },
+        });
+      }
+
+      if (Number(existing.order ?? 0) !== Number(block.order ?? 0)) {
+        await this.request<PageBlock>(
+          `/projects/${encodeURIComponent(projectId)}/space/blocks/${encodeURIComponent(block.id)}/move`,
+          {
+            method: "POST",
+            body: { order: block.order ?? 0 },
+          },
+        );
+      }
+    }
+  }
 }
 
 function nullToUndefined<T>(value: T | null): T | undefined {
   return value === null ? undefined : value;
+}
+
+function stripProjectId(block: PageBlock): Omit<PageBlock, "projectId"> {
+  const { projectId: _projectId, ...rest } = block;
+  return rest;
+}
+
+function nodeDepth(nodes: PageNode[], node: PageNode) {
+  let depth = 0;
+  let parentId = node.parentId ?? null;
+  const byId = new Map(nodes.map((item) => [item.id, item]));
+  while (parentId) {
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    depth += 1;
+    parentId = parent.parentId ?? null;
+  }
+  return depth;
+}
+
+function nodeNeedsPatch(current: PageNode, next: PageNode) {
+  return (
+    current.title !== next.title ||
+    current.icon !== next.icon ||
+    Boolean(current.isPinned) !== Boolean(next.isPinned) ||
+    current.pinnedOrder !== next.pinnedOrder
+  );
+}
+
+function blockNeedsPatch(current: PageBlock, next: Omit<PageBlock, "projectId">) {
+  return current.type !== next.type || JSON.stringify(current.content ?? null) !== JSON.stringify(next.content ?? null);
 }

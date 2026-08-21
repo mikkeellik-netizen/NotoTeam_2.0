@@ -1,20 +1,20 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type TouchEvent as ReactTouchEvent } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { activityApi } from '../../api/activity';
 import { linkPreviewApi } from '../../api/linkPreview';
-import { readDb } from '../../api/mockDb';
 import { tasksApi } from '../../api/tasks';
-import BoardPage from '../../pages/BoardPage';
 import type { Block, BlockType, PageNode, ProjectMember, WebEmbedContent, WebEmbedProvider } from '../../types';
 import { usePageStore } from '../../store/pageStore';
 import SlashMenu from './SlashMenu';
 import ContextMenu from '../common/ContextMenu';
 import { copyPlainText } from '../../utils/clipboard';
+import IconPickerModal from './IconPickerModal';
 
 interface Props {
   page: PageNode;
   projectId: string;
   members: ProjectMember[];
   onOpenPage: (pageId: string) => void;
+  canEdit?: boolean;
 }
 
 type TableColumnType =
@@ -30,12 +30,47 @@ type TableColumnType =
   | 'select';
 
 type TableColumn = {
+  key?: string;
   title: string;
   type: TableColumnType;
   options?: string[];
   optionColors?: Record<string, string>;
   personColors?: Record<string, string>;
   width?: number;
+};
+
+type TableTemplate = {
+  title: string;
+  columns: TableColumn[];
+  rows: string[][];
+  tableKind?: string;
+};
+
+type TableCellCoordinate = {
+  rowIndex: number;
+  columnIndex: number;
+};
+
+type TableFillDrag = TableCellCoordinate & {
+  targetRowIndex: number;
+};
+
+type TaskPlanningDraft = {
+  title: string;
+  project: string;
+  assigneeId: string;
+  deadline: string;
+  isImportant: boolean;
+  isUrgent: boolean;
+  description: string;
+  status: string;
+  priority: string;
+  tags: string;
+  subtasks: string;
+  reminder: string;
+  linkedPage: string;
+  recurrence: string;
+  adminComment: string;
 };
 
 const TABLE_COLUMN_TYPES: Array<{ value: TableColumnType; label: string }> = [
@@ -53,11 +88,48 @@ const TABLE_COLUMN_TYPES: Array<{ value: TableColumnType; label: string }> = [
 
 const STATUS_OPTIONS = ['Не начато', 'В работе', 'На паузе', 'Готово'];
 const PRIORITY_OPTIONS = ['Низкий', 'Средний', 'Высокий', 'Критичный'];
+const FINANCE_INCOME_TYPES = ['Разовый', 'Регулярный'];
+const TASK_PLANNING_STATUSES = ['Новая', 'В работе', 'Готово', 'Архив'];
+const TASK_PLANNING_QUADRANTS = [
+  {
+    id: 'important_urgent',
+    title: 'Важно и срочно',
+    subtitle: 'Сделать сейчас',
+    important: true,
+    urgent: true,
+    color: '#EF4444',
+  },
+  {
+    id: 'important_not_urgent',
+    title: 'Важно, не срочно',
+    subtitle: 'Запланировать',
+    important: true,
+    urgent: false,
+    color: '#3B82F6',
+  },
+  {
+    id: 'not_important_urgent',
+    title: 'Не важно, срочно',
+    subtitle: 'Делегировать',
+    important: false,
+    urgent: true,
+    color: '#F59E0B',
+  },
+  {
+    id: 'not_important_not_urgent',
+    title: 'Не важно, не срочно',
+    subtitle: 'Отложить или удалить',
+    important: false,
+    urgent: false,
+    color: '#64748B',
+  },
+] as const;
 
 const SELECT_OPTION_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#64748B'];
+const BoardPage = lazy(() => import('../../pages/BoardPage'));
 
-export default function PageEditor({ page, projectId, members, onOpenPage }: Props) {
-  const { nodes, createBlock, createBlockWithContent, updateBlock, moveBlock, deleteBlock, renameNode, updatePageProperties, getBlocksByPage } = usePageStore();
+export default function PageEditor({ page, projectId, members, onOpenPage, canEdit = true }: Props) {
+  const { nodes, createBlock, createBlockWithContent, updateBlock, moveBlock, deleteBlock, renameNode, updateNodeIcon, updatePageProperties, getBlocksByPage } = usePageStore();
   const blocks = getBlocksByPage(page.id);
   const [slashQuery, setSlashQuery] = useState('');
   const [slashBlockId, setSlashBlockId] = useState<string | null>(null);
@@ -67,13 +139,118 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
   const [titleDraft, setTitleDraft] = useState(page.title);
   const [contextBlock, setContextBlock] = useState<{ block: Block; x: number; y: number } | null>(null);
   const [readMode, setReadMode] = useState(false);
+  const [iconPickerOpen, setIconPickerOpen] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedBlockIds, setSelectedBlockIds] = useState<Set<string>>(() => new Set());
+  const [lastSelectedBlockId, setLastSelectedBlockId] = useState<string | null>(null);
+  const [deleteSelectionConfirmOpen, setDeleteSelectionConfirmOpen] = useState(false);
+  const dragSelectionActionRef = useRef<'select' | 'deselect' | null>(null);
+  const pageContentRef = useRef<HTMLDivElement>(null);
+  const effectiveReadMode = readMode || !canEdit;
 
   const pageOptions = useMemo(
     () => nodes.filter((n) => n.type !== 'folder' && n.id !== page.id),
     [nodes, page.id],
   );
+  const selectedBlocks = useMemo(
+    () => blocks.filter((block) => selectedBlockIds.has(block.id)),
+    [blocks, selectedBlockIds],
+  );
+  const selectedText = useMemo(
+    () => selectedBlocks.map(blockToPlainText).join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    [selectedBlocks],
+  );
+
+  const clearBlockSelection = () => {
+    setSelectedBlockIds(new Set());
+    setLastSelectedBlockId(null);
+    setDeleteSelectionConfirmOpen(false);
+  };
+
+  const setSelectionEnabled = (enabled: boolean) => {
+    if (!canEdit && enabled) return;
+    setSelectionMode(enabled);
+    setContextBlock(null);
+    if (enabled) {
+      setReadMode(false);
+      setPlusOpen(false);
+      return;
+    }
+    clearBlockSelection();
+  };
+
+  const setBlockSelection = (blockId: string, shouldSelect: boolean) => {
+    setSelectedBlockIds((current) => {
+      const next = new Set(current);
+      if (shouldSelect) next.add(blockId);
+      else next.delete(blockId);
+      return next;
+    });
+    setLastSelectedBlockId(blockId);
+  };
+
+  const startBlockDragSelection = (block: Block, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!selectionMode || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    event.preventDefault();
+    if (event.shiftKey && lastSelectedBlockId) {
+      const startIndex = blocks.findIndex((item) => item.id === lastSelectedBlockId);
+      const endIndex = blocks.findIndex((item) => item.id === block.id);
+      if (startIndex >= 0 && endIndex >= 0) {
+        const from = Math.min(startIndex, endIndex);
+        const to = Math.max(startIndex, endIndex);
+        setSelectedBlockIds((current) => {
+          const next = new Set(current);
+          blocks.slice(from, to + 1).forEach((item) => next.add(item.id));
+          return next;
+        });
+        setLastSelectedBlockId(block.id);
+        dragSelectionActionRef.current = 'select';
+        return;
+      }
+    }
+    const shouldSelect = !selectedBlockIds.has(block.id);
+    dragSelectionActionRef.current = shouldSelect ? 'select' : 'deselect';
+    setBlockSelection(block.id, shouldSelect);
+  };
+
+  const continueBlockDragSelection = (block: Block) => {
+    if (!selectionMode || !dragSelectionActionRef.current) return;
+    setBlockSelection(block.id, dragSelectionActionRef.current === 'select');
+  };
+
+  const selectAllBlocks = () => {
+    setSelectedBlockIds(new Set(blocks.map((block) => block.id)));
+    setLastSelectedBlockId(blocks[blocks.length - 1]?.id ?? null);
+  };
+
+  const copySelectedBlocks = () => {
+    if (!selectedText) return;
+    void copyPlainText(selectedText);
+  };
+
+  const deleteSelectedBlocks = () => {
+    if (!canEdit) return;
+    if (selectedBlocks.length === 0) return;
+    const text = selectedText;
+    selectedBlocks.forEach((block) => deleteBlock(block.id));
+    if (text) {
+      activityApi.log({
+        projectId: Number(projectId),
+        type: 'page_delete',
+        title: `Удалил выбранные строки на странице «${page.title}»`,
+        details: trimActivityText(text),
+        entityType: 'page',
+        entityId: page.id,
+        context: page.title,
+      });
+    }
+    setSelectionEnabled(false);
+    setFocusedBlockId(null);
+    setActiveBlockId(null);
+  };
 
   const insertBlock = (type: BlockType) => {
+    if (!canEdit) return;
     const block = slashBlockId ? blocks.find((b) => b.id === slashBlockId) : null;
     if (block) {
       updateBlock(block.id, defaultContentFor(type, projectId, page.id), type);
@@ -90,7 +267,46 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
     setTitleDraft(page.title);
   }, [page.id, page.title]);
 
+  useEffect(() => {
+    setSelectionMode(false);
+    setSelectedBlockIds(new Set());
+    setLastSelectedBlockId(null);
+    setDeleteSelectionConfirmOpen(false);
+    setContextBlock(null);
+    dragSelectionActionRef.current = null;
+  }, [page.id]);
+
+  useEffect(() => {
+    if (!selectionMode) return;
+    const stopSelection = () => {
+      dragSelectionActionRef.current = null;
+    };
+    window.addEventListener('pointerup', stopSelection);
+    window.addEventListener('pointercancel', stopSelection);
+    return () => {
+      window.removeEventListener('pointerup', stopSelection);
+      window.removeEventListener('pointercancel', stopSelection);
+    };
+  }, [selectionMode]);
+
+  useEffect(() => {
+    const handleNativeSelectionDelete = (event: KeyboardEvent) => {
+      if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+      const ids = getNativeSelectedTextBlockIds(pageContentRef.current, blocks);
+      if (ids.length <= 1) return;
+      event.preventDefault();
+      setSelectedBlockIds(new Set(ids));
+      setDeleteSelectionConfirmOpen(true);
+    };
+    window.addEventListener('keydown', handleNativeSelectionDelete, true);
+    return () => window.removeEventListener('keydown', handleNativeSelectionDelete, true);
+  }, [blocks]);
+
   const commitTitle = () => {
+    if (!canEdit) {
+      setTitleDraft(page.title);
+      return;
+    }
     const nextTitle = titleDraft.trim();
     if (!nextTitle) {
       setTitleDraft(page.title);
@@ -109,6 +325,7 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
 
   useEffect(() => {
     if (blocks.length === 0) {
+      if (!canEdit) return;
       const created = createBlock(page.id, 'paragraph', undefined, { skipHistory: true });
       setFocusedBlockId(created.id);
       return;
@@ -116,17 +333,20 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
 
     const lastBlock = blocks[blocks.length - 1];
     if (lastBlock.type !== 'paragraph' || !isBlockEmpty(lastBlock)) {
+      if (!canEdit) return;
       createBlock(page.id, 'paragraph', lastBlock.order + 1, { skipHistory: true });
     }
-  }, [blocks, createBlock, page.id]);
+  }, [blocks, canEdit, createBlock, page.id]);
 
   const createTextLineAfter = (block: Block, type: BlockType = 'paragraph') => {
+    if (!canEdit) return;
     const created = createBlock(page.id, type, block.order + 1);
     setFocusedBlockId(created.id);
     setActiveBlockId(created.id);
   };
 
   const deleteTextLine = (block: Block) => {
+    if (!canEdit) return;
     const currentIndex = blocks.findIndex((item) => item.id === block.id);
     const previous = blocks[currentIndex - 1] ?? blocks[currentIndex + 1];
     const deletedText = String(block.content?.text ?? '').trim();
@@ -175,11 +395,21 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
     <main className="relative h-full flex flex-col bg-[var(--tg-theme-bg-color)]">
       <div className="flex-1 overflow-y-auto px-4 py-5 select-text">
         <div className="flex items-center gap-2 mb-4">
-          <span className="text-2xl">{page.icon}</span>
+          <button
+            type="button"
+            onClick={() => canEdit && setIconPickerOpen(true)}
+            disabled={!canEdit}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] text-2xl active:scale-95 disabled:opacity-80"
+            title="Сменить иконку"
+            aria-label="Сменить иконку"
+          >
+            {page.icon}
+          </button>
           <input
             value={titleDraft}
             onChange={(event) => setTitleDraft(event.target.value)}
             onBlur={commitTitle}
+            readOnly={!canEdit}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
@@ -194,12 +424,26 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
             className="w-full bg-transparent text-2xl font-bold text-[var(--tg-theme-text-color)] outline-none"
           />
           <button
-            onClick={() => setReadMode((value) => !value)}
-            className={`shrink-0 h-9 w-9 rounded-full active:scale-90 transition-transform ${readMode ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'}`}
+            onClick={() => {
+              setReadMode((value) => !value);
+              setSelectionMode(false);
+              clearBlockSelection();
+            }}
+            className={`shrink-0 h-9 w-9 rounded-full active:scale-90 transition-transform ${effectiveReadMode ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'}`}
             title={readMode ? 'Режим редактирования' : 'Режим чтения (выделять и копировать текст)'}
             aria-label="Режим чтения"
           >
             {readMode ? '✎' : '📄'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectionEnabled(!selectionMode)}
+            disabled={!canEdit}
+            className={`shrink-0 h-9 rounded-full px-3 text-sm font-semibold active:scale-90 transition-transform ${selectionMode ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'}`}
+            title={selectionMode ? 'Завершить выбор строк' : 'Выбрать несколько строк'}
+            aria-label={selectionMode ? 'Завершить выбор строк' : 'Выбрать несколько строк'}
+          >
+            {selectionMode ? 'Готово' : 'Выбрать'}
           </button>
           <button
             onClick={() => copyPlainText(blocks.map(blockToPlainText).join('\n').replace(/\n{3,}/g, '\n\n').trim())}
@@ -211,23 +455,49 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
           </button>
         </div>
 
-        {readMode ? (
+        {!canEdit && (
+          <div className="mb-3 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-hint-color)]">
+            Режим просмотра: у вашей роли нет прав на редактирование этой страницы.
+          </div>
+        )}
+
+        {effectiveReadMode ? (
           <div className="whitespace-pre-wrap break-words select-text pb-24 text-[15px] leading-relaxed text-[var(--tg-theme-text-color)]">
             {blocks.map(blockToPlainText).join('\n').replace(/\n{3,}/g, '\n\n').trim() || 'Пустая страница'}
           </div>
         ) : (
-        <div className="space-y-0.5 pb-24">
+        <div ref={pageContentRef} className="space-y-0.5 pb-24">
+          {selectionMode && (
+            <div className="mb-2 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-hint-color)]">
+              Нажимай на строки или проведи по ним, чтобы выбрать несколько абзацев.
+            </div>
+          )}
           {blocks.map((block) => (
             <div
               key={block.id}
-              className="relative"
+              data-page-block-id={block.id}
+              className={`relative rounded-[10px] transition-colors ${selectionMode ? 'cursor-pointer select-none pl-9 pr-8' : ''} ${selectedBlockIds.has(block.id) ? 'bg-[var(--tg-theme-secondary-bg-color)] ring-1 ring-[var(--tg-theme-button-color)]' : ''}`}
+              onPointerDown={(event) => startBlockDragSelection(block, event)}
+              onPointerEnter={() => continueBlockDragSelection(block)}
+              onClick={(event) => {
+                if (selectionMode || isInteractiveSelectionTarget(event.target)) return;
+              }}
               onContextMenu={(event) => {
                 // Не показываем системное контекстное меню и НЕ открываем меню блока
                 // по нажатию/долгому тапу — меню вызывается только кнопкой ⋮.
-                event.preventDefault();
+                if (selectionMode) event.preventDefault();
               }}
             >
-            {block.type !== 'simple_table' && (
+            {selectionMode && (
+              <span
+                className={`absolute left-1 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-[8px] border text-sm font-bold ${selectedBlockIds.has(block.id) ? 'border-[var(--tg-theme-button-color)] bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' : 'border-[var(--tg-theme-hint-color)] text-[var(--tg-theme-hint-color)]'}`}
+                aria-label={selectedBlockIds.has(block.id) ? 'Убрать строку из выбора' : 'Выбрать строку'}
+                title={selectedBlockIds.has(block.id) ? 'Убрать строку из выбора' : 'Выбрать строку'}
+              >
+                {selectedBlockIds.has(block.id) ? '✓' : ''}
+              </span>
+            )}
+            {block.type !== 'simple_table' && !selectionMode && (
               <button
                 type="button"
                 onClick={(event) => {
@@ -241,59 +511,61 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
                 ⋮
               </button>
             )}
-            <BlockEditor
-              block={block}
-              projectId={projectId}
-              blocks={blocks}
-              nodes={nodes}
-              members={members}
-              page={page}
-              pageOptions={pageOptions}
-              onOpenPage={onOpenPage}
-              onPagePropertiesChange={(properties) => updatePageProperties(page.id, properties)}
-              onUpdate={(content) => updateBlock(block.id, content)}
-              onEditBlock={() => {
-                setFocusedBlockId(block.id);
-                setActiveBlockId(block.id);
-              }}
-              onCopyBlock={() => copyPlainText(blockToPlainText(block))}
-              onDuplicateBlock={() => createBlockWithContent(page.id, block.type, cloneContent(block.content), block.order + 1)}
-              onMoveBlockUp={() => moveBlock(block.id, -1)}
-              onMoveBlockDown={() => moveBlock(block.id, 1)}
-              onDeleteBlock={() => deleteTextLine(block)}
-              canMoveBlockUp={blocks[0]?.id !== block.id}
-              canMoveBlockDown={blocks[blocks.length - 1]?.id !== block.id}
-              canDeleteBlock={blocks.length > 1}
-              onEnter={() => createTextLineAfter(block, nextBlockTypeAfterEnter(block.type))}
-              onDelete={() => deleteTextLine(block)}
-              onSlash={(query) => {
-                setSlashBlockId(block.id);
-                setSlashQuery(query);
-              }}
-              onCommit={(value) => {
-                if (!value.trim()) return;
-                activityApi.log({
-                  projectId: Number(projectId),
-                  type: 'page_edit',
-                  title: `Изменил текст на странице «${page.title}»`,
-                  details: trimActivityText(value),
-                  entityType: 'page',
-                  entityId: page.id,
-                  context: page.title,
-                });
-              }}
-              shouldFocus={focusedBlockId === block.id}
-              onFocused={() => setFocusedBlockId(null)}
-              showPlaceholder={(activeBlockId ? activeBlockId === block.id : emptyPagePlaceholderBlockId === block.id)}
-              onFocus={() => setActiveBlockId(block.id)}
-            />
+            <div className={selectionMode ? 'pointer-events-none' : ''}>
+              <BlockEditor
+                block={block}
+                projectId={projectId}
+                blocks={blocks}
+                nodes={nodes}
+                members={members}
+                page={page}
+                pageOptions={pageOptions}
+                onOpenPage={onOpenPage}
+                onPagePropertiesChange={(properties) => updatePageProperties(page.id, properties)}
+                onUpdate={(content) => updateBlock(block.id, content)}
+                onEditBlock={() => {
+                  setFocusedBlockId(block.id);
+                  setActiveBlockId(block.id);
+                }}
+                onCopyBlock={() => copyPlainText(blockToPlainText(block))}
+                onDuplicateBlock={() => createBlockWithContent(page.id, block.type, cloneContent(block.content), block.order + 1)}
+                onMoveBlockUp={() => moveBlock(block.id, -1)}
+                onMoveBlockDown={() => moveBlock(block.id, 1)}
+                onDeleteBlock={() => deleteTextLine(block)}
+                canMoveBlockUp={blocks[0]?.id !== block.id}
+                canMoveBlockDown={blocks[blocks.length - 1]?.id !== block.id}
+                canDeleteBlock={blocks.length > 1}
+                onEnter={() => createTextLineAfter(block, nextBlockTypeAfterEnter(block.type))}
+                onDelete={() => deleteTextLine(block)}
+                onSlash={(query) => {
+                  setSlashBlockId(block.id);
+                  setSlashQuery(query);
+                }}
+                onCommit={(value) => {
+                  if (!value.trim()) return;
+                  activityApi.log({
+                    projectId: Number(projectId),
+                    type: 'page_edit',
+                    title: `Изменил текст на странице «${page.title}»`,
+                    details: trimActivityText(value),
+                    entityType: 'page',
+                    entityId: page.id,
+                    context: page.title,
+                  });
+                }}
+                shouldFocus={focusedBlockId === block.id}
+                onFocused={() => setFocusedBlockId(null)}
+                showPlaceholder={(activeBlockId ? activeBlockId === block.id : emptyPagePlaceholderBlockId === block.id)}
+                onFocus={() => setActiveBlockId(block.id)}
+              />
+            </div>
             </div>
           ))}
         </div>
         )}
       </div>
 
-      {!readMode && (
+      {!effectiveReadMode && !selectionMode && canEdit && (
       <button
         onClick={() => setPlusOpen(true)}
         className="fixed bottom-6 right-4 z-40 w-14 h-14 rounded-full bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)] shadow-lg flex items-center justify-center text-2xl active:scale-90 transition-transform"
@@ -302,7 +574,80 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
       </button>
       )}
 
-      {(slashBlockId || plusOpen) && (
+      {selectionMode && (
+        <div className="fixed bottom-4 left-4 right-4 z-50 rounded-[16px] border border-[var(--tg-theme-section-separator-color)] bg-[var(--tg-theme-secondary-bg-color)] p-3 shadow-xl">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Выбрано строк: {selectedBlocks.length}</p>
+            <button
+              type="button"
+              onClick={() => setSelectionEnabled(false)}
+              className="rounded-full px-3 py-1.5 text-sm text-[var(--tg-theme-hint-color)] active:bg-[var(--tg-theme-bg-color)]"
+            >
+              Готово
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={selectAllBlocks}
+              className="rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-sm font-semibold text-[var(--tg-theme-text-color)] active:scale-95"
+            >
+              Все
+            </button>
+            <button
+              type="button"
+              disabled={selectedBlocks.length === 0}
+              onClick={copySelectedBlocks}
+              className="rounded-[12px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-sm font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-45 active:scale-95"
+            >
+              Копировать
+            </button>
+            <button
+              type="button"
+              disabled={selectedBlocks.length === 0}
+              onClick={() => setDeleteSelectionConfirmOpen(true)}
+              className="rounded-[12px] bg-red-500 px-3 py-2 text-sm font-semibold text-white disabled:opacity-45 active:scale-95"
+            >
+              Удалить
+            </button>
+          </div>
+        </div>
+      )}
+
+      {deleteSelectionConfirmOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-end bg-black/55 px-3 pb-3"
+          onClick={() => setDeleteSelectionConfirmOpen(false)}
+        >
+          <section
+            className="w-full rounded-[18px] bg-[var(--tg-theme-secondary-bg-color)] p-4 text-[var(--tg-theme-text-color)] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="text-lg font-bold">Удалить выбранные строки?</h3>
+            <p className="mt-1 text-sm text-[var(--tg-theme-hint-color)]">
+              Будет удалено: {selectedBlocks.length}. Это действие попадет в историю изменений.
+            </p>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteSelectionConfirmOpen(false)}
+                className="rounded-[12px] bg-[var(--tg-theme-bg-color)] px-4 py-3 font-semibold"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedBlocks}
+                className="rounded-[12px] bg-red-500 px-4 py-3 font-semibold text-white"
+              >
+                Удалить
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {canEdit && (slashBlockId || plusOpen) && (
         <SlashMenu
           query={slashQuery}
           onSelect={insertBlock}
@@ -313,7 +658,7 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
           }}
         />
       )}
-      {contextBlock && (
+      {canEdit && contextBlock && (
         <ContextMenu
           title="Блок"
           displayTitle={blockContextMenuTitle(contextBlock.block)}
@@ -350,6 +695,13 @@ export default function PageEditor({ page, projectId, members, onOpenPage }: Pro
               onClick: () => deleteTextLine(contextBlock.block),
             },
           ]}
+        />
+      )}
+      {canEdit && iconPickerOpen && (
+        <IconPickerModal
+          node={page}
+          onSelect={(icon) => updateNodeIcon(page.id, icon)}
+          onClose={() => setIconPickerOpen(false)}
         />
       )}
     </main>
@@ -503,8 +855,11 @@ function BlockEditor({
 
   if (block.type === 'simple_table') {
     const rows: string[][] = normalizeTableRows(block.content?.rows ?? [['', ''], ['', '']]);
-    const columns = normalizeTableColumns(block.content?.columns, rows[0]?.length ?? 2);
+    const inferredTableKind = block.content?.tableKind === 'duty_schedule' || block.content?.reminderConfig ? 'duty_schedule' : block.content?.tableKind;
+    const columns = normalizeTableColumns(block.content?.columns, rows[0]?.length ?? 2, inferredTableKind);
     const isAttendance = block.content?.tableKind === 'attendance';
+    const isTaskPlanning = block.content?.tableKind === 'task_planning';
+    const isFinance = block.content?.tableKind === 'finance';
     const stickyFirstColumn = Boolean(block.content?.stickyFirstColumn);
     const stickyHeader = Boolean(block.content?.stickyHeader);
     const [tableMenuOpen, setTableMenuOpen] = useState(false);
@@ -519,8 +874,20 @@ function BlockEditor({
     const [filterColumnIndex, setFilterColumnIndex] = useState<number | null>(null);
     const [tableTemplatesOpen, setTableTemplatesOpen] = useState(false);
     const [tableSettingsMenu, setTableSettingsMenu] = useState<{ x: number; y: number } | null>(null);
+    const [financeTab, setFinanceTab] = useState<FinanceTab>('common');
+    const [financePeriodRange, setFinancePeriodRange] = useState<FinancePeriodRange>({ from: '', to: '' });
+    const [activeTableCell, setActiveTableCell] = useState<TableCellCoordinate | null>(null);
+    const [fillDrag, setFillDrag] = useState<TableFillDrag | null>(null);
     const tableHeaderLongPressRef = useRef<number | null>(null);
-    const visibleRows = getVisibleTableRows(rows, columns, members, tableSearch, tableSort, tableFilter);
+    const visibleRows = getVisibleTableRows(rows, columns, members, tableSearch, tableSort, tableFilter)
+      .filter(({ row }) => !isFinance || financeRowMatchesView(row, columns, financeTab, financePeriodRange));
+    const visibleRowPositionByIndex = new Map(visibleRows.map(({ rowIndex }, index) => [rowIndex, index]));
+    const fillRange = fillDrag ? getTableFillRange(fillDrag, visibleRowPositionByIndex) : null;
+    const isCellInFillRange = (rowIndex: number, columnIndex: number) => {
+      if (!fillDrag || !fillRange || fillDrag.columnIndex !== columnIndex) return false;
+      const position = visibleRowPositionByIndex.get(rowIndex);
+      return position !== undefined && position >= fillRange.from && position <= fillRange.to;
+    };
     const updateTable = (nextRows: string[][], nextColumns: TableColumn[] = columns) => {
       onUpdate({ ...block.content, rows: nextRows, columns: nextColumns });
     };
@@ -574,6 +941,60 @@ function BlockEditor({
       });
       updateTable(nextRows);
       return true;
+    };
+    const cellFromPoint = (x: number, y: number, columnIndex: number) => {
+      const target = document.elementFromPoint(x, y);
+      const cell = target?.closest('[data-table-fill-cell="true"]') as HTMLElement | null;
+      if (!cell || cell.dataset.tableBlockId !== block.id) return null;
+      const targetColumnIndex = Number(cell.dataset.tableColumnIndex);
+      const targetRowIndex = Number(cell.dataset.tableRowIndex);
+      if (targetColumnIndex !== columnIndex || !Number.isFinite(targetRowIndex)) return null;
+      return targetRowIndex;
+    };
+    const fillColumnCells = (sourceRowIndex: number, columnIndex: number, targetRowIndex: number) => {
+      const sourcePosition = visibleRowPositionByIndex.get(sourceRowIndex);
+      const targetPosition = visibleRowPositionByIndex.get(targetRowIndex);
+      if (sourcePosition === undefined || targetPosition === undefined || sourcePosition === targetPosition) return;
+      const from = Math.min(sourcePosition, targetPosition);
+      const to = Math.max(sourcePosition, targetPosition);
+      const sourceValue = rows[sourceRowIndex]?.[columnIndex] ?? '';
+      const nextRows = rows.map((row) => [...row]);
+      visibleRows.slice(from, to + 1).forEach(({ rowIndex }) => {
+        if (rowIndex === sourceRowIndex) return;
+        if (!nextRows[rowIndex]) nextRows[rowIndex] = columns.map(() => '');
+        nextRows[rowIndex][columnIndex] = sourceValue;
+      });
+      updateTable(nextRows);
+    };
+    const startFillHandleDrag = (sourceRowIndex: number, columnIndex: number, event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      let latestTargetRowIndex = sourceRowIndex;
+      setActiveTableCell({ rowIndex: sourceRowIndex, columnIndex });
+      setFillDrag({ rowIndex: sourceRowIndex, columnIndex, targetRowIndex: sourceRowIndex });
+
+      const updateTarget = (x: number, y: number) => {
+        const targetRowIndex = cellFromPoint(x, y, columnIndex);
+        if (targetRowIndex === null) return;
+        latestTargetRowIndex = targetRowIndex;
+        setFillDrag({ rowIndex: sourceRowIndex, columnIndex, targetRowIndex });
+      };
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        moveEvent.preventDefault();
+        updateTarget(moveEvent.clientX, moveEvent.clientY);
+      };
+      const stopDragging = (upEvent: PointerEvent) => {
+        updateTarget(upEvent.clientX, upEvent.clientY);
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', stopDragging);
+        window.removeEventListener('pointercancel', stopDragging);
+        setFillDrag(null);
+        fillColumnCells(sourceRowIndex, columnIndex, latestTargetRowIndex);
+      };
+
+      window.addEventListener('pointermove', handlePointerMove, { passive: false });
+      window.addEventListener('pointerup', stopDragging);
+      window.addEventListener('pointercancel', stopDragging);
     };
     const deleteRow = (rowIndex: number) => {
       const nextRows = rows.filter((_, index) => index !== rowIndex);
@@ -647,6 +1068,38 @@ function BlockEditor({
     const openCellMenu = (rowIndex: number, columnIndex: number, x: number, y: number) => {
       setTableContextMenu({ rowIndex, columnIndex, x, y });
     };
+    const projectTitle = nodes.find((node) => node.projectId === projectId && node.parentId === null)?.title ?? 'Текущий проект';
+    const updateTaskPlanningRow = (rowIndex: number, patch: Record<string, string>) => {
+      const nextRows = rows.map((row) => [...row]);
+      const nextRow = [...(nextRows[rowIndex] ?? columns.map(() => ''))];
+      Object.entries(patch).forEach(([key, value]) => {
+        const columnIndex = taskPlanningColumnIndex(columns, key);
+        if (columnIndex !== -1) nextRow[columnIndex] = value;
+      });
+      nextRows[rowIndex] = nextRow;
+      updateTable(nextRows);
+    };
+    const createTaskPlanningTask = (draft: TaskPlanningDraft) => {
+      updateTable([...rows, taskPlanningDraftToRow(draft, columns)]);
+    };
+    const completeTaskPlanningTask = (rowIndex: number) => {
+      updateTaskPlanningRow(rowIndex, {
+        status: 'Готово',
+        completedAt: formatLocalDateForTable(new Date()),
+      });
+    };
+    const archiveTaskPlanningTask = (rowIndex: number) => {
+      updateTaskPlanningRow(rowIndex, {
+        status: 'Архив',
+        archivedAt: formatLocalDateForTable(new Date()),
+      });
+    };
+    const restoreTaskPlanningTask = (rowIndex: number) => {
+      updateTaskPlanningRow(rowIndex, {
+        status: 'Новая',
+        archivedAt: '',
+      });
+    };
 
     return (
       <>
@@ -678,6 +1131,29 @@ function BlockEditor({
             </label>
           </div>
         </div>
+      )}
+      {isTaskPlanning && (
+        <TaskPlanningDashboard
+          rows={rows}
+          columns={columns}
+          members={members}
+          projectTitle={projectTitle}
+          onCreate={createTaskPlanningTask}
+          onComplete={completeTaskPlanningTask}
+          onArchive={archiveTaskPlanningTask}
+          onRestore={restoreTaskPlanningTask}
+          onDelete={deleteRow}
+        />
+      )}
+      {isFinance && (
+        <FinanceDashboard
+          rows={rows}
+          columns={columns}
+          activeTab={financeTab}
+          periodRange={financePeriodRange}
+          onTabChange={setFinanceTab}
+          onPeriodRangeChange={setFinancePeriodRange}
+        />
       )}
       <div className="rounded-[10px] border border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-secondary-bg-color)] p-1.5">
         <div className="flex items-center gap-2">
@@ -759,7 +1235,12 @@ function BlockEditor({
           </colgroup>
           <thead>
             <tr>
-              {columns.map((column, columnIndex) => (
+              {columns.map((column, columnIndex) => {
+                const displayColumn = isFinance && isFinanceColumn(column, 'month')
+                  ? financeDateColumn(column)
+                  : column;
+
+                return (
                 <th
                   key={columnIndex}
                   onContextMenu={(event) => {
@@ -794,7 +1275,7 @@ function BlockEditor({
                   />
                   <div className="flex items-center gap-1">
                     <select
-                      value={column.type}
+                      value={displayColumn.type}
                       onChange={(event) => {
                         const nextColumns = columns.map((item, index) =>
                           index === columnIndex ? { ...item, type: event.target.value as TableColumnType } : item,
@@ -825,7 +1306,7 @@ function BlockEditor({
                         </svg>
                       </span>
                     </button>
-                    {column.type === 'person' && (
+                    {displayColumn.type === 'person' && (
                       <button
                         type="button"
                         onClick={(event) => {
@@ -842,7 +1323,7 @@ function BlockEditor({
                         />
                       </button>
                     )}
-                    {column.type === 'select' && (
+                    {displayColumn.type === 'select' && (
                       <button
                         type="button"
                         onClick={(event) => {
@@ -858,7 +1339,7 @@ function BlockEditor({
                       </button>
                     )}
                   </div>
-                  {column.type === 'select' && (
+                  {displayColumn.type === 'select' && (
                     <button
                       type="button"
                       onClick={() => setSelectOptionsColumnIndex(columnIndex)}
@@ -875,40 +1356,88 @@ function BlockEditor({
                     aria-label="Изменить ширину столбца"
                   />
                 </th>
-              ))}
+                );
+              })}
             </tr>
           </thead>
           <tbody>
             {visibleRows.map(({ row, rowIndex }) => (
-              <tr key={rowIndex}>
-                {row.map((cell, cellIndex) => (
-                  <td
-                    key={cellIndex}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      openCellMenu(rowIndex, cellIndex, event.clientX, event.clientY);
-                    }}
-                    className={`border border-[var(--tg-theme-secondary-bg-color)] p-2 ${
-                      stickyFirstColumn && cellIndex === 0 ? 'sticky left-0 z-10 min-w-[180px] bg-[var(--tg-theme-bg-color)]' : ''
-                    }`}
-                  >
-                    <TableCellInput
-                      value={cell}
-                      type={columns[cellIndex]?.type ?? 'text'}
-                      column={columns[cellIndex]}
-                      options={columns[cellIndex]?.options}
-                      members={members}
-                      onEnter={() => addRowAfter(rowIndex)}
-                      onPaste={(text) => pasteTableData(rowIndex, cellIndex, text)}
-                      onLongPress={(x, y) => openCellMenu(rowIndex, cellIndex, x, y)}
-                      onChange={(value) => {
-                        const nextRows = rows.map((r) => [...r]);
-                        nextRows[rowIndex][cellIndex] = value;
-                        updateTable(nextRows);
+              <tr key={rowIndex} className={isFinance ? financeRowClass(row, columns) : ''}>
+                {row.map((cell, cellIndex) => {
+                  const column = columns[cellIndex];
+                  const isFinanceDateColumn =
+                    isFinance &&
+                    Boolean(column) &&
+                    isFinanceColumn(column, 'month');
+                  const financeIncomeSubtypeColumn =
+                    isFinance &&
+                    Boolean(column) &&
+                    isFinanceIncomeRow(row, columns) &&
+                    isFinanceColumn(column, 'subcategory');
+                  const effectiveColumn: TableColumn | undefined = financeIncomeSubtypeColumn
+                    ? {
+                        ...(column as TableColumn),
+                        type: 'select',
+                        options: FINANCE_INCOME_TYPES,
+                        optionColors: {
+                          'Разовый': '#22C55E',
+                          'Регулярный': '#16A34A',
+                        },
+                      }
+                    : isFinanceDateColumn
+                      ? financeDateColumn(column as TableColumn)
+                    : column;
+                  const isActiveCell = activeTableCell?.rowIndex === rowIndex && activeTableCell.columnIndex === cellIndex;
+                  const isFillCell = isCellInFillRange(rowIndex, cellIndex);
+
+                  return (
+                    <td
+                      key={cellIndex}
+                      data-table-fill-cell="true"
+                      data-table-block-id={block.id}
+                      data-table-row-index={rowIndex}
+                      data-table-column-index={cellIndex}
+                      onClick={() => setActiveTableCell({ rowIndex, columnIndex: cellIndex })}
+                      onFocusCapture={() => setActiveTableCell({ rowIndex, columnIndex: cellIndex })}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        openCellMenu(rowIndex, cellIndex, event.clientX, event.clientY);
                       }}
-                    />
-                  </td>
-                ))}
+                      className={`relative border border-[var(--tg-theme-secondary-bg-color)] p-2 ${
+                        stickyFirstColumn && cellIndex === 0 ? 'sticky left-0 z-10 min-w-[180px] bg-[var(--tg-theme-bg-color)]' : ''
+                      } ${isFillCell ? 'bg-[var(--tg-theme-button-color)]/10 ring-1 ring-inset ring-[var(--tg-theme-button-color)]/70' : ''} ${
+                        isActiveCell && !isFillCell ? 'ring-1 ring-inset ring-[var(--tg-theme-button-color)]/80' : ''
+                      }`}
+                    >
+                      <TableCellInput
+                        value={cell}
+                        type={effectiveColumn?.type ?? 'text'}
+                        column={effectiveColumn}
+                        options={effectiveColumn?.options}
+                        members={members}
+                        onEnter={() => addRowAfter(rowIndex)}
+                        onPaste={(text) => pasteTableData(rowIndex, cellIndex, text)}
+                        onLongPress={(x, y) => openCellMenu(rowIndex, cellIndex, x, y)}
+                        onChange={(value) => {
+                          const nextRows = rows.map((r) => [...r]);
+                          nextRows[rowIndex][cellIndex] = value;
+                          updateTable(nextRows);
+                        }}
+                      />
+                      {isActiveCell && (
+                        <button
+                          type="button"
+                          onPointerDown={(event) => startFillHandleDrag(rowIndex, cellIndex, event)}
+                          className="absolute -bottom-2 -right-2 z-30 flex h-5 w-5 cursor-crosshair touch-none items-center justify-center rounded-full bg-[var(--tg-theme-bg-color)]"
+                          title="Протянуть значение вниз"
+                          aria-label="Протянуть значение вниз"
+                        >
+                          <span className="block h-2.5 w-2.5 rounded-[3px] bg-[var(--tg-theme-button-color)] shadow" />
+                        </button>
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -1120,7 +1649,12 @@ function BlockEditor({
           <TableTemplatesModal
             onClose={() => setTableTemplatesOpen(false)}
             onSelect={(template) => {
-              updateTable(template.rows, template.columns);
+              onUpdate({
+                ...block.content,
+                rows: template.rows,
+                columns: template.columns,
+                tableKind: template.tableKind,
+              });
               setTableTemplatesOpen(false);
             }}
           />
@@ -1180,7 +1714,9 @@ function BlockEditor({
   if (block.type === 'kanban_embed') {
     return (
       <div className="h-[540px] overflow-hidden rounded-[12px] border border-[var(--tg-theme-secondary-bg-color)]">
-        <BoardPage embedded boardPageId={block.content?.pageId || page.id} />
+        <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-[var(--tg-theme-hint-color)]">Загрузка доски...</div>}>
+          <BoardPage embedded boardPageId={block.content?.pageId || page.id} />
+        </Suspense>
       </div>
     );
   }
@@ -1317,48 +1853,101 @@ function TextInput({
   onFocused: () => void;
   onFocus: () => void;
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const focusValueRef = useRef(value);
+  const pendingCaretOffsetRef = useRef<number | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const mentionOptions = members.filter((member) => {
-    const label = `${member.user?.firstName ?? ''} ${member.user?.username ?? ''}`.toLowerCase();
+    const label = `${mentionDisplayName(member)} ${mentionUsernameLabel(member)} ${member.user?.lastName ?? ''}`.toLowerCase();
     return mentionQuery !== null && label.includes(mentionQuery.toLowerCase());
   });
+  const commitCurrentValue = () => {
+    const currentValue = readEditableText(ref.current);
+    const normalized = normalizeInlineDates(currentValue);
+    if (ref.current && readEditableText(ref.current) !== normalized) ref.current.innerText = normalized;
+    onChange(normalized);
+    if (focusValueRef.current.trim() !== normalized.trim()) onCommit(normalized);
+    return normalized;
+  };
+  const enterEditing = (event?: ReactMouseEvent<HTMLDivElement>) => {
+    pendingCaretOffsetRef.current = event
+      ? getTextOffsetFromPoint(event.currentTarget, event.clientX, event.clientY)
+      : null;
+    setIsEditing(true);
+  };
 
   useEffect(() => {
-    resizeTextarea(ref.current);
-  }, [value]);
+    const element = ref.current;
+    if (!element || !isEditing || document.activeElement === element) return;
+    if (readEditableText(element) !== value) element.innerText = value;
+  }, [isEditing, value]);
 
   useEffect(() => {
     if (!shouldFocus) return;
-    ref.current?.focus();
-    const length = ref.current?.value.length ?? 0;
-    ref.current?.setSelectionRange(length, length);
+    setIsEditing(true);
     onFocused();
   }, [onFocused, shouldFocus]);
 
+  useEffect(() => {
+    if (!isEditing) return;
+    const id = window.requestAnimationFrame(() => {
+      if (!ref.current) return;
+      if (readEditableText(ref.current) !== value) ref.current.innerText = value;
+      ref.current.focus();
+      const offset = pendingCaretOffsetRef.current;
+      pendingCaretOffsetRef.current = null;
+      if (offset === null) setEditableCaretToEnd(ref.current);
+      else setEditableCaretToOffset(ref.current, offset);
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [isEditing]);
+
+  if (!isEditing) {
+    return (
+      <div
+        role="textbox"
+        tabIndex={0}
+        data-placeholder={placeholder}
+        onClick={(event) => {
+          if (window.getSelection()?.toString()) return;
+          enterEditing(event);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            setIsEditing(true);
+          }
+        }}
+        className={`min-h-[2.75rem] w-full max-w-full cursor-text select-text bg-transparent text-[var(--tg-theme-text-color)] outline-none py-2 whitespace-pre-wrap break-words leading-relaxed empty:before:content-[attr(data-placeholder)] empty:before:text-[var(--tg-theme-hint-color)] empty:before:pointer-events-none ${className}`}
+      >
+        {value}
+      </div>
+    );
+  }
+
   return (
     <>
-    <textarea
+    <div
       ref={ref}
-      value={value}
-      placeholder={placeholder}
-      rows={1}
-      onChange={(e) => {
-        const next = e.target.value;
+      role="textbox"
+      tabIndex={0}
+      contentEditable
+      suppressContentEditableWarning
+      data-placeholder={placeholder}
+      onInput={(e) => {
+        const next = readEditableText(e.currentTarget);
         onChange(next);
         if (next.startsWith('/')) onSlash(next);
         const mention = next.match(/(?:^|\s)@([A-Za-zА-Яа-яЁё0-9_]*)$/);
         setMentionQuery(mention ? mention[1] : null);
-        resizeTextarea(e.target);
       }}
       onBlur={() => {
-        const normalized = normalizeInlineDates(value);
-        onChange(normalized);
-        if (focusValueRef.current.trim() !== normalized.trim()) onCommit(normalized);
+        commitCurrentValue();
+        setIsEditing(false);
       }}
       onFocus={() => {
-        focusValueRef.current = value;
+        focusValueRef.current = readEditableText(ref.current);
         onFocus();
       }}
       onKeyDown={(e) => {
@@ -1368,29 +1957,41 @@ function TextInput({
           return;
         }
 
-        if ((e.key === 'Backspace' || e.key === 'Delete') && !value.trim()) {
+        if ((e.key === 'Backspace' || e.key === 'Delete') && !readEditableText(e.currentTarget).trim()) {
           e.preventDefault();
           onDelete();
         }
       }}
-      className={`w-full max-w-full bg-transparent text-[var(--tg-theme-text-color)] placeholder:text-[var(--tg-theme-hint-color)] outline-none py-2 resize-none overflow-hidden whitespace-pre-wrap break-words leading-relaxed ${className}`}
+      onPaste={(event) => {
+        event.preventDefault();
+        document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
+      }}
+      className={`min-h-[2.75rem] w-full max-w-full bg-transparent text-[var(--tg-theme-text-color)] outline-none py-2 whitespace-pre-wrap break-words leading-relaxed empty:before:content-[attr(data-placeholder)] empty:before:text-[var(--tg-theme-hint-color)] empty:before:pointer-events-none ${className}`}
     />
     {mentionOptions.length > 0 && (
-      <div className="absolute z-[60] mt-10 max-h-44 w-56 overflow-y-auto rounded-[10px] bg-[var(--tg-theme-bg-color)] p-1 shadow-xl border border-[var(--tg-theme-secondary-bg-color)]">
+      <div className="absolute z-[60] mt-10 max-h-56 w-64 overflow-y-auto rounded-[12px] bg-[var(--tg-theme-bg-color)] p-1 shadow-xl border border-[var(--tg-theme-secondary-bg-color)]">
         {mentionOptions.slice(0, 6).map((member) => {
-          const username = member.user?.username ?? member.user?.firstName ?? `user${member.userId}`;
+          const displayName = mentionDisplayName(member);
+          const usernameLabel = mentionUsernameLabel(member);
+          const mentionToken = mentionInsertToken(member);
           return (
             <button
               key={member.id}
               onMouseDown={(event) => {
                 event.preventDefault();
-                const next = value.replace(/@([A-Za-zА-Яа-яЁё0-9_]*)$/, `@${username} `);
+                const current = readEditableText(ref.current) || value;
+                const next = current.replace(/@([A-Za-zА-Яа-яЁё0-9_]*)$/, `${mentionToken} `);
+                if (ref.current) {
+                  ref.current.innerText = next;
+                  setEditableCaretToEnd(ref.current);
+                }
                 onChange(next);
                 setMentionQuery(null);
               }}
-              className="w-full rounded-[8px] px-2 py-2 text-left text-sm text-[var(--tg-theme-text-color)] active:bg-[var(--tg-theme-secondary-bg-color)]"
+              className="w-full rounded-[9px] px-2.5 py-2 text-left active:bg-[var(--tg-theme-secondary-bg-color)]"
             >
-              @{username}
+              <span className="block truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">{displayName}</span>
+              <span className="mt-0.5 block truncate text-xs text-[var(--tg-theme-hint-color)]">{usernameLabel}</span>
             </button>
           );
         })}
@@ -1400,10 +2001,104 @@ function TextInput({
   );
 }
 
+function mentionDisplayName(member: ProjectMember) {
+  const user = member.user;
+  const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim();
+  return fullName || user?.username || `Участник ${member.userId}`;
+}
+
+function mentionUsernameLabel(member: ProjectMember) {
+  const username = member.user?.username?.replace(/^@/, '');
+  return username ? `@${username}` : 'Telegram username не указан';
+}
+
+function mentionInsertToken(member: ProjectMember) {
+  const username = member.user?.username?.replace(/^@/, '');
+  if (username) return `@${username}`;
+  const fallback = (member.user?.firstName || member.user?.lastName || `user${member.userId}`).replace(/\s+/g, '_');
+  return `@${fallback}`;
+}
+
 function resizeTextarea(element: HTMLTextAreaElement | null) {
   if (!element) return;
   element.style.height = 'auto';
   element.style.height = `${element.scrollHeight}px`;
+}
+
+function readEditableText(element: HTMLElement | null) {
+  return (element?.innerText ?? '').replace(/\n$/, '');
+}
+
+function setEditableCaretToEnd(element: HTMLElement | null) {
+  if (!element) return;
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function setEditableCaretToOffset(element: HTMLElement | null, offset: number) {
+  if (!element) return;
+  const textLength = element.textContent?.length ?? 0;
+  let remaining = Math.max(0, Math.min(offset, textLength));
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const length = node.textContent?.length ?? 0;
+    if (remaining <= length) {
+      const range = document.createRange();
+      range.setStart(node, remaining);
+      range.collapse(true);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return;
+    }
+    remaining -= length;
+  }
+
+  setEditableCaretToEnd(element);
+}
+
+function getTextOffsetFromPoint(element: HTMLElement, x: number, y: number) {
+  const documentWithCaret = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  const position = documentWithCaret.caretPositionFromPoint?.(x, y);
+  const range = position ? null : documentWithCaret.caretRangeFromPoint?.(x, y);
+  const node = position?.offsetNode ?? range?.startContainer ?? null;
+  const offset = position?.offset ?? range?.startOffset ?? 0;
+
+  if (!node || !element.contains(node) || node.nodeType !== Node.TEXT_NODE) {
+    return element.textContent?.length ?? 0;
+  }
+
+  let total = 0;
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const current = walker.currentNode;
+    if (current === node) return total + offset;
+    total += current.textContent?.length ?? 0;
+  }
+  return element.textContent?.length ?? 0;
+}
+
+function getNativeSelectedTextBlockIds(container: HTMLElement | null, blocks: Block[]) {
+  const selection = window.getSelection();
+  if (!container || !selection || selection.isCollapsed || selection.rangeCount === 0) return [];
+  const range = selection.getRangeAt(0);
+  const textBlockIds = new Set(blocks.filter(isTextInputBlock).map((block) => block.id));
+  return [...container.querySelectorAll<HTMLElement>('[data-page-block-id]')]
+    .filter((element) => {
+      const blockId = element.dataset.pageBlockId;
+      return blockId && textBlockIds.has(blockId) && range.intersectsNode(element);
+    })
+    .map((element) => element.dataset.pageBlockId!)
+    .filter(Boolean);
 }
 
 function trimActivityText(value: string) {
@@ -1466,8 +2161,11 @@ function WebEmbedBlock({
   const [error, setError] = useState('');
   const provider = content?.provider ?? detectEmbedProvider(content?.url ?? '');
   const mode = content?.mode ?? 'auto';
-  const canEmbed = Boolean(content?.embedUrl || buildEmbedUrl(content?.url ?? '', provider));
-  const shouldEmbed = content?.url && mode !== 'preview' && canEmbed;
+  const safeContentUrl = normalizeUrl(content?.url ?? '');
+  const safeEmbedUrl = normalizeUrl(content?.embedUrl ?? '') || buildEmbedUrl(safeContentUrl, provider);
+  const safeImageUrl = normalizeUrl(content?.image ?? '');
+  const canEmbed = Boolean(safeEmbedUrl);
+  const shouldEmbed = Boolean(safeContentUrl && mode !== 'preview' && canEmbed);
 
   useEffect(() => {
     setUrlDraft(content?.url ?? '');
@@ -1537,7 +2235,7 @@ function WebEmbedBlock({
 
       {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
 
-      {content?.url && (
+      {safeContentUrl && (
         <div className="mb-3 grid grid-cols-[1fr_96px] gap-2">
           <select
             value={mode}
@@ -1564,23 +2262,24 @@ function WebEmbedBlock({
         <div className="overflow-hidden rounded-[12px] bg-[var(--tg-theme-bg-color)]">
           <iframe
             title={content.title || content.url}
-            src={content.embedUrl || buildEmbedUrl(content.url, provider)}
+            src={safeEmbedUrl}
             style={{ height: content.height ?? defaultEmbedHeight(provider) }}
             className="block w-full border-0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
             sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation"
+            referrerPolicy="no-referrer"
             loading="lazy"
           />
         </div>
-      ) : content?.url ? (
+      ) : safeContentUrl ? (
         <a
-          href={content.url}
+          href={safeContentUrl}
           target="_blank"
           rel="noreferrer"
           className="flex gap-3 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-left active:scale-[0.99]"
         >
-          {content.image ? (
-            <img src={content.image} alt="" className="h-20 w-24 shrink-0 rounded-[10px] object-cover" />
+          {safeImageUrl ? (
+            <img src={safeImageUrl} alt="" className="h-20 w-24 shrink-0 rounded-[10px] object-cover" />
           ) : (
             <div className="flex h-20 w-24 shrink-0 items-center justify-center rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] text-2xl">
               🔗
@@ -1613,14 +2312,20 @@ function normalizeUrl(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return '';
   try {
-    return new URL(trimmed).toString();
+    const parsed = new URL(trimmed);
+    return isHttpUrl(parsed) ? parsed.toString() : '';
   } catch {
     try {
-      return new URL(`https://${trimmed}`).toString();
+      const parsed = new URL(`https://${trimmed}`);
+      return isHttpUrl(parsed) ? parsed.toString() : '';
     } catch {
       return '';
     }
   }
+}
+
+function isHttpUrl(url: URL) {
+  return url.protocol === 'http:' || url.protocol === 'https:';
 }
 
 function detectEmbedProvider(url: string): WebEmbedProvider {
@@ -1764,6 +2469,578 @@ function PagePropertiesPanel({
         />
       </label>
     </div>
+  );
+}
+
+function TaskPlanningDashboard({
+  rows,
+  columns,
+  members,
+  projectTitle,
+  onCreate,
+  onComplete,
+  onArchive,
+  onRestore,
+  onDelete,
+}: {
+  rows: string[][];
+  columns: TableColumn[];
+  members: ProjectMember[];
+  projectTitle: string;
+  onCreate: (draft: TaskPlanningDraft) => void;
+  onComplete: (rowIndex: number) => void;
+  onArchive: (rowIndex: number) => void;
+  onRestore: (rowIndex: number) => void;
+  onDelete: (rowIndex: number) => void;
+}) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const tasks = useMemo(() => taskPlanningRows(rows, columns, members), [rows, columns, members]);
+  const activeTasks = tasks.filter((task) => !task.isArchived && !task.isDone);
+  const archivedTasks = tasks.filter((task) => task.isArchived);
+  const doneTasks = tasks.filter((task) => task.isDone);
+  const overdueTasks = activeTasks.filter((task) => task.deadlineTime && task.deadlineTime < startOfToday());
+
+  const createDraft = (draft: TaskPlanningDraft) => {
+    onCreate(draft);
+    setModalOpen(false);
+  };
+
+  return (
+    <section className="space-y-2 rounded-[12px] border border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-secondary-bg-color)] p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-bold text-[var(--tg-theme-text-color)]">Постановка задач</p>
+          <p className="text-[11px] text-[var(--tg-theme-hint-color)]">Таблица, матрица и архив</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setModalOpen(true)}
+          className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-sm font-bold text-[var(--tg-theme-button-text-color)] active:scale-[0.98]"
+        >
+          + Задача
+        </button>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2">
+        <TaskPlanningStat value={String(tasks.length)} label="всего" />
+        <TaskPlanningStat value={String(activeTasks.length)} label="активных" />
+        <TaskPlanningStat value={String(doneTasks.length)} label="готово" />
+        <TaskPlanningStat value={String(overdueTasks.length)} label="просрочено" tone={overdueTasks.length ? 'danger' : 'normal'} />
+      </div>
+
+      <div className="grid gap-2 md:grid-cols-2">
+        {TASK_PLANNING_QUADRANTS.map((quadrant) => {
+          const quadrantTasks = activeTasks.filter((task) => task.quadrantId === quadrant.id);
+          return (
+            <div
+              key={quadrant.id}
+              className="rounded-[12px] border p-3"
+              style={{
+                borderColor: `${quadrant.color}80`,
+                background: `${quadrant.color}18`,
+              }}
+            >
+              <div className="mb-2 flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-sm font-bold text-[var(--tg-theme-text-color)]">{quadrant.title}</p>
+                  <p className="text-xs text-[var(--tg-theme-hint-color)]">{quadrant.subtitle}</p>
+                </div>
+                <span
+                  className="rounded-full px-2 py-0.5 text-xs font-bold text-white"
+                  style={{ background: quadrant.color }}
+                >
+                  {quadrantTasks.length}
+                </span>
+              </div>
+              <div className="space-y-2">
+                {quadrantTasks.length === 0 ? (
+                  <p className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-center text-xs text-[var(--tg-theme-hint-color)]">
+                    Нет задач
+                  </p>
+                ) : (
+                  quadrantTasks.map((task) => (
+                    <TaskPlanningCard
+                      key={task.rowIndex}
+                      task={task}
+                      onComplete={() => onComplete(task.rowIndex)}
+                      onArchive={() => onArchive(task.rowIndex)}
+                      onDelete={() => onDelete(task.rowIndex)}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <details className="rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
+        <summary className="cursor-pointer list-none text-sm font-bold text-[var(--tg-theme-text-color)]">
+          Архив · {archivedTasks.length}
+        </summary>
+        <div className="mt-3 space-y-2">
+          {archivedTasks.length === 0 ? (
+            <p className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-center text-xs text-[var(--tg-theme-hint-color)]">
+              Архив пуст
+            </p>
+          ) : (
+            archivedTasks.map((task) => (
+              <TaskPlanningCard
+                key={task.rowIndex}
+                task={task}
+                archived
+                onRestore={() => onRestore(task.rowIndex)}
+                onDelete={() => onDelete(task.rowIndex)}
+              />
+            ))
+          )}
+        </div>
+      </details>
+
+      {modalOpen && (
+        <TaskPlanningModal
+          members={members}
+          projectTitle={projectTitle}
+          onClose={() => setModalOpen(false)}
+          onCreate={createDraft}
+        />
+      )}
+    </section>
+  );
+}
+
+function TaskPlanningStat({ value, label, tone = 'normal' }: { value: string; label: string; tone?: 'normal' | 'danger' }) {
+  return (
+    <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-2 py-3 text-center">
+      <p className={`text-lg font-bold ${tone === 'danger' ? 'text-red-300' : 'text-[var(--tg-theme-text-color)]'}`}>{value}</p>
+      <p className="text-[11px] text-[var(--tg-theme-hint-color)]">{label}</p>
+    </div>
+  );
+}
+
+function TaskPlanningCard({
+  task,
+  archived,
+  onComplete,
+  onArchive,
+  onRestore,
+  onDelete,
+}: {
+  task: ReturnType<typeof taskPlanningRows>[number];
+  archived?: boolean;
+  onComplete?: () => void;
+  onArchive?: () => void;
+  onRestore?: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold text-[var(--tg-theme-text-color)]">{task.title || 'Без названия'}</p>
+          <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+            {task.assigneeName || 'Без исполнителя'}{task.deadline ? ` · ${task.deadline}` : ''}
+          </p>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${tableBadgeClass(task.priority, 'priority')}`}>
+          {task.priority || 'Средний'}
+        </span>
+      </div>
+      {task.description && (
+        <p className="mt-2 line-clamp-2 text-xs text-[var(--tg-theme-hint-color)]">{task.description}</p>
+      )}
+      <div className="mt-3 flex gap-2">
+        {archived ? (
+          <button
+            type="button"
+            onClick={onRestore}
+            className="flex-1 rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] py-2 text-xs font-semibold text-[var(--tg-theme-text-color)] active:scale-[0.98]"
+          >
+            Вернуть
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={onComplete}
+              className="flex-1 rounded-[9px] bg-emerald-500/90 py-2 text-xs font-semibold text-white active:scale-[0.98]"
+            >
+              Готово
+            </button>
+            <button
+              type="button"
+              onClick={onArchive}
+              className="flex-1 rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] py-2 text-xs font-semibold text-[var(--tg-theme-text-color)] active:scale-[0.98]"
+            >
+              В архив
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          onClick={onDelete}
+          className="w-10 rounded-[9px] bg-red-500/15 py-2 text-xs font-bold text-red-300 active:scale-[0.98]"
+          aria-label="Удалить задачу"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TaskPlanningModal({
+  members,
+  projectTitle,
+  onClose,
+  onCreate,
+}: {
+  members: ProjectMember[];
+  projectTitle: string;
+  onClose: () => void;
+  onCreate: (draft: TaskPlanningDraft) => void;
+}) {
+  const [draft, setDraft] = useState<TaskPlanningDraft>(() => ({
+    title: '',
+    project: projectTitle,
+    assigneeId: members[0] ? String(members[0].userId) : '',
+    deadline: '',
+    isImportant: true,
+    isUrgent: true,
+    description: '',
+    status: 'Новая',
+    priority: 'Средний',
+    tags: '',
+    subtasks: '',
+    reminder: 'За 15 часов',
+    linkedPage: '',
+    recurrence: 'Нет',
+    adminComment: '',
+  }));
+  const canCreate = Boolean(draft.title.trim() && draft.project.trim() && draft.assigneeId && draft.deadline.trim());
+
+  const update = (patch: Partial<TaskPlanningDraft>) => setDraft((current) => ({ ...current, ...patch }));
+
+  return (
+    <div className="fixed inset-0 z-[97] flex items-end bg-black/50" onClick={onClose}>
+      <div
+        className="max-h-[90vh] w-full overflow-y-auto rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-4"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-bold text-[var(--tg-theme-text-color)]">Поставить задачу</h3>
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">Задача попадет в общую таблицу и нужный квадрант.</p>
+          </div>
+          <button type="button" onClick={onClose} className="h-9 w-9 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]">
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <TaskPlanningField label="Название задачи" required>
+            <input
+              value={draft.title}
+              onChange={(event) => update({ title: event.target.value })}
+              className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              placeholder="Что нужно сделать?"
+            />
+          </TaskPlanningField>
+          <div className="grid grid-cols-2 gap-2">
+            <TaskPlanningField label="Проект" required>
+              <input
+                value={draft.project}
+                onChange={(event) => update({ project: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              />
+            </TaskPlanningField>
+            <TaskPlanningField label="Исполнитель" required>
+              <select
+                value={draft.assigneeId}
+                onChange={(event) => update({ assigneeId: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              >
+                <option value="">Не выбран</option>
+                {members.map((member) => (
+                  <option key={member.userId} value={member.userId}>
+                    {memberDisplayName(String(member.userId), members)}
+                  </option>
+                ))}
+              </select>
+            </TaskPlanningField>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <TaskPlanningField label="Дедлайн" required>
+              <input
+                value={draft.deadline}
+                onChange={(event) => update({ deadline: formatTableDateInput(event.target.value) })}
+                inputMode="numeric"
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+                placeholder="дд-мм-гггг"
+              />
+            </TaskPlanningField>
+            <TaskPlanningField label="Приоритет">
+              <select
+                value={draft.priority}
+                onChange={(event) => update({ priority: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              >
+                {PRIORITY_OPTIONS.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </TaskPlanningField>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <TaskPlanningToggle
+              label="Важность"
+              checked={draft.isImportant}
+              onChange={(isImportant) => update({ isImportant })}
+            />
+            <TaskPlanningToggle
+              label="Срочность"
+              checked={draft.isUrgent}
+              onChange={(isUrgent) => update({ isUrgent })}
+            />
+          </div>
+
+          <TaskPlanningField label="Описание">
+            <textarea
+              value={draft.description}
+              onChange={(event) => update({ description: event.target.value })}
+              rows={3}
+              className="w-full resize-none rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              placeholder="Контекст, критерий готовности, важные детали"
+            />
+          </TaskPlanningField>
+
+          <div className="grid grid-cols-2 gap-2">
+            <TaskPlanningField label="Статус">
+              <select
+                value={draft.status}
+                onChange={(event) => update({ status: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              >
+                {TASK_PLANNING_STATUSES.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </TaskPlanningField>
+            <TaskPlanningField label="Повтор">
+              <select
+                value={draft.recurrence}
+                onChange={(event) => update({ recurrence: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              >
+                {['Нет', 'Ежедневно', 'Еженедельно', 'Ежемесячно'].map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </TaskPlanningField>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <TaskPlanningField label="Теги">
+              <input
+                value={draft.tags}
+                onChange={(event) => update({ tags: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+                placeholder="tag, team"
+              />
+            </TaskPlanningField>
+            <TaskPlanningField label="Напоминание">
+              <input
+                value={draft.reminder}
+                onChange={(event) => update({ reminder: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+                placeholder="Например: за 15 часов"
+              />
+            </TaskPlanningField>
+          </div>
+
+          <TaskPlanningField label="Подзадачи">
+            <textarea
+              value={draft.subtasks}
+              onChange={(event) => update({ subtasks: event.target.value })}
+              rows={2}
+              className="w-full resize-none rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+              placeholder="Каждая подзадача с новой строки"
+            />
+          </TaskPlanningField>
+
+          <div className="grid grid-cols-2 gap-2">
+            <TaskPlanningField label="Связанная страница">
+              <input
+                value={draft.linkedPage}
+                onChange={(event) => update({ linkedPage: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+                placeholder="Название или ссылка"
+              />
+            </TaskPlanningField>
+            <TaskPlanningField label="Комментарий администратора">
+              <input
+                value={draft.adminComment}
+                onChange={(event) => update({ adminComment: event.target.value })}
+                className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm text-[var(--tg-theme-text-color)] outline-none"
+                placeholder="Внутренняя заметка"
+              />
+            </TaskPlanningField>
+          </div>
+
+          <button
+            type="button"
+            disabled={!canCreate}
+            onClick={() => onCreate(draft)}
+            className="w-full rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 text-sm font-bold text-[var(--tg-theme-button-text-color)] disabled:opacity-50 active:scale-[0.98]"
+          >
+            Создать задачу
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskPlanningField({ label, required, children }: { label: string; required?: boolean; children: ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-[var(--tg-theme-hint-color)]">
+        {label}{required ? ' *' : ''}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+function taskPlanningColumnIndex(columns: TableColumn[], key: string) {
+  const byKey = columns.findIndex((column) => column.key === key);
+  if (byKey !== -1) return byKey;
+  const fallbackTitles: Record<string, string[]> = {
+    title: ['Задача', 'Название задачи'],
+    project: ['Проект'],
+    assigneeId: ['Исполнитель', 'Ответственный'],
+    deadline: ['Дедлайн', 'Срок'],
+    isImportant: ['Важность', 'Важно'],
+    isUrgent: ['Срочность', 'Срочно'],
+    quadrant: ['Квадрант'],
+    description: ['Описание'],
+    status: ['Статус'],
+    priority: ['Приоритет'],
+    tags: ['Теги'],
+    subtasks: ['Подзадачи'],
+    reminder: ['Напоминание'],
+    linkedPage: ['Связанная страница'],
+    recurrence: ['Повтор', 'Повторяющаяся задача'],
+    adminComment: ['Комментарий администратора'],
+    completedAt: ['Выполнено'],
+    archivedAt: ['В архиве'],
+  };
+  return columns.findIndex((column) => fallbackTitles[key]?.includes(column.title));
+}
+
+function taskPlanningCell(row: string[], columns: TableColumn[], key: string) {
+  const columnIndex = taskPlanningColumnIndex(columns, key);
+  return columnIndex === -1 ? '' : String(row[columnIndex] ?? '');
+}
+
+function taskPlanningQuadrantId(isImportant: boolean, isUrgent: boolean) {
+  if (isImportant && isUrgent) return 'important_urgent';
+  if (isImportant && !isUrgent) return 'important_not_urgent';
+  if (!isImportant && isUrgent) return 'not_important_urgent';
+  return 'not_important_not_urgent';
+}
+
+function taskPlanningQuadrantTitle(isImportant: boolean, isUrgent: boolean) {
+  const quadrantId = taskPlanningQuadrantId(isImportant, isUrgent);
+  return TASK_PLANNING_QUADRANTS.find((quadrant) => quadrant.id === quadrantId)?.title ?? '';
+}
+
+function taskPlanningDraftToRow(draft: TaskPlanningDraft, columns: TableColumn[]) {
+  const nextRow = columns.map(() => '');
+  const setCell = (key: string, value: string) => {
+    const columnIndex = taskPlanningColumnIndex(columns, key);
+    if (columnIndex !== -1) nextRow[columnIndex] = value;
+  };
+
+  setCell('title', draft.title.trim());
+  setCell('project', draft.project.trim());
+  setCell('assigneeId', draft.assigneeId);
+  setCell('deadline', draft.deadline.trim());
+  setCell('isImportant', draft.isImportant ? 'Да' : 'Нет');
+  setCell('isUrgent', draft.isUrgent ? 'Да' : 'Нет');
+  setCell('quadrant', taskPlanningQuadrantTitle(draft.isImportant, draft.isUrgent));
+  setCell('description', draft.description.trim());
+  setCell('status', draft.status);
+  setCell('priority', draft.priority);
+  setCell('tags', draft.tags.trim());
+  setCell('subtasks', draft.subtasks.trim());
+  setCell('reminder', draft.reminder.trim());
+  setCell('linkedPage', draft.linkedPage.trim());
+  setCell('recurrence', draft.recurrence);
+  setCell('adminComment', draft.adminComment.trim());
+  return nextRow;
+}
+
+function taskPlanningRows(rows: string[][], columns: TableColumn[], members: ProjectMember[]) {
+  return rows
+    .map((row, rowIndex) => {
+      const title = taskPlanningCell(row, columns, 'title').trim();
+      const description = taskPlanningCell(row, columns, 'description').trim();
+      const status = taskPlanningCell(row, columns, 'status') || 'Новая';
+      const priority = taskPlanningCell(row, columns, 'priority') || 'Средний';
+      const assigneeId = taskPlanningCell(row, columns, 'assigneeId');
+      const deadline = taskPlanningCell(row, columns, 'deadline');
+      const isImportant = taskPlanningCell(row, columns, 'isImportant') !== 'Нет';
+      const isUrgent = taskPlanningCell(row, columns, 'isUrgent') !== 'Нет';
+      const archivedAt = taskPlanningCell(row, columns, 'archivedAt');
+
+      return {
+        rowIndex,
+        title,
+        project: taskPlanningCell(row, columns, 'project'),
+        assigneeId,
+        assigneeName: assigneeId ? memberDisplayName(assigneeId, members) : '',
+        deadline,
+        deadlineTime: parseTableDate(deadline),
+        isImportant,
+        isUrgent,
+        quadrantId: taskPlanningQuadrantId(isImportant, isUrgent),
+        status,
+        priority,
+        description,
+        isDone: status === 'Готово',
+        isArchived: status === 'Архив' || Boolean(archivedAt),
+      };
+    })
+    .filter((task) => task.title || task.description || task.deadline);
+}
+
+function formatLocalDateForTable(date: Date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${day}-${month}-${date.getFullYear()}`;
+}
+
+function startOfToday() {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function TaskPlanningToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={`rounded-[12px] px-3 py-3 text-left text-sm font-bold active:scale-[0.98] ${
+        checked
+          ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+          : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'
+      }`}
+    >
+      {label}: {checked ? 'Да' : 'Нет'}
+    </button>
   );
 }
 
@@ -2273,8 +3550,10 @@ function TablePersonCell({
   const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const longPressTimer = useRef<number | null>(null);
-  const color = getPersonColor(column, value, members);
-  const label = value ? memberDisplayName(value, members) : 'Не выбран';
+  const resolvedValue = resolvePersonCellValue(value, members);
+  const color = getPersonColor(column, resolvedValue || value, members);
+  const primaryLabel = resolvedValue ? memberTelegramLabel(resolvedValue, members) : value ? String(value) : 'Не выбран';
+  const secondaryLabel = resolvedValue ? memberFullName(resolvedValue, members) : '';
 
   const openMenu = () => {
     const rect = buttonRef.current?.getBoundingClientRect();
@@ -2308,10 +3587,13 @@ function TablePersonCell({
         onMouseDown={(event) => startLongPress(event.clientX, event.clientY)}
         onMouseUp={cancelLongPress}
         onMouseLeave={cancelLongPress}
-        className="w-full truncate rounded-full px-2 py-1 text-left text-xs font-semibold outline-none"
+        className="w-full rounded-[12px] px-2 py-1 text-left text-xs font-semibold outline-none"
         style={color ? { backgroundColor: `${color}26`, color } : { backgroundColor: '#E5E7EB', color: '#111827' }}
       >
-        {label}
+        <span className="block truncate">{primaryLabel}</span>
+        {secondaryLabel && secondaryLabel !== primaryLabel && (
+          <span className="block truncate text-[10px] font-medium opacity-75">{secondaryLabel}</span>
+        )}
       </button>
       {menuRect && (
         <div className="fixed inset-0 z-[96]" onClick={() => setMenuRect(null)}>
@@ -2333,6 +3615,8 @@ function TablePersonCell({
             {members.map((member, index) => {
               const id = String(member.userId);
               const memberColor = getPersonColor(column, id, members) ?? SELECT_OPTION_COLORS[index % SELECT_OPTION_COLORS.length];
+              const primary = memberTelegramLabel(id, members);
+              const fullName = memberFullName(id, members);
               return (
                 <button
                   key={id}
@@ -2341,10 +3625,13 @@ function TablePersonCell({
                     onChange(id);
                     setMenuRect(null);
                   }}
-                  className="mb-1 block w-full truncate rounded-full px-3 py-2 text-left text-xs font-semibold active:scale-[0.99]"
+                  className="mb-1 block w-full rounded-[12px] px-3 py-2 text-left text-xs font-semibold active:scale-[0.99]"
                   style={{ backgroundColor: `${memberColor}26`, color: memberColor }}
                 >
-                  {memberDisplayName(id, members)}
+                  <span className="block truncate">
+                    {primary}
+                    {fullName && fullName !== primary ? <span className="font-medium opacity-80"> ({fullName})</span> : null}
+                  </span>
                 </button>
               );
             })}
@@ -2725,7 +4012,7 @@ function TableTemplatesModal({
   onSelect,
   onClose,
 }: {
-  onSelect: (template: { columns: TableColumn[]; rows: string[][] }) => void;
+  onSelect: (template: TableTemplate) => void;
   onClose: () => void;
 }) {
   const templates = tableTemplates();
@@ -2751,6 +4038,547 @@ function TableTemplatesModal({
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+type FinanceTab = 'common' | 'income' | 'expense' | 'summary';
+
+type FinancePeriodRange = {
+  from: string;
+  to: string;
+};
+
+type FinanceChartMode = 'month' | 'week';
+
+type FinanceSeriesVisibility = {
+  income: boolean;
+  expense: boolean;
+  balance: boolean;
+};
+
+type FinancePeriodBucket = {
+  key: string;
+  label: string;
+  income: number;
+  expense: number;
+  balance: number;
+};
+
+type FinancePieItem = {
+  label: string;
+  value: number;
+  color: string;
+};
+
+const FINANCE_CHART_COLORS = ['#3B82F6', '#8B5CF6', '#F59E0B', '#EC4899', '#14B8A6', '#64748B', '#84CC16'];
+
+function FinanceDashboard({
+  rows,
+  columns,
+  activeTab,
+  periodRange,
+  onTabChange,
+  onPeriodRangeChange,
+}: {
+  rows: string[][];
+  columns: TableColumn[];
+  activeTab: FinanceTab;
+  periodRange: FinancePeriodRange;
+  onTabChange: (tab: FinanceTab) => void;
+  onPeriodRangeChange: (range: FinancePeriodRange) => void;
+}) {
+  const [chartMode, setChartMode] = useState<FinanceChartMode>('month');
+  const [visibleSeries, setVisibleSeries] = useState<FinanceSeriesVisibility>({ income: true, expense: true, balance: true });
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const entries = useMemo(() => getFinanceEntries(rows, columns), [rows, columns]);
+  const filteredEntries = filterFinanceEntriesByDateRange(entries, periodRange);
+  const incomeOneTime = sumFinanceEntries(filteredEntries.filter((entry) => entry.type === 'Доход' && normalizeFinanceIncomeKind(entry.subcategory) === 'Разовый'));
+  const incomeRegular = sumFinanceEntries(filteredEntries.filter((entry) => entry.type === 'Доход' && normalizeFinanceIncomeKind(entry.subcategory) === 'Регулярный'));
+  const incomeTotal = sumFinanceEntries(filteredEntries.filter((entry) => entry.type === 'Доход'));
+  const expenseTotal = sumFinanceEntries(filteredEntries.filter((entry) => entry.type === 'Расход'));
+  const balance = incomeTotal - expenseTotal;
+  const expenseByProject = groupFinanceByProject(filteredEntries.filter((entry) => entry.type === 'Расход'));
+  const summaryByProject = buildFinanceSummaryRows(filteredEntries);
+  const incomeRowsCount = filteredEntries.filter((entry) => entry.type === 'Доход').length;
+  const expenseRowsCount = filteredEntries.filter((entry) => entry.type === 'Расход').length;
+  const periodBuckets = useMemo(() => buildFinancePeriodBuckets(filteredEntries, chartMode), [filteredEntries, chartMode]);
+  const incomeByKind = buildFinanceIncomeKindBreakdown(filteredEntries);
+  const insights = buildFinanceSmartInsights({
+    incomeTotal,
+    expenseTotal,
+    balance,
+    incomeRegular,
+    incomeOneTime,
+    expenseByProject,
+    periodBuckets,
+  });
+
+  return (
+    <section className="rounded-[14px] border border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-bold text-[var(--tg-theme-text-color)]">Финансы</p>
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">Доходы, расходы и баланс по общей таблице.</p>
+        </div>
+      </div>
+
+      <div className="mb-3 grid grid-cols-4 gap-2">
+        {([
+          { id: 'common', label: 'Общая', className: 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' },
+          { id: 'income', label: 'Доход', className: 'bg-green-500 text-white' },
+          { id: 'expense', label: 'Расход', className: 'bg-red-500 text-white' },
+          { id: 'summary', label: 'Сводная', className: 'bg-yellow-400 text-slate-950' },
+        ] as const).map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => onTabChange(tab.id)}
+            className={`rounded-[11px] px-2 py-2 text-xs font-bold active:scale-[0.98] ${
+              activeTab === tab.id ? tab.className : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="mb-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_2.5rem] gap-2">
+        <FinanceMetricCard label="Доход" value={formatMoneyRub(incomeTotal)} tone="green" />
+        <FinanceMetricCard label="Расход" value={formatMoneyRub(expenseTotal)} tone="red" />
+        <FinanceMetricCard label="Баланс" value={formatMoneyRub(balance)} tone={balance >= 0 ? 'green' : 'red'} />
+        <FinancePeriodPicker range={periodRange} onChange={onPeriodRangeChange} />
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setAnalyticsOpen(true)}
+        className="mb-3 flex w-full items-center justify-between rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-left active:scale-[0.99]"
+      >
+        <span>
+          <span className="block text-sm font-bold text-[var(--tg-theme-text-color)]">📊 Аналитика и графики</span>
+          <span className="mt-1 block text-xs text-[var(--tg-theme-hint-color)]">Открыть диаграммы, динамику и умный анализ</span>
+        </span>
+        <span className="text-lg text-[var(--tg-theme-hint-color)]">›</span>
+      </button>
+
+      {analyticsOpen && (
+        <FinanceAnalyticsModal onClose={() => setAnalyticsOpen(false)}>
+          <FinanceAnalyticsPanel
+            buckets={periodBuckets}
+            chartMode={chartMode}
+            onChartModeChange={setChartMode}
+            visibleSeries={visibleSeries}
+            onVisibleSeriesChange={setVisibleSeries}
+            periodRange={periodRange}
+            onPeriodRangeChange={onPeriodRangeChange}
+            incomeItems={incomeByKind}
+            expenseItems={expenseByProject.map((item, index) => ({
+              label: item.project,
+              value: item.amount,
+              color: FINANCE_CHART_COLORS[index % FINANCE_CHART_COLORS.length],
+            }))}
+            insights={insights}
+          />
+        </FinanceAnalyticsModal>
+      )}
+
+      {activeTab === 'income' && (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <FinanceMetricCard label="Регулярные" value={formatMoneyRub(incomeRegular)} tone="green" compact />
+            <FinanceMetricCard label="Разовые" value={formatMoneyRub(incomeOneTime)} tone="green" compact />
+          </div>
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">Ниже показан только список доходов: {incomeRowsCount}</p>
+        </div>
+      )}
+
+      {activeTab === 'expense' && (
+        <div className="space-y-2">
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">Ниже показан только список расходов: {expenseRowsCount}</p>
+          <div className="space-y-1">
+            {expenseByProject.map((item) => (
+              <div key={item.project} className="flex items-center justify-between rounded-[10px] bg-red-500/10 px-3 py-2 text-sm">
+                <span className="min-w-0 truncate text-[var(--tg-theme-text-color)]">{item.project}</span>
+                <span className="shrink-0 font-bold text-red-300">{formatMoneyRub(item.amount)}</span>
+              </div>
+            ))}
+            {expenseByProject.length === 0 && <FinanceEmptyState />}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'summary' && (
+        <div className="space-y-3">
+          <div className="overflow-x-auto rounded-[12px] border border-[var(--tg-theme-bg-color)]">
+            <table className="w-full min-w-[420px] text-xs text-[var(--tg-theme-text-color)]">
+              <thead>
+                <tr className="bg-[var(--tg-theme-bg-color)] text-left">
+                  <th className="p-2">Проект</th>
+                  <th className="p-2 text-right text-green-300">Доход</th>
+                  <th className="p-2 text-right text-red-300">Расход</th>
+                  <th className="p-2 text-right text-yellow-300">Общий итог</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summaryByProject.map((item) => (
+                  <tr key={item.project} className={item.total >= 0 ? 'bg-green-500/5' : 'bg-red-500/5'}>
+                    <td className="p-2 font-semibold">{item.project}</td>
+                    <td className="p-2 text-right text-green-300">{formatMoneyRub(item.income)}</td>
+                    <td className="p-2 text-right text-red-300">{formatMoneyRub(item.expense)}</td>
+                    <td className={`p-2 text-right font-bold ${item.total >= 0 ? 'text-green-300' : 'text-red-300'}`}>{formatMoneyRub(item.total)}</td>
+                  </tr>
+                ))}
+                {summaryByProject.length === 0 && (
+                  <tr><td className="p-3 text-center text-[var(--tg-theme-hint-color)]" colSpan={4}>Нет финансовых строк</td></tr>
+                )}
+              </tbody>
+              <tfoot>
+                <tr className="bg-[var(--tg-theme-bg-color)] font-bold">
+                  <td className="p-2">Итого</td>
+                  <td className="p-2 text-right text-green-300">{formatMoneyRub(incomeTotal)}</td>
+                  <td className="p-2 text-right text-red-300">{formatMoneyRub(expenseTotal)}</td>
+                  <td className={`p-2 text-right ${balance >= 0 ? 'text-green-300' : 'text-red-300'}`}>{formatMoneyRub(balance)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function FinanceMetricCard({ label, value, tone, compact = false }: { label: string; value: string; tone: 'green' | 'red'; compact?: boolean }) {
+  const toneClass = tone === 'green' ? 'bg-green-500/15 text-green-300' : 'bg-red-500/15 text-red-300';
+  return (
+    <div className={`rounded-[12px] px-3 ${compact ? 'py-2' : 'py-3'} ${toneClass}`}>
+      <p className={compact ? 'text-[11px] opacity-80' : 'text-xs opacity-80'}>{label}</p>
+      <p className={`mt-1 font-bold ${compact ? 'text-sm' : 'text-base'}`}>{value}</p>
+    </div>
+  );
+}
+
+function FinancePeriodPicker({
+  range,
+  onChange,
+}: {
+  range: FinancePeriodRange;
+  onChange: (range: FinancePeriodRange) => void;
+}) {
+  const label = financeDateRangeLabel(range);
+
+  return (
+    <details className="relative h-10 w-10">
+      <summary
+        className="flex h-10 w-10 cursor-pointer list-none items-center justify-center rounded-[10px] bg-[var(--tg-theme-button-color)] text-base text-[var(--tg-theme-button-text-color)] active:scale-[0.96] [&::-webkit-details-marker]:hidden"
+        title={`Период: ${label}`}
+        aria-label={`Период: ${label}`}
+      >
+        📅
+      </summary>
+      <div className="absolute right-0 top-11 z-40 w-64 rounded-[14px] border border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-bg-color)] p-3 shadow-xl">
+        <p className="mb-2 text-sm font-bold text-[var(--tg-theme-text-color)]">Период</p>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-xs font-semibold text-[var(--tg-theme-hint-color)]">
+            С
+            <input
+              type="date"
+              value={range.from}
+              onChange={(event) => onChange({ ...range, from: event.target.value })}
+              className="mt-1 w-full rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-sm text-[var(--tg-theme-text-color)] outline-none"
+            />
+          </label>
+          <label className="text-xs font-semibold text-[var(--tg-theme-hint-color)]">
+            По
+            <input
+              type="date"
+              value={range.to}
+              onChange={(event) => onChange({ ...range, to: event.target.value })}
+              className="mt-1 w-full rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-sm text-[var(--tg-theme-text-color)] outline-none"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate text-xs text-[var(--tg-theme-hint-color)]">{label}</span>
+          <button
+            type="button"
+            onClick={() => onChange({ from: '', to: '' })}
+            className="shrink-0 rounded-[9px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs font-bold text-[var(--tg-theme-text-color)] active:scale-[0.98]"
+          >
+            Сброс
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function FinanceAnalyticsPanel({
+  buckets,
+  chartMode,
+  onChartModeChange,
+  visibleSeries,
+  onVisibleSeriesChange,
+  periodRange,
+  onPeriodRangeChange,
+  incomeItems,
+  expenseItems,
+  insights,
+}: {
+  buckets: FinancePeriodBucket[];
+  chartMode: FinanceChartMode;
+  onChartModeChange: (mode: FinanceChartMode) => void;
+  visibleSeries: FinanceSeriesVisibility;
+  onVisibleSeriesChange: (next: FinanceSeriesVisibility) => void;
+  periodRange: FinancePeriodRange;
+  onPeriodRangeChange: (range: FinancePeriodRange) => void;
+  incomeItems: FinancePieItem[];
+  expenseItems: FinancePieItem[];
+  insights: string[];
+}) {
+  const seriesOptions: Array<{ id: keyof FinanceSeriesVisibility; label: string; color: string }> = [
+    { id: 'income', label: 'Доход', color: 'bg-green-500' },
+    { id: 'expense', label: 'Расход', color: 'bg-red-500' },
+    { id: 'balance', label: 'Баланс', color: 'bg-yellow-400' },
+  ];
+
+  return (
+    <div className="space-y-3 rounded-[14px] bg-[var(--tg-theme-bg-color)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-bold text-[var(--tg-theme-text-color)]">Аналитика</p>
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">Графики считаются по строкам общей таблицы.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <FinancePeriodPicker range={periodRange} onChange={onPeriodRangeChange} />
+          <div className="flex rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] p-1">
+            {([
+              { id: 'month', label: 'Месяцы' },
+              { id: 'week', label: 'Недели' },
+            ] as const).map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => onChartModeChange(mode.id)}
+                className={`rounded-[8px] px-3 py-1.5 text-xs font-bold active:scale-[0.98] ${
+                  chartMode === mode.id
+                    ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                    : 'text-[var(--tg-theme-hint-color)]'
+                }`}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {seriesOptions.map((option) => (
+          <FinanceSeriesToggle
+            key={option.id}
+            label={option.label}
+            colorClass={option.color}
+            active={visibleSeries[option.id]}
+            onClick={() => onVisibleSeriesChange({ ...visibleSeries, [option.id]: !visibleSeries[option.id] })}
+          />
+        ))}
+      </div>
+
+      <FinanceBarChart buckets={buckets} visibleSeries={visibleSeries} />
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <FinancePieChart title="Доходы" subtitle="по типу дохода" items={incomeItems} />
+        <FinancePieChart title="Расходы" subtitle="по проектам" items={expenseItems} />
+      </div>
+
+      <div className="rounded-[12px] border border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+        <p className="mb-2 text-sm font-bold text-[var(--tg-theme-text-color)]">Умный анализ</p>
+        <div className="space-y-2">
+          {insights.map((insight, index) => (
+            <p key={`${index}-${insight}`} className="text-xs leading-relaxed text-[var(--tg-theme-hint-color)]">
+              {insight}
+            </p>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FinanceAnalyticsModal({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[80] flex items-end bg-black/55 p-0 sm:items-center sm:p-4" onClick={onClose}>
+      <div
+        className="max-h-[92vh] w-full overflow-y-auto rounded-t-[18px] bg-[var(--tg-theme-secondary-bg-color)] p-3 shadow-2xl sm:mx-auto sm:max-w-3xl sm:rounded-[18px]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-2 flex items-center justify-between gap-3 px-1">
+          <div>
+            <p className="text-base font-bold text-[var(--tg-theme-text-color)]">Финансовая аналитика</p>
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">Графики, период и подсказки</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--tg-theme-bg-color)] text-xl font-bold text-[var(--tg-theme-hint-color)] active:scale-[0.96]"
+            aria-label="Закрыть аналитику"
+          >
+            ×
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function FinanceSeriesToggle({
+  label,
+  colorClass,
+  active,
+  onClick,
+}: {
+  label: string;
+  colorClass: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold active:scale-[0.98] ${
+        active
+          ? 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'
+          : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-hint-color)] opacity-60'
+      }`}
+    >
+      <span className={`h-2.5 w-2.5 rounded-full ${colorClass}`} />
+      {label}
+    </button>
+  );
+}
+
+function FinanceBarChart({ buckets, visibleSeries }: { buckets: FinancePeriodBucket[]; visibleSeries: FinanceSeriesVisibility }) {
+  const activeSeries = ([
+    { id: 'income', label: 'Доход', colorClass: 'bg-green-500', textClass: 'text-green-300' },
+    { id: 'expense', label: 'Расход', colorClass: 'bg-red-500', textClass: 'text-red-300' },
+    { id: 'balance', label: 'Баланс', colorClass: 'bg-yellow-400', textClass: 'text-yellow-300' },
+  ] as const).filter((series) => visibleSeries[series.id]);
+  const maxValue = Math.max(
+    1,
+    ...buckets.flatMap((bucket) =>
+      activeSeries.map((series) => Math.abs(bucket[series.id]))
+    )
+  );
+
+  if (activeSeries.length === 0) {
+    return (
+      <div className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-8 text-center text-xs text-[var(--tg-theme-hint-color)]">
+        Включите хотя бы один показатель для графика.
+      </div>
+    );
+  }
+
+  if (buckets.length === 0) {
+    return <FinanceEmptyState />;
+  }
+
+  return (
+    <div className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <p className="text-sm font-bold text-[var(--tg-theme-text-color)]">Динамика по периодам</p>
+        <span className="text-xs text-[var(--tg-theme-hint-color)]">столбцы можно скрывать</span>
+      </div>
+      <div className="overflow-x-auto pb-1">
+        <div className="flex min-h-[188px] min-w-max items-end gap-3">
+          {buckets.map((bucket) => (
+            <div key={bucket.key} className="flex w-[112px] shrink-0 flex-col items-center">
+              <div className="flex h-40 items-end gap-1.5">
+                {activeSeries.map((series) => {
+                  const value = bucket[series.id];
+                  const height = Math.max(4, Math.round((Math.abs(value) / maxValue) * 118));
+                  return (
+                    <div key={series.id} className="flex w-8 flex-col items-center justify-end gap-1">
+                      <span
+                        className={`h-4 w-10 truncate text-center text-[9px] font-bold leading-4 ${series.textClass}`}
+                        title={`${series.label}: ${formatMoneyRub(value)}`}
+                      >
+                        {formatMoneyCompact(value)}
+                      </span>
+                      <div
+                        className={`w-5 rounded-t-[5px] ${series.colorClass} ${value === 0 ? 'opacity-30' : ''}`}
+                        style={{ height }}
+                        title={`${series.label}: ${formatMoneyRub(value)}`}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              <span className="mt-2 w-full truncate text-center text-[10px] text-[var(--tg-theme-hint-color)]">{bucket.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FinancePieChart({ title, subtitle, items }: { title: string; subtitle: string; items: FinancePieItem[] }) {
+  const visibleItems = items.filter((item) => item.value > 0);
+  const total = visibleItems.reduce((sum, item) => sum + item.value, 0);
+  let cursor = 0;
+  const gradient = visibleItems
+    .map((item) => {
+      const start = cursor;
+      const size = (item.value / total) * 100;
+      cursor += size;
+      return `${item.color} ${start}% ${cursor}%`;
+    })
+    .join(', ');
+
+  return (
+    <div className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-bold text-[var(--tg-theme-text-color)]">{title}</p>
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">{subtitle}</p>
+        </div>
+        <span className="text-xs font-bold text-[var(--tg-theme-text-color)]">{formatMoneyCompact(total)}</span>
+      </div>
+      {total > 0 ? (
+        <div className="flex items-center gap-3">
+          <div
+            className="h-24 w-24 shrink-0 rounded-full"
+            style={{ background: `conic-gradient(${gradient})` }}
+            aria-label={`${title}: ${formatMoneyRub(total)}`}
+          />
+          <div className="min-w-0 flex-1 space-y-1">
+            {visibleItems.map((item) => {
+              const percent = Math.round((item.value / total) * 100);
+              return (
+                <div key={item.label} className="flex items-center gap-2 text-xs">
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+                  <span className="min-w-0 flex-1 truncate text-[var(--tg-theme-text-color)]">{item.label}</span>
+                  <span className="shrink-0 font-bold text-[var(--tg-theme-hint-color)]">{percent}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <FinanceEmptyState />
+      )}
+    </div>
+  );
+}
+
+function FinanceEmptyState() {
+  return (
+    <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-center text-xs text-[var(--tg-theme-hint-color)]">
+      Данных пока нет
     </div>
   );
 }
@@ -2807,9 +4635,352 @@ function tableFilterChoices(column: TableColumn, members: ProjectMember[]) {
   return [];
 }
 
+function getTableFillRange(fillDrag: TableFillDrag, visibleRowPositionByIndex: Map<number, number>) {
+  const sourcePosition = visibleRowPositionByIndex.get(fillDrag.rowIndex);
+  const targetPosition = visibleRowPositionByIndex.get(fillDrag.targetRowIndex);
+  if (sourcePosition === undefined || targetPosition === undefined) return null;
+  return {
+    from: Math.min(sourcePosition, targetPosition),
+    to: Math.max(sourcePosition, targetPosition),
+  };
+}
+
+type FinanceEntry = {
+  month: string;
+  type: 'Доход' | 'Расход' | '';
+  project: string;
+  subcategory: string;
+  amount: number;
+};
+
+function getFinanceEntries(rows: string[][], columns: TableColumn[]): FinanceEntry[] {
+  const monthIndex = financeColumnIndex(columns, 'month');
+  const typeIndex = financeColumnIndex(columns, 'type');
+  const projectIndex = financeColumnIndex(columns, 'project');
+  const subcategoryIndex = financeColumnIndex(columns, 'subcategory');
+  const amountIndex = financeColumnIndex(columns, 'amount');
+
+  return rows
+    .map((row) => ({
+      month: monthIndex === -1 ? '' : String(row[monthIndex] ?? '').trim(),
+      type: normalizeFinanceType(typeIndex === -1 ? '' : row[typeIndex]),
+      project: (projectIndex === -1 ? '' : String(row[projectIndex] ?? '').trim()) || 'Без проекта',
+      subcategory: subcategoryIndex === -1 ? '' : String(row[subcategoryIndex] ?? '').trim(),
+      amount: amountIndex === -1 ? 0 : parseTableNumber(row[amountIndex] ?? ''),
+    }))
+    .filter((entry) => entry.type || entry.project !== 'Без проекта' || entry.subcategory || entry.amount !== 0 || entry.month);
+}
+
+function filterFinanceEntriesByDateRange(entries: FinanceEntry[], range: FinancePeriodRange) {
+  if (!hasFinanceDateRange(range)) return entries;
+  return entries.filter((entry) => financeDateInRange(entry.month, range));
+}
+
+function financeRowMatchesView(row: string[], columns: TableColumn[], tab: FinanceTab, range: FinancePeriodRange) {
+  const hasAnyValue = row.some((cell) => String(cell ?? '').trim());
+  const monthIndex = financeColumnIndex(columns, 'month');
+  const typeIndex = financeColumnIndex(columns, 'type');
+  const month = monthIndex === -1 ? '' : String(row[monthIndex] ?? '').trim();
+  const type = typeIndex === -1 ? '' : normalizeFinanceType(row[typeIndex]);
+
+  if (!hasAnyValue) return tab === 'common' && !hasFinanceDateRange(range);
+  if (hasFinanceDateRange(range) && !financeDateInRange(month, range)) return false;
+  if (tab === 'income') return type === 'Доход';
+  if (tab === 'expense') return type === 'Расход';
+  return true;
+}
+
+function financeDateColumn(column: TableColumn): TableColumn {
+  return { ...column, type: 'date', options: undefined, optionColors: undefined };
+}
+
+function financeColumnIndex(columns: TableColumn[], key: string) {
+  return columns.findIndex((column) => isFinanceColumn(column, key));
+}
+
+function isFinanceColumn(column: TableColumn | undefined, key: string) {
+  if (!column) return false;
+  if (column.key === key) return true;
+  const normalizedTitle = column.title.trim().toLowerCase();
+  if (key === 'month') return normalizedTitle === 'дата' || normalizedTitle.includes('месяц');
+  if (key === 'type') return normalizedTitle === 'тип';
+  if (key === 'project') return normalizedTitle === 'проект';
+  if (key === 'subcategory') return normalizedTitle === 'подкатегория';
+  if (key === 'amount') return normalizedTitle.includes('сумма');
+  return false;
+}
+
+function normalizeFinanceType(value: unknown): FinanceEntry['type'] {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (text === 'доход') return 'Доход';
+  if (text === 'расход') return 'Расход';
+  return '';
+}
+
+function normalizeFinanceIncomeKind(value: string) {
+  const text = value.trim().toLowerCase();
+  if (text.startsWith('разов')) return 'Разовый';
+  if (text.startsWith('регуляр')) return 'Регулярный';
+  return '';
+}
+
+function isFinanceIncomeRow(row: string[], columns: TableColumn[]) {
+  const typeIndex = financeColumnIndex(columns, 'type');
+  return typeIndex !== -1 && normalizeFinanceType(row[typeIndex]) === 'Доход';
+}
+
+function financeRowClass(row: string[], columns: TableColumn[]) {
+  const typeIndex = financeColumnIndex(columns, 'type');
+  const type = typeIndex === -1 ? '' : normalizeFinanceType(row[typeIndex]);
+  if (type === 'Доход') return 'bg-green-500/5';
+  if (type === 'Расход') return 'bg-red-500/5';
+  return '';
+}
+
+function hasFinanceDateRange(range: FinancePeriodRange) {
+  return Boolean(range.from || range.to);
+}
+
+function financeDateInRange(value: string, range: FinancePeriodRange) {
+  const date = parseFinanceDate(value);
+  if (!date) return false;
+  const from = range.from ? parseFinanceDate(range.from) : null;
+  const to = range.to ? parseFinanceDate(range.to) : null;
+  const fromTime = from?.getTime() ?? Number.NEGATIVE_INFINITY;
+  const toTime = to?.getTime() ?? Number.POSITIVE_INFINITY;
+  const minTime = Math.min(fromTime, toTime);
+  const maxTime = Math.max(fromTime, toTime);
+  return date.getTime() >= minTime && date.getTime() <= maxTime;
+}
+
+function financeDateRangeLabel(range: FinancePeriodRange) {
+  if (!hasFinanceDateRange(range)) return 'Весь период';
+  const from = range.from ? formatFinanceDateLabel(range.from) : 'начало';
+  const to = range.to ? formatFinanceDateLabel(range.to) : 'сегодня';
+  return `${from} — ${to}`;
+}
+
+function formatFinanceDateLabel(value: string) {
+  const date = parseFinanceDate(value);
+  if (!date) return value;
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function parseFinanceDate(value: string) {
+  const text = value.trim();
+  const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (iso) return buildFinanceDate(Number(iso[3]), Number(iso[2]), Number(iso[1]));
+  const local = text.match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2}|\d{4})$/);
+  if (!local) return null;
+  const year = Number(local[3].length === 2 ? `20${local[3]}` : local[3]);
+  return buildFinanceDate(Number(local[1]), Number(local[2]), year);
+}
+
+function buildFinanceDate(day: number, month: number, year: number) {
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+}
+
+function sumFinanceEntries(entries: FinanceEntry[]) {
+  return entries.reduce((total, entry) => total + entry.amount, 0);
+}
+
+function groupFinanceByProject(entries: FinanceEntry[]) {
+  const map = new Map<string, number>();
+  for (const entry of entries) map.set(entry.project, (map.get(entry.project) ?? 0) + entry.amount);
+  return Array.from(map.entries())
+    .map(([project, amount]) => ({ project, amount }))
+    .sort((left, right) => right.amount - left.amount);
+}
+
+function buildFinancePeriodBuckets(entries: FinanceEntry[], mode: FinanceChartMode): FinancePeriodBucket[] {
+  const map = new Map<string, FinancePeriodBucket & { sortTime: number }>();
+
+  for (const entry of entries) {
+    if (!entry.type) continue;
+    const identity = financeBucketIdentity(parseFinanceDate(entry.month), mode);
+    const current = map.get(identity.key) ?? {
+      key: identity.key,
+      label: identity.label,
+      income: 0,
+      expense: 0,
+      balance: 0,
+      sortTime: identity.sortTime,
+    };
+    if (entry.type === 'Доход') current.income += entry.amount;
+    if (entry.type === 'Расход') current.expense += entry.amount;
+    current.balance = current.income - current.expense;
+    map.set(identity.key, current);
+  }
+
+  return Array.from(map.values())
+    .sort((left, right) => left.sortTime - right.sortTime)
+    .map((bucket) => ({
+      key: bucket.key,
+      label: bucket.label,
+      income: bucket.income,
+      expense: bucket.expense,
+      balance: bucket.balance,
+    }));
+}
+
+function financeBucketIdentity(date: Date | null, mode: FinanceChartMode) {
+  if (!date) return { key: 'no-date', label: 'Без даты', sortTime: Number.MAX_SAFE_INTEGER };
+  if (mode === 'week') {
+    const start = startOfFinanceWeek(date);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    return {
+      key: `week-${financeDateIso(start)}`,
+      label: `${formatShortFinanceDate(start)}-${formatShortFinanceDate(end)}`,
+      sortTime: start.getTime(),
+    };
+  }
+  const monthStart = new Date(date.getFullYear(), date.getMonth(), 1);
+  return {
+    key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+    label: monthStart.toLocaleDateString('ru-RU', { month: 'short', year: '2-digit' }).replace('.', ''),
+    sortTime: monthStart.getTime(),
+  };
+}
+
+function startOfFinanceWeek(date: Date) {
+  const result = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = result.getDay() || 7;
+  result.setDate(result.getDate() - day + 1);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function financeDateIso(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function formatShortFinanceDate(date: Date) {
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
+function buildFinanceIncomeKindBreakdown(entries: FinanceEntry[]): FinancePieItem[] {
+  const map = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.type !== 'Доход' || entry.amount <= 0) continue;
+    const kind = normalizeFinanceIncomeKind(entry.subcategory) || entry.subcategory.trim() || 'Без категории';
+    map.set(kind, (map.get(kind) ?? 0) + entry.amount);
+  }
+  const preferredColors: Record<string, string> = {
+    Регулярный: '#22C55E',
+    Разовый: '#84CC16',
+    'Без категории': '#64748B',
+  };
+  return Array.from(map.entries())
+    .map(([label, value], index) => ({
+      label,
+      value,
+      color: preferredColors[label] ?? FINANCE_CHART_COLORS[index % FINANCE_CHART_COLORS.length],
+    }))
+    .sort((left, right) => right.value - left.value);
+}
+
+function buildFinanceSmartInsights({
+  incomeTotal,
+  expenseTotal,
+  balance,
+  incomeRegular,
+  incomeOneTime,
+  expenseByProject,
+  periodBuckets,
+}: {
+  incomeTotal: number;
+  expenseTotal: number;
+  balance: number;
+  incomeRegular: number;
+  incomeOneTime: number;
+  expenseByProject: Array<{ project: string; amount: number }>;
+  periodBuckets: FinancePeriodBucket[];
+}) {
+  const insights: string[] = [];
+  if (incomeTotal === 0 && expenseTotal === 0) {
+    return ['Добавьте доходы и расходы в общую таблицу, и здесь появится анализ: баланс, структура расходов, динамика и подсказки.'];
+  }
+
+  if (balance >= 0) {
+    insights.push(`Финансовое состояние положительное: доходы выше расходов на ${formatMoneyRub(balance)}.`);
+  } else {
+    insights.push(`Сейчас расходы выше доходов на ${formatMoneyRub(Math.abs(balance))}. Лучше быстро проверить крупные категории расходов и временно ограничить необязательные траты.`);
+  }
+
+  if (incomeTotal > 0) {
+    const expenseShare = Math.round((expenseTotal / incomeTotal) * 100);
+    if (expenseShare >= 90) {
+      insights.push(`Расходы забирают ${expenseShare}% дохода. Это высокий уровень нагрузки: стоит оставить только обязательные расходы и перенести второстепенные покупки.`);
+    } else if (expenseShare >= 70) {
+      insights.push(`Расходы составляют ${expenseShare}% дохода. Запас есть, но он небольшой: полезно заранее определить лимит на следующую неделю или месяц.`);
+    } else {
+      insights.push(`Расходы составляют ${expenseShare}% дохода. Запас выглядит здоровым, если крупные траты не ожидаются.`);
+    }
+  } else if (expenseTotal > 0) {
+    insights.push('Доходов за выбранный период нет, а расходы уже есть. Для анализа лучше добавить источники дохода или сузить период фильтром.');
+  }
+
+  const largestExpense = expenseByProject[0];
+  if (largestExpense && expenseTotal > 0) {
+    const share = Math.round((largestExpense.amount / expenseTotal) * 100);
+    insights.push(`Самая заметная статья расходов: «${largestExpense.project}» — ${formatMoneyRub(largestExpense.amount)} (${share}%). Если нужно экономить, начинать лучше с неё.`);
+  }
+
+  if (incomeTotal > 0) {
+    const regularShare = Math.round((incomeRegular / incomeTotal) * 100);
+    const oneTimeShare = Math.round((incomeOneTime / incomeTotal) * 100);
+    if (regularShare < 50 && incomeOneTime > incomeRegular) {
+      insights.push(`Доход больше держится на разовых поступлениях (${oneTimeShare}%). Для устойчивости стоит усиливать регулярные источники.`);
+    } else if (regularShare >= 50) {
+      insights.push(`Регулярный доход занимает ${regularShare}% поступлений. Это хороший фундамент для планирования расходов.`);
+    }
+  }
+
+  const datedBuckets = periodBuckets.filter((bucket) => bucket.key !== 'no-date');
+  if (datedBuckets.length >= 2) {
+    const first = datedBuckets[0];
+    const last = datedBuckets[datedBuckets.length - 1];
+    if (last.balance > first.balance) {
+      insights.push('Динамика баланса улучшается: последний период выглядит сильнее первого в выбранном диапазоне.');
+    } else if (last.balance < first.balance) {
+      insights.push('Динамика баланса ухудшилась. Проверьте, не выросли ли расходы в последних периодах.');
+    }
+  }
+
+  return insights.slice(0, 5);
+}
+
+function buildFinanceSummaryRows(entries: FinanceEntry[]) {
+  const map = new Map<string, { project: string; income: number; expense: number; total: number }>();
+  for (const entry of entries) {
+    if (!entry.type) continue;
+    const current = map.get(entry.project) ?? { project: entry.project, income: 0, expense: 0, total: 0 };
+    if (entry.type === 'Доход') current.income += entry.amount;
+    if (entry.type === 'Расход') current.expense += entry.amount;
+    current.total = current.income - current.expense;
+    map.set(entry.project, current);
+  }
+  return Array.from(map.values()).sort((left, right) => Math.abs(right.total) - Math.abs(left.total));
+}
+
+function formatMoneyRub(value: number) {
+  return `${value.toLocaleString('ru-RU', { maximumFractionDigits: 0 })} ₽`;
+}
+
+function formatMoneyCompact(value: number) {
+  const sign = value < 0 ? '-' : '';
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} млн`;
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toLocaleString('ru-RU', { maximumFractionDigits: 0 })} тыс`;
+  return `${value.toLocaleString('ru-RU', { maximumFractionDigits: 0 })} ₽`;
+}
+
 function tableTemplates() {
   const makeRows = (columns: TableColumn[]) => Array.from({ length: 3 }, () => columns.map(() => ''));
-  const templates: Array<{ title: string; columns: TableColumn[]; rows: string[][] }> = [
+  const templates: TableTemplate[] = [
     {
       title: 'Проекты',
       columns: [
@@ -2823,23 +4994,39 @@ function tableTemplates() {
     },
     {
       title: 'Финансы',
+      tableKind: 'finance',
       columns: [
-        { title: 'Статья', type: 'text', width: 180 },
-        { title: 'Сумма', type: 'money', width: 120 },
-        { title: 'Дата', type: 'date', width: 130 },
         {
-          title: 'Категория',
+          key: 'month',
+          title: 'Дата',
+          type: 'date',
+          width: 130,
+        },
+        {
+          key: 'type',
+          title: 'Тип',
           type: 'select',
-          width: 150,
-          options: ['Доход', 'Расход', 'Пожертвование', 'Материалы', 'Транспорт'],
+          width: 130,
+          options: ['Доход', 'Расход'],
+          optionColors: { 'Доход': '#22C55E', 'Расход': '#EF4444' },
+        },
+        {
+          key: 'project',
+          title: 'Проект',
+          type: 'select',
+          width: 160,
+          options: ['Общий', 'Молодежь', 'Медиа', 'Служение', 'Мероприятия', 'Другое'],
           optionColors: {
-            'Доход': '#22C55E',
-            'Расход': '#EF4444',
-            'Пожертвование': '#3B82F6',
-            'Материалы': '#F59E0B',
-            'Транспорт': '#8B5CF6',
+            'Общий': '#3B82F6',
+            'Молодежь': '#22C55E',
+            'Медиа': '#8B5CF6',
+            'Служение': '#F59E0B',
+            'Мероприятия': '#EC4899',
+            'Другое': '#64748B',
           },
         },
+        { key: 'subcategory', title: 'Подкатегория', type: 'text', width: 170 },
+        { key: 'amount', title: 'Сумма, ₽', type: 'money', width: 130 },
         { title: 'Комментарий', type: 'text', width: 200 },
       ],
       rows: [],
@@ -2952,8 +5139,25 @@ function tableCellText(value: string, column: TableColumn, members: ProjectMembe
 }
 
 function memberDisplayName(value: string, members: ProjectMember[]) {
-  const member = members.find((item) => String(item.userId) === String(value));
-  return member?.user?.firstName || member?.user?.username || value;
+  const resolvedValue = resolvePersonCellValue(value, members) || value;
+  const member = members.find((item) => String(item.userId) === String(resolvedValue));
+  const fullName = [member?.user?.firstName, member?.user?.lastName].filter(Boolean).join(' ');
+  return fullName || member?.user?.username || value;
+}
+
+function memberTelegramLabel(value: string, members: ProjectMember[]) {
+  const resolvedValue = resolvePersonCellValue(value, members) || value;
+  const member = members.find((item) => String(item.userId) === String(resolvedValue));
+  const username = member?.user?.username?.replace(/^@/, '').trim();
+  if (username) return `@${username}`;
+  const fullName = memberFullName(resolvedValue, members);
+  return fullName || `ID ${resolvedValue}`;
+}
+
+function memberFullName(value: string, members: ProjectMember[]) {
+  const resolvedValue = resolvePersonCellValue(value, members) || value;
+  const member = members.find((item) => String(item.userId) === String(resolvedValue));
+  return [member?.user?.firstName, member?.user?.lastName].filter(Boolean).join(' ');
 }
 
 function compareTableCells(left: string, right: string, column: TableColumn, members: ProjectMember[]) {
@@ -3031,10 +5235,11 @@ function tableSummaryCell(column: TableColumn, columnIndex: number, visibleRows:
   return '';
 }
 
-function normalizeTableColumns(columns: TableColumn[] | undefined, count: number): TableColumn[] {
+function normalizeTableColumns(columns: TableColumn[] | undefined, count: number, tableKind?: unknown): TableColumn[] {
   return Array.from({ length: count }, (_, index) => ({
-    title: columns?.[index]?.title ?? `Столбец ${index + 1}`,
-    type: normalizeTableColumnType(columns?.[index]?.type),
+    key: columns?.[index]?.key,
+    title: normalizeTableColumnTitle(columns?.[index]?.title, index, tableKind),
+    type: normalizeTableColumnType(columns?.[index]?.type, columns?.[index]?.title, tableKind),
     options: columns?.[index]?.options,
     optionColors: normalizeSelectOptionColors(columns?.[index]?.options, columns?.[index]?.optionColors),
     personColors: columns?.[index]?.personColors,
@@ -3042,10 +5247,36 @@ function normalizeTableColumns(columns: TableColumn[] | undefined, count: number
   }));
 }
 
-function normalizeTableColumnType(type: unknown): TableColumnType {
+function normalizeTableColumnTitle(title: string | undefined, index: number, tableKind?: unknown) {
+  if (tableKind === 'duty_schedule' && isDutyAssigneeColumnTitle(title)) return 'Ответственный';
+  if (tableKind === 'duty_schedule' && index === 0 && (!title || title === 'Дата')) return 'Дата дежурства';
+  return title ?? `Столбец ${index + 1}`;
+}
+
+function normalizeTableColumnType(type: unknown, title?: string, tableKind?: unknown): TableColumnType {
+  if (tableKind === 'duty_schedule' && isDutyAssigneeColumnTitle(title)) return 'person';
   return TABLE_COLUMN_TYPES.some((option) => option.value === type)
     ? type as TableColumnType
     : 'text';
+}
+
+function isDutyAssigneeColumnTitle(title: string | undefined) {
+  return Boolean(title && title.toLowerCase().includes('ответствен'));
+}
+
+function resolvePersonCellValue(value: string, members: ProjectMember[]) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const direct = members.find((member) => String(member.userId) === text);
+  if (direct) return String(direct.userId);
+  const normalized = text.replace(/^@/, '').toLowerCase();
+  const byUsername = members.find((member) => member.user?.username?.replace(/^@/, '').toLowerCase() === normalized);
+  if (byUsername) return String(byUsername.userId);
+  const byName = members.find((member) => {
+    const fullName = [member.user?.firstName, member.user?.lastName].filter(Boolean).join(' ').toLowerCase();
+    return fullName === normalized || member.user?.firstName?.toLowerCase() === normalized;
+  });
+  return byName ? String(byName.userId) : '';
 }
 
 function normalizeSelectOptionColors(options: string[] | undefined, colors: Record<string, string> | undefined) {
@@ -3124,9 +5355,27 @@ function SmartSummary({
   blocks: Block[];
   members: ProjectMember[];
 }) {
-  const db = readDb();
+  const [activeTasks, setActiveTasks] = useState<Array<{ deadlineAt?: string }>>([]);
   const pageText = blocks.map((block) => extractBlockText(block.content)).join(' ');
-  const activeTasks = db.tasks.filter((task) => task.projectId === Number(projectId) && !task.isArchived);
+  useEffect(() => {
+    const pid = Number(projectId);
+    if (!Number.isFinite(pid)) {
+      setActiveTasks([]);
+      return;
+    }
+    let cancelled = false;
+    tasksApi
+      .getAllProjectTasks(pid)
+      .then((tasks) => {
+        if (!cancelled) setActiveTasks(tasks.filter((task) => !task.isArchived));
+      })
+      .catch(() => {
+        if (!cancelled) setActiveTasks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
   const deadlines = activeTasks.filter((task) => task.deadlineAt).length;
   const checked = blocks.filter((block) => block.type === 'todo' && block.content?.checked).length;
   const todos = blocks.filter((block) => block.type === 'todo').length;
@@ -3178,6 +5427,10 @@ function blockToPlainText(block: Block) {
 function cloneContent<T>(content: T): T {
   if (typeof structuredClone === 'function') return structuredClone(content);
   return JSON.parse(JSON.stringify(content));
+}
+
+function isInteractiveSelectionTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement && Boolean(target.closest('input, textarea, select, button, label'));
 }
 
 function normalizeInlineDates(value: string) {

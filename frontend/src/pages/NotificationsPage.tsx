@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { tasksApi } from '../api/tasks';
 import { remindersApi } from '../api/reminders';
 import { projectsApi } from '../api/projects';
-import { usePageStore } from '../store/pageStore';
+import { mentionsApi, type MentionFeedItem } from '../api/mentions';
 import { useProjectStore } from '../store/projectStore';
 import { useAuthStore } from '../store/authStore';
 import { markInboxRead } from '../services/inboxService';
@@ -24,27 +24,18 @@ function fmt(value?: string) {
   return new Date(value).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
-function blockText(content: any): string {
-  if (!content) return '';
-  if (typeof content === 'string') return content;
-  if (typeof content.text === 'string') return content.text;
-  if (typeof content.title === 'string') return content.title;
-  if (Array.isArray(content.rows)) return content.rows.flat().join(' ');
-  return '';
-}
-
 export default function NotificationsPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const pid = Number(projectId);
   const currentUser = useAuthStore((state) => state.user);
   const { currentProject, fetchProject } = useProjectStore();
-  const { nodes, blocks, loadProjectSpace } = usePageStore();
   const [activeTab, setActiveTab] = useState<'mine' | 'general'>('mine');
 
   const [assignedTasks, setAssignedTasks] = useState<Task[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [joinRequests, setJoinRequests] = useState<ProjectJoinRequest[]>([]);
+  const [mentionFeed, setMentionFeed] = useState<MentionFeedItem[]>([]);
 
   useEffect(() => {
     if (!pid) return;
@@ -53,15 +44,10 @@ export default function NotificationsPage() {
   }, [fetchProject, pid]);
 
   useEffect(() => {
-    if (!projectId || !currentProject) return;
-    loadProjectSpace(projectId, currentProject.title);
-  }, [currentProject, loadProjectSpace, projectId]);
-
-  useEffect(() => {
-    if (!projectId) return;
+    if (!projectId || !currentUser?.id) return;
     let cancelled = false;
 
-    tasksApi.getMyTasks()
+    tasksApi.getMyTasks(currentUser.id)
       .then((result) => {
         if (cancelled) return;
         const all = [...result.red, ...result.yellow, ...result.green, ...result.noDate]
@@ -78,35 +64,33 @@ export default function NotificationsPage() {
       })
       .catch(() => undefined);
 
-    projectsApi.getJoinRequests(pid)
+    projectsApi.getJoinRequests(pid, currentUser.id)
       .then((list) => { if (!cancelled) setJoinRequests(list.filter((r) => r.status === 'pending')); })
       .catch(() => { if (!cancelled) setJoinRequests([]); });
+
+    mentionsApi.list(projectId, currentUser.id)
+      .then((list) => { if (!cancelled) setMentionFeed(list); })
+      .catch(() => { if (!cancelled) setMentionFeed([]); });
 
     return () => { cancelled = true; };
   }, [projectId, pid, currentUser?.id]);
 
   const mentions = useMemo<FeedItem[]>(() => {
-    if (!projectId || !currentUser?.username) return [];
-    const key = `@${currentUser.username.toLowerCase()}`;
-    return blocks
-      .filter((block) => {
-        const node = nodes.find((item) => item.id === block.pageId);
-        if (!node || node.projectId !== String(projectId) || node.isDeleted) return false;
-        return blockText(block.content).toLowerCase().includes(key);
-      })
-      .map((block) => {
-        const node = nodes.find((item) => item.id === block.pageId);
-        return {
-          id: `mention-${block.id}`,
-          icon: '💬',
-          title: `Упоминание на «${node?.title ?? 'странице'}»`,
-          subtitle: blockText(block.content).slice(0, 80),
-          time: fmt(block.updatedAt),
-          onClick: () => node && navigate(`/project/${pid}/workspace/page/${node.id}`),
-        };
-      });
-  }, [blocks, nodes, projectId, currentUser?.username, navigate, pid]);
-
+    return mentionFeed.map((item) => ({
+      id: `mention-${item.id}`,
+      icon: '💬',
+      title: item.kind === 'task' ? `Упоминание в задаче: ${item.title}` : `Упоминание на странице: ${item.title}`,
+      subtitle: item.subtitle,
+      time: fmt(item.updatedAt),
+      onClick: () => {
+        if (item.kind === 'task' && item.pageId && item.taskId) {
+          navigate(`/project/${pid}/workspace/page/${item.pageId}?taskId=${item.taskId}`);
+          return;
+        }
+        if (item.pageId) navigate(`/project/${pid}/workspace/page/${item.pageId}`);
+      },
+    }));
+  }, [mentionFeed, navigate, pid]);
   const taskItems = useMemo<FeedItem[]>(
     () => assignedTasks.map((task) => {
       const hours = task.deadlineAt ? (new Date(task.deadlineAt).getTime() - Date.now()) / 3600000 : null;
@@ -214,3 +198,4 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
     </button>
   );
 }
+

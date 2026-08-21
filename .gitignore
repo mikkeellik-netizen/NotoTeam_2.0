@@ -15,6 +15,8 @@ build/
 # Logs
 *.log
 npm-debug.log*
+.tmp-smoke*/
+backend-api/.tmp-smoke*/
 
 # SQLite database (локальные данные)
 *.sqlite

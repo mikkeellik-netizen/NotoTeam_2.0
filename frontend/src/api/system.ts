@@ -37,6 +37,24 @@ export type SystemStats = {
   recentUsers: SystemUserRow[];
 };
 
+export type SystemSecurityEvent = {
+  id: string;
+  type: string;
+  actorUserId?: string;
+  projectId?: string;
+  targetUserId?: string;
+  outcome: string;
+  details: Record<string, string | number | boolean>;
+  createdAt: string;
+};
+
+export type SystemSecurityEventsResponse = {
+  events: SystemSecurityEvent[];
+  total: number;
+  offset: number;
+  limit: number;
+};
+
 function actorQuery(actorUserId: number | string) {
   return `actorUserId=${encodeURIComponent(String(actorUserId))}`;
 }
@@ -48,6 +66,14 @@ export const systemApi = {
 
   stats(actorUserId: number | string) {
     return apiRequest<SystemStats>(`/system/stats?${actorQuery(actorUserId)}`);
+  },
+
+  securityEvents(actorUserId: number | string, params: { offset?: number; limit?: number } = {}) {
+    const offset = Math.max(0, Number(params.offset ?? 0));
+    const limit = Math.min(500, Math.max(1, Number(params.limit ?? 50)));
+    return apiRequest<SystemSecurityEventsResponse>(
+      `/system/security-events?${actorQuery(actorUserId)}&paginated=1&offset=${offset}&limit=${limit}`,
+    );
   },
 
   exportUrl(actorUserId: number | string, format: 'csv' | 'json') {

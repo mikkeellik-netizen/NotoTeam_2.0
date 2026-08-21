@@ -58,8 +58,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   updateTask: async (id, data) => {
     const updated = await tasksApi.update(id, data);
     set((s) => ({
-      tasks: s.tasks.map((t) => (t.id === id ? mergeTaskUpdate(t, updated) : t)),
-      selectedTask: s.selectedTask?.id === id ? mergeTaskUpdate(s.selectedTask, updated) : s.selectedTask,
+      tasks: s.tasks.map((t) => (sameId(t.id, id) ? mergeTaskUpdate(t, updated) : t)),
+      selectedTask: s.selectedTask && sameId(s.selectedTask.id, id) ? mergeTaskUpdate(s.selectedTask, updated) : s.selectedTask,
     }));
   },
 
@@ -67,17 +67,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const updated = await tasksApi.move(id, columnId, position);
     set((s) => ({
       tasks: updated.isArchived
-        ? s.tasks.filter((t) => t.id !== id)
-        : s.tasks.map((t) => (t.id === id ? updated : t)),
+        ? s.tasks.filter((t) => !sameId(t.id, id))
+        : applyTaskMove(s.tasks, id, updated, columnId, position),
+      selectedTask: s.selectedTask && sameId(s.selectedTask.id, id) ? mergeTaskUpdate(s.selectedTask, updated) : s.selectedTask,
     }));
   },
 
   reorderTasks: async (columnId, orderedIds) => {
     await tasksApi.reorder(columnId, orderedIds);
     // Обновляем позиции локально
+    const order = new Map(orderedIds.map((id, index) => [String(id), index]));
     set((s) => ({
       tasks: s.tasks.map((t) => {
-        const idx = orderedIds.indexOf(t.id);
+        const idx = order.get(String(t.id)) ?? -1;
         return idx !== -1 ? { ...t, position: idx, columnId } : t;
       }),
     }));
@@ -85,12 +87,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   archiveTask: async (id) => {
     await tasksApi.archive(id);
-    set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) }));
+    set((s) => ({ tasks: s.tasks.filter((t) => !sameId(t.id, id)) }));
   },
 
   removeTask: async (id) => {
     await tasksApi.remove(id);
-    set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) }));
+    set((s) => ({ tasks: s.tasks.filter((t) => !sameId(t.id, id)) }));
   },
 
   // ─── Подзадачи ────────────────────────────────────────────
@@ -98,9 +100,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const subtask = await tasksApi.createSubtask(taskId, title);
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === taskId ? { ...t, subtasks: [...(t.subtasks ?? []), subtask] } : t,
+        sameId(t.id, taskId) ? { ...t, subtasks: [...(t.subtasks ?? []), subtask] } : t,
       ),
-      selectedTask: s.selectedTask?.id === taskId
+      selectedTask: s.selectedTask && sameId(s.selectedTask.id, taskId)
         ? { ...s.selectedTask, subtasks: [...(s.selectedTask.subtasks ?? []), subtask] }
         : s.selectedTask,
     }));
@@ -110,13 +112,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   toggleSubtask: async (taskId, subtaskId) => {
     const { subtask } = await tasksApi.toggleSubtask(taskId, subtaskId);
     const updateSubtasks = (subtasks: Subtask[]) =>
-      subtasks.map((s) => (s.id === subtaskId ? subtask : s));
+      subtasks.map((s) => (sameId(s.id, subtaskId) ? subtask : s));
 
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === taskId ? { ...t, subtasks: updateSubtasks(t.subtasks ?? []) } : t,
+        sameId(t.id, taskId) ? { ...t, subtasks: updateSubtasks(t.subtasks ?? []) } : t,
       ),
-      selectedTask: s.selectedTask?.id === taskId
+      selectedTask: s.selectedTask && sameId(s.selectedTask.id, taskId)
         ? { ...s.selectedTask, subtasks: updateSubtasks(s.selectedTask.subtasks ?? []) }
         : s.selectedTask,
     }));
@@ -125,13 +127,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   updateSubtask: async (taskId, subtaskId, title) => {
     const updated = await tasksApi.updateSubtask(taskId, subtaskId, title);
     const updateSubtasks = (subtasks: Subtask[]) =>
-      subtasks.map((s) => (s.id === subtaskId ? updated : s));
+      subtasks.map((s) => (sameId(s.id, subtaskId) ? updated : s));
 
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === taskId ? { ...t, subtasks: updateSubtasks(t.subtasks ?? []) } : t,
+        sameId(t.id, taskId) ? { ...t, subtasks: updateSubtasks(t.subtasks ?? []) } : t,
       ),
-      selectedTask: s.selectedTask?.id === taskId
+      selectedTask: s.selectedTask && sameId(s.selectedTask.id, taskId)
         ? { ...s.selectedTask, subtasks: updateSubtasks(s.selectedTask.subtasks ?? []) }
         : s.selectedTask,
     }));
@@ -141,21 +143,58 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     await tasksApi.deleteSubtask(taskId, subtaskId);
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === taskId
-          ? { ...t, subtasks: (t.subtasks ?? []).filter((sub) => sub.id !== subtaskId) }
+        sameId(t.id, taskId)
+          ? { ...t, subtasks: (t.subtasks ?? []).filter((sub) => !sameId(sub.id, subtaskId)) }
           : t,
       ),
-      selectedTask: s.selectedTask?.id === taskId
-        ? { ...s.selectedTask, subtasks: (s.selectedTask.subtasks ?? []).filter((sub) => sub.id !== subtaskId) }
+      selectedTask: s.selectedTask && sameId(s.selectedTask.id, taskId)
+        ? { ...s.selectedTask, subtasks: (s.selectedTask.subtasks ?? []).filter((sub) => !sameId(sub.id, subtaskId)) }
         : s.selectedTask,
     }));
   },
 
   getTasksByColumn: (columnId) =>
     get().tasks
-      .filter((t) => t.columnId === columnId)
-      .sort((a, b) => a.position - b.position),
+      .filter((t) => sameId(t.columnId, columnId))
+      .sort((a, b) => Number(a.position) - Number(b.position)),
 }));
+
+function sameId(a: unknown, b: unknown) {
+  return a !== undefined && a !== null && b !== undefined && b !== null && String(a) === String(b);
+}
+
+function applyTaskMove(tasks: Task[], id: number, updated: Task, targetColumnId: number, position?: number): Task[] {
+  const previous = tasks.find((task) => sameId(task.id, id));
+  const movingTask = previous ? mergeTaskUpdate(previous, updated) : updated;
+  const sourceColumnId = previous?.columnId ?? movingTask.columnId;
+  const nextColumnId = updated.columnId ?? targetColumnId;
+  const withoutMoving = tasks.filter((task) => !sameId(task.id, id));
+  const targetTasks = withoutMoving
+    .filter((task) => sameId(task.columnId, nextColumnId))
+    .sort((a, b) => Number(a.position) - Number(b.position));
+  const insertPosition = Math.max(
+    0,
+    Math.min(Number.isFinite(Number(position)) ? Number(position) : targetTasks.length, targetTasks.length),
+  );
+  const movedTask = { ...movingTask, columnId: nextColumnId, position: insertPosition };
+  targetTasks.splice(insertPosition, 0, movedTask);
+
+  const changed = new Map<string, Task>();
+  targetTasks.forEach((task, index) => {
+    changed.set(String(task.id), { ...task, columnId: nextColumnId, position: index });
+  });
+
+  if (!sameId(sourceColumnId, nextColumnId)) {
+    withoutMoving
+      .filter((task) => sameId(task.columnId, sourceColumnId))
+      .sort((a, b) => Number(a.position) - Number(b.position))
+      .forEach((task, index) => {
+        changed.set(String(task.id), { ...task, position: index });
+      });
+  }
+
+  return [...withoutMoving, movedTask].map((task) => changed.get(String(task.id)) ?? task);
+}
 
 function mergeTaskUpdate(previous: Task, updated: Task): Task {
   return {

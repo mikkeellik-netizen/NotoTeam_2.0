@@ -1,10 +1,10 @@
 import type { ParsedTask, Priority } from "../types.js";
-import { parseDateTime } from "./dateParser.js";
+import { parseDateTime, stripDateTimePhrases } from "./dateParser.js";
 
 const priorityWords: Array<[RegExp, Priority]> = [
-  [/(критично|срочно|горит|asap)/i, "CRITICAL"],
-  [/(важно|высок)/i, "HIGH"],
-  [/(низк|не срочно)/i, "LOW"],
+  [/(критично|срочно|горит|asap|critical|urgent)/i, "CRITICAL"],
+  [/(важно|высок(?:ий|ая|ое|о)?|high)/i, "HIGH"],
+  [/(низк(?:ий|ая|ое|о)?|не срочно|low)/i, "LOW"],
 ];
 
 export class TaskParser {
@@ -31,24 +31,26 @@ export class TaskParser {
   }
 
   private parseDeadline(text: string) {
-    // Единый парсер: DD.MM.YYYY / DD.MM.YY / DD.MM, время HH:MI,
-    // а также завтра/послезавтра/через N дней/сегодня. Для задач час по умолчанию — 12:00.
     const date = parseDateTime(text, { defaultHour: 12 });
     return date ? date.toISOString() : undefined;
   }
 
   private cleanTitle(text: string, assigneeUsername?: string) {
-    let result = text
-      .replace(/^\/new\s*/i, "")
-      .replace(/^(создай|поставь|добавь|назначь)\s+(задачу\s+)?/i, "")
-      .replace(/(срочно|критично|важно|не срочно|asap)/gi, "")
-      .replace(/до\s+\d{1,2}[:.]\d{2}/gi, "")
-      .replace(/через\s+\d+\s+д\w*/gi, "")
-      .replace(/\d{1,2}[./]\d{1,2}([./]\d{2,4})?/g, "")
+    let result = stripDateTimePhrases(text)
+      .replace(/^\/(?:new|task)\s*/i, "")
+      .replace(/^(создай|создать|поставь|добавь|назначь)\s+(задачу\s+)?/i, "")
+      .replace(/\b(срочно|критично|важно|не срочно|asap|critical|urgent|high|low)\b/gi, "")
+      .replace(/\b(должен|должна|должны|надо|нужно)\b/gi, " ")
       .replace(/\s+/g, " ")
       .trim();
 
-    if (assigneeUsername) result = result.replace(`@${assigneeUsername}`, "").trim();
+    if (assigneeUsername) {
+      result = result.replace(new RegExp(`@${escapeRegExp(assigneeUsername)}`, "i"), "").trim();
+    }
     return result;
   }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

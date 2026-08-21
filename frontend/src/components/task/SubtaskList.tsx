@@ -5,9 +5,10 @@ import type { Subtask } from '../../types';
 interface Props {
   taskId: number;
   subtasks: Subtask[];
+  canEdit?: boolean;
 }
 
-export default function SubtaskList({ taskId, subtasks }: Props) {
+export default function SubtaskList({ taskId, subtasks, canEdit = true }: Props) {
   const { createSubtask, toggleSubtask, updateSubtask, deleteSubtask } = useTaskStore();
   const [newTitle, setNewTitle] = useState('');
   const [showInput, setShowInput] = useState(false);
@@ -20,19 +21,20 @@ export default function SubtaskList({ taskId, subtasks }: Props) {
   const percent = total ? Math.round((completed / total) * 100) : 0;
 
   const handleAdd = async () => {
-    if (!newTitle.trim()) return;
+    if (!canEdit || !newTitle.trim()) return;
     await createSubtask(taskId, newTitle.trim());
     setNewTitle('');
     setShowInput(false);
   };
 
   const handleEdit = async (id: number) => {
-    if (!editTitle.trim()) return;
+    if (!canEdit || !editTitle.trim()) return;
     await updateSubtask(taskId, id, editTitle.trim());
     setEditingId(null);
   };
 
   const startEdit = (s: Subtask) => {
+    if (!canEdit) return;
     setEditingId(s.id);
     setEditTitle(s.title);
   };
@@ -70,6 +72,7 @@ export default function SubtaskList({ taskId, subtasks }: Props) {
             {/* Checkbox */}
             <button
               onClick={() => toggleSubtask(taskId, s.id)}
+              disabled={!canEdit}
               className={`w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors ${
                 s.isCompleted
                   ? 'bg-green-500 border-green-500'
@@ -112,6 +115,7 @@ export default function SubtaskList({ taskId, subtasks }: Props) {
             {/* Удалить */}
             <button
               onClick={() => deleteSubtask(taskId, s.id)}
+              disabled={!canEdit}
               className="opacity-0 group-hover:opacity-100 active:opacity-100 text-[var(--tg-theme-hint-color)] p-1 transition-opacity"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -123,7 +127,7 @@ export default function SubtaskList({ taskId, subtasks }: Props) {
       </div>
 
       {/* Добавить подзадачу */}
-      {showInput ? (
+      {canEdit && showInput ? (
         <div className="flex items-center gap-2 mt-2">
           <div className="w-5 h-5 rounded-md border-2 border-dashed border-[var(--tg-theme-hint-color)] shrink-0" />
           <input
@@ -146,7 +150,7 @@ export default function SubtaskList({ taskId, subtasks }: Props) {
             Добавить
           </button>
         </div>
-      ) : (
+      ) : canEdit ? (
         <button
           onClick={() => setShowInput(true)}
           className="flex items-center gap-1.5 text-sm text-[var(--tg-theme-link-color)] mt-1 py-1"
@@ -156,7 +160,7 @@ export default function SubtaskList({ taskId, subtasks }: Props) {
           </svg>
           Добавить подзадачу
         </button>
-      )}
+      ) : null}
 
       {/* 100% — предложение закрыть */}
       {percent === 100 && total > 0 && (

@@ -3,8 +3,10 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { calendarApi } from '../api/calendar';
 import { tasksApi } from '../api/tasks';
 import ContextMenu from '../components/common/ContextMenu';
+import { useAuthStore } from '../store/authStore';
 import { useProjectStore } from '../store/projectStore';
 import type { CalendarCategory, CalendarEvent, CalendarEventType, Task } from '../types';
+import { getProjectPermissions } from '../utils/projectPermissions';
 
 type ViewMode = 'year' | 'month' | 'week' | 'day' | 'list';
 type CalendarItem =
@@ -47,6 +49,7 @@ export default function CalendarPage() {
   const navigate = useNavigate();
   const pid = Number(projectId);
   const { currentProject, fetchProject, updateProject } = useProjectStore();
+  const currentUserId = useAuthStore((state) => state.user?.id);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [view, setView] = useState<ViewMode>('month');
@@ -62,6 +65,8 @@ export default function CalendarPage() {
   const [showKanbanDeadlines, setShowKanbanDeadlines] = useState(() => localStorage.getItem(DEADLINES_KEY) !== '0');
 
   const members = currentProject?.members ?? [];
+  const permissions = useMemo(() => getProjectPermissions(currentProject, currentUserId), [currentProject, currentUserId]);
+  const canManageCalendar = Boolean(permissions.manageCalendar);
   const calendarTypeOptions = useMemo(
     () => [
       ...BASE_TYPE_OPTIONS,
@@ -109,12 +114,14 @@ export default function CalendarPage() {
   }, [projectId]);
 
   const openCreateForm = () => {
+    if (!canManageCalendar) return;
     setEditingEvent(null);
     setForm(emptyForm());
     setShowForm(true);
   };
 
   const openEditForm = (event: CalendarEvent) => {
+    if (!canManageCalendar) return;
     setSelectedEvent(null);
     setEditingEvent(event);
     setForm({
@@ -140,7 +147,7 @@ export default function CalendarPage() {
   };
 
   const saveEvent = async () => {
-    if (!projectId || !form.title.trim()) return;
+    if (!canManageCalendar || !projectId || !form.title.trim()) return;
     const participantUserIds = form.visibility === 'project' ? members.map((member) => String(member.userId)) : form.selectedUserIds;
     const selectedCategory = calendarTypeOptions.find((option) => option.id === form.categoryId);
     const payload = {
@@ -175,7 +182,7 @@ export default function CalendarPage() {
   };
 
   const createCalendarCategory = async () => {
-    if (!pid || !categoryDraft.label.trim()) return;
+    if (!canManageCalendar || !pid || !categoryDraft.label.trim()) return;
     const category: CalendarCategory = {
       id: `category_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       label: categoryDraft.label.trim(),
@@ -196,7 +203,7 @@ export default function CalendarPage() {
   };
 
   const removeEvent = async () => {
-    if (!eventToDelete) return;
+    if (!canManageCalendar || !eventToDelete) return;
     await calendarApi.remove(eventToDelete.id);
     setEvents((items) => items.filter((item) => item.id !== eventToDelete.id));
     setSelectedEvent(null);
@@ -220,6 +227,7 @@ export default function CalendarPage() {
   };
 
   const openEventMenu = (event: CalendarEvent, x: number, y: number) => {
+    if (!canManageCalendar) return;
     setContextEvent({ event, x, y });
   };
 
@@ -235,7 +243,9 @@ export default function CalendarPage() {
             <h1 className="truncate text-lg font-bold">📅 Календарь</h1>
             <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">{currentProject?.title ?? 'Проект'}</p>
           </div>
-          <button onClick={openCreateForm} className="h-9 rounded-full bg-[var(--tg-theme-button-color)] px-4 text-sm font-semibold text-[var(--tg-theme-button-text-color)]">+</button>
+          {canManageCalendar && (
+            <button onClick={openCreateForm} className="h-9 rounded-full bg-[var(--tg-theme-button-color)] px-4 text-sm font-semibold text-[var(--tg-theme-button-text-color)]">+</button>
+          )}
         </div>
 
         <div className="mt-3 flex gap-1 overflow-x-auto">
@@ -292,7 +302,7 @@ export default function CalendarPage() {
         )}
       </div>
 
-      {showForm && (
+      {showForm && canManageCalendar && (
         <div className="fixed inset-0 z-[90] flex items-end bg-black/50" onClick={() => setShowForm(false)}>
           <div className="max-h-[88vh] w-full overflow-y-auto rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-4" onClick={(event) => event.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
@@ -379,10 +389,11 @@ export default function CalendarPage() {
           onClose={() => setSelectedEvent(null)}
           onEdit={() => openEditForm(selectedEvent)}
           onDelete={() => setEventToDelete(selectedEvent)}
+          canManage={canManageCalendar}
         />
       )}
 
-      {showCategoryForm && (
+      {showCategoryForm && canManageCalendar && (
         <div className="fixed inset-0 z-[98] flex items-end bg-black/50" onClick={() => setShowCategoryForm(false)}>
           <div className="w-full rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5" onClick={(event) => event.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
@@ -419,7 +430,7 @@ export default function CalendarPage() {
         </div>
       )}
 
-      {eventToDelete && (
+      {eventToDelete && canManageCalendar && (
         <DeleteEventModal
           event={eventToDelete}
           onCancel={() => setEventToDelete(null)}
@@ -427,7 +438,7 @@ export default function CalendarPage() {
         />
       )}
 
-      {contextEvent && (
+      {contextEvent && canManageCalendar && (
         <ContextMenu
           title={contextEvent.event.title}
           x={contextEvent.x}
@@ -585,11 +596,13 @@ function EventDetails({
   onClose,
   onEdit,
   onDelete,
+  canManage,
 }: {
   event: CalendarEvent;
   onClose: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  canManage: boolean;
 }) {
   return (
     <div className="fixed inset-0 z-[88] flex items-end bg-black/50" onClick={onClose}>
@@ -604,6 +617,7 @@ function EventDetails({
           <button onClick={onClose} className="h-8 w-8 rounded-full bg-[var(--tg-theme-secondary-bg-color)]">×</button>
         </div>
         {event.description && <p className="mb-4 whitespace-pre-wrap rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3 text-sm">{event.description}</p>}
+        {canManage && (
         <div className="flex gap-3">
           <button onClick={onEdit} className="flex-1 rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 text-sm font-semibold text-[var(--tg-theme-button-text-color)]">
             Редактировать
@@ -612,6 +626,7 @@ function EventDetails({
             Удалить
           </button>
         </div>
+        )}
       </div>
     </div>
   );

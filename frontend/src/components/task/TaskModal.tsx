@@ -4,8 +4,16 @@ import { useTaskStore } from '../../store/taskStore';
 import { usePageStore } from '../../store/pageStore';
 import { useProjectStore } from '../../store/projectStore';
 import SubtaskList from './SubtaskList';
-import type { Task, Priority, ProjectMember } from '../../types';
-import { PRIORITY_LABEL, PRIORITY_COLOR, getDeadlineZone } from '../../types';
+import type { Task, Priority, ProjectMember, TaskImportanceScore } from '../../types';
+import {
+  PRIORITY_LABEL,
+  PRIORITY_COLOR,
+  TASK_IMPORTANCE_LABEL,
+  calculateTaskSignificanceScore,
+  getDeadlineZone,
+  getTaskSignificanceLabel,
+  normalizeTaskImportanceScore,
+} from '../../types';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 
@@ -13,6 +21,9 @@ interface Props {
   task: Task;
   members: ProjectMember[];
   onClose: () => void;
+  canEdit?: boolean;
+  canMove?: boolean;
+  canArchive?: boolean;
 }
 
 const PRIORITIES: Priority[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -22,7 +33,7 @@ const COLOR_LABELS = [
   '#3B82F6', '#8B5CF6', '#EC4899', '#6B7280',
 ];
 
-export default function TaskModal({ task, members, onClose }: Props) {
+export default function TaskModal({ task, members, onClose, canEdit = true, canMove = true, canArchive = true }: Props) {
   const { updateTask, moveTask, archiveTask } = useTaskStore();
   const { projectId } = useParams<{ projectId?: string }>();
   const navigate = useNavigate();
@@ -32,6 +43,8 @@ export default function TaskModal({ task, members, onClose }: Props) {
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description ?? '');
   const [priority, setPriority] = useState<Priority>(task.priority);
+  const [importanceScore, setImportanceScore] = useState<TaskImportanceScore>(normalizeTaskImportanceScore(task.importanceScore));
+  const [isBlocking, setIsBlocking] = useState(Boolean(task.isBlocking));
   const [assigneeId, setAssigneeId] = useState<number | undefined>(task.assigneeId ?? task.assignee?.id);
   const [deadlineAt, setDeadlineAt] = useState(
     task.deadlineAt ? task.deadlineAt.slice(0, 16) : '',
@@ -43,6 +56,12 @@ export default function TaskModal({ task, members, onClose }: Props) {
 
   const zone = getDeadlineZone(task.deadlineAt);
   const zoneColor = zone === 'red' ? '#EF4444' : zone === 'yellow' ? '#F59E0B' : '#22C55E';
+  const significanceScore = calculateTaskSignificanceScore({
+    priority,
+    deadlineAt: deadlineAt || undefined,
+    importanceScore,
+    isBlocking,
+  });
   const visibleColumns = [...columns]
     .filter((column) => !column.isHidden)
     .sort((a, b) => a.position - b.position);
@@ -54,19 +73,23 @@ export default function TaskModal({ task, members, onClose }: Props) {
     title !== task.title ||
     description !== (task.description ?? '') ||
     priority !== task.priority ||
+    importanceScore !== normalizeTaskImportanceScore(task.importanceScore) ||
+    isBlocking !== Boolean(task.isBlocking) ||
     assigneeId !== (task.assigneeId ?? task.assignee?.id) ||
     deadlineAt !== (task.deadlineAt ? task.deadlineAt.slice(0, 16) : '') ||
     colorLabel !== (task.colorLabel ?? '') ||
     JSON.stringify(linkedPageIds) !== JSON.stringify(task.linkedPageIds ?? []);
 
   const handleSave = async () => {
-    if (!title.trim()) return;
+    if (!canEdit || !title.trim()) return;
     setSaving(true);
     try {
       await updateTask(task.id, {
         title: title.trim(),
         description,
         priority,
+        importanceScore,
+        isBlocking,
         assigneeId,
         deadlineAt: deadlineAt || undefined,
         colorLabel: colorLabel || undefined,
@@ -79,6 +102,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
   };
 
   const handleMoveToFinalColumn = async () => {
+    if (!canMove) return;
     if (finalColumn) {
       await moveTask(task.id, finalColumn.id);
     }
@@ -86,6 +110,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
   };
 
   const handleArchiveAction = async () => {
+    if (!canArchive) return;
     await archiveTask(task.id);
     onClose();
   };
@@ -119,6 +144,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
           <textarea
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            readOnly={!canEdit}
             rows={2}
             className="w-full text-lg font-bold text-[var(--tg-theme-text-color)] bg-transparent resize-none outline-none leading-tight"
             placeholder="Название задачи"
@@ -130,6 +156,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
             <select
               value={priority}
               onChange={(e) => setPriority(e.target.value as Priority)}
+              disabled={!canEdit}
               className="text-xs px-2.5 py-1 rounded-full font-medium border-0 outline-none"
               style={{
                 backgroundColor: PRIORITY_COLOR[priority] + '20',
@@ -140,6 +167,10 @@ export default function TaskModal({ task, members, onClose }: Props) {
                 <option key={p} value={p}>{PRIORITY_LABEL[p]}</option>
               ))}
             </select>
+
+            <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-red-500/10 text-red-400">
+              {significanceScore}/10 · {getTaskSignificanceLabel(significanceScore)}
+            </span>
 
             {/* Дедлайн */}
             {task.deadlineAt && (
@@ -160,10 +191,45 @@ export default function TaskModal({ task, members, onClose }: Props) {
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              readOnly={!canEdit}
               rows={3}
               placeholder="Добавь описание..."
               className="w-full px-3 py-2.5 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] placeholder:text-[var(--tg-theme-hint-color)] outline-none text-sm resize-none"
             />
+          </div>
+
+          <div className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Значимость</p>
+                <p className="text-xs text-[var(--tg-theme-hint-color)]">Для оценки существенности просрочки</p>
+              </div>
+              <span className="rounded-full bg-[var(--tg-theme-bg-color)] px-2 py-1 text-xs font-semibold text-[var(--tg-theme-hint-color)]">
+                {importanceScore}/5
+              </span>
+            </div>
+            <div className="grid grid-cols-5 gap-1.5">
+              {([1, 2, 3, 4, 5] as TaskImportanceScore[]).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setImportanceScore(value)}
+                  disabled={!canEdit}
+                  className={`rounded-[9px] px-1 py-2 text-xs font-semibold ${
+                    importanceScore === value
+                      ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                      : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]'
+                  }`}
+                  title={TASK_IMPORTANCE_LABEL[value]}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+            <label className="mt-3 flex items-center justify-between gap-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-text-color)]">
+              <span>Блокирует других</span>
+              <input type="checkbox" checked={isBlocking} onChange={(event) => setIsBlocking(event.target.checked)} disabled={!canEdit} />
+            </label>
           </div>
 
           {/* Подзадачи */}
@@ -171,7 +237,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
             <label className="text-xs text-[var(--tg-theme-hint-color)] font-medium mb-2 block">
               Подзадачи {subtasks.length > 0 && `(${completedSubtasks}/${subtasks.length})`}
             </label>
-            <SubtaskList taskId={task.id} subtasks={subtasks} />
+            <SubtaskList taskId={task.id} subtasks={subtasks} canEdit={canEdit} />
           </div>
 
           {/* Исполнитель */}
@@ -182,6 +248,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
             <select
               value={assigneeId ?? ''}
               onChange={(e) => setAssigneeId(e.target.value ? Number(e.target.value) : undefined)}
+              disabled={!canEdit}
               className="w-full px-3 py-2.5 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] outline-none text-sm"
             >
               <option value="">Не назначен</option>
@@ -204,6 +271,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
               type="datetime-local"
               value={deadlineAt}
               onChange={(e) => setDeadlineAt(e.target.value)}
+              disabled={!canEdit}
               className="w-full px-3 py-2.5 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] outline-none text-sm"
             />
           </div>
@@ -216,6 +284,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
             <div className="flex gap-2 flex-wrap">
               <button
                 onClick={() => setColorLabel('')}
+                disabled={!canEdit}
                 className={`w-7 h-7 rounded-full border-2 flex items-center justify-center ${
                   !colorLabel ? 'border-[var(--tg-theme-button-color)]' : 'border-transparent'
                 } bg-[var(--tg-theme-secondary-bg-color)]`}
@@ -228,6 +297,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
                 <button
                   key={c}
                   onClick={() => setColorLabel(c)}
+                  disabled={!canEdit}
                   className="w-7 h-7 rounded-full border-2 transition-transform active:scale-90"
                   style={{
                     backgroundColor: c,
@@ -246,9 +316,11 @@ export default function TaskModal({ task, members, onClose }: Props) {
             <select
               value=""
               onChange={(event) => {
+                if (!canEdit) return;
                 if (!event.target.value) return;
                 setLinkedPageIds((ids) => [...new Set([...ids, event.target.value])]);
               }}
+              disabled={!canEdit}
               className="w-full px-3 py-2.5 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] outline-none text-sm"
             >
               <option value="">Прикрепить страницу</option>
@@ -272,6 +344,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
                   </button>
                   <button
                     onClick={() => setLinkedPageIds((ids) => ids.filter((id) => id !== page.id))}
+                    disabled={!canEdit}
                     className="text-[var(--tg-theme-hint-color)]"
                   >
                     ×
@@ -284,7 +357,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
 
         {/* Кнопки действий */}
         <div className="px-4 pb-6 pt-3 space-y-2 border-t border-[var(--tg-theme-secondary-bg-color)]">
-          {isDirty && (
+          {canEdit && isDirty && (
             <button
               onClick={handleSave}
               disabled={saving || !title.trim()}
@@ -294,7 +367,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
             </button>
           )}
 
-          {showArchiveConfirm ? (
+          {(canMove || canArchive) && showArchiveConfirm ? (
             <div className="flex gap-2">
               <button
                 onClick={() => setShowArchiveConfirm(false)}
@@ -302,7 +375,7 @@ export default function TaskModal({ task, members, onClose }: Props) {
               >
                 Отмена
               </button>
-              {!isInFinalColumn && (
+              {canMove && !isInFinalColumn && (
                 <button
                   onClick={handleMoveToFinalColumn}
                   className="flex-1 py-3 rounded-[12px] bg-green-500 text-white font-semibold"
@@ -310,21 +383,23 @@ export default function TaskModal({ task, members, onClose }: Props) {
                   {finalColumnActionLabel}
                 </button>
               )}
-              <button
-                onClick={handleArchiveAction}
+              {canArchive && (
+                <button
+                  onClick={handleArchiveAction}
                 className="flex-1 py-3 rounded-[12px] bg-red-500 text-white font-semibold"
               >
                 В архив
-              </button>
+                </button>
+              )}
             </div>
-          ) : (
+          ) : (canMove || canArchive) ? (
             <button
               onClick={() => setShowArchiveConfirm(true)}
               className="w-full py-3 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)] font-medium"
             >
               {isInFinalColumn ? 'В архив' : 'Закрыть задачу'}
             </button>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
