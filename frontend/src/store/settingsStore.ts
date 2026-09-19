@@ -65,6 +65,9 @@ function applyTheme(theme: ThemeMode) {
   const dark = theme === 'dark' || (theme === 'system' && prefersDark);
   const root = document.documentElement;
 
+  root.dataset.theme = dark ? 'dark' : 'light';
+  root.style.colorScheme = dark ? 'dark' : 'light';
+
   root.style.setProperty('--tg-theme-bg-color', dark ? '#0f172a' : '#ffffff');
   root.style.setProperty('--tg-theme-text-color', dark ? '#e5e7eb' : '#111827');
   root.style.setProperty('--tg-theme-hint-color', dark ? '#94a3b8' : '#6b7280');

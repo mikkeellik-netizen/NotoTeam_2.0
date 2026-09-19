@@ -5,6 +5,7 @@ import { useSettingsStore } from './store/settingsStore';
 import LoginPage from './pages/LoginPage';
 import { isWorkspaceApiConfigured } from './api/httpClient';
 import ProjectAccessGate from './components/common/ProjectAccessGate';
+import { Button, Surface } from './components/ui';
 
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
 const BoardPage = lazy(() => import('./pages/BoardPage'));
@@ -45,16 +46,16 @@ export default function App() {
 
   if (!isWorkspaceApiConfigured) {
     return (
-      <div className="flex h-full items-center justify-center bg-[var(--tg-theme-bg-color)] px-5">
-        <div className="max-w-md rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-5 text-[var(--tg-theme-text-color)]">
+      <div className="flex h-full items-center justify-center bg-[var(--nt-color-canvas)] px-5">
+        <Surface tone="raised" className="max-w-md">
           <h1 className="text-lg font-bold">Ошибка конфигурации</h1>
-          <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">
+          <p className="mt-2 text-sm text-[var(--nt-color-text-muted)]">
             Не задана обязательная переменная VITE_WORKSPACE_API_URL. Приложение больше не запускается в localStorage-режиме, чтобы рабочие данные не терялись при обновлениях.
           </p>
-          <pre className="mt-3 overflow-x-auto rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3 text-xs">
+          <pre className="mt-3 overflow-x-auto rounded-[var(--nt-radius-control)] bg-[var(--nt-color-canvas)] p-3 text-xs">
             VITE_WORKSPACE_API_URL=http://127.0.0.1:8787
           </pre>
-        </div>
+        </Surface>
       </div>
     );
   }
@@ -63,8 +64,8 @@ export default function App() {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
-          <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--tg-theme-button-color)] border-t-transparent" />
-          <p className="text-sm text-[var(--tg-theme-hint-color)]">Загрузка...</p>
+          <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--nt-color-accent)] border-t-transparent" />
+          <p className="text-sm text-[var(--nt-color-text-muted)]">Загрузка...</p>
         </div>
       </div>
     );
@@ -73,17 +74,17 @@ export default function App() {
   // В Telegram авторизация автоматическая — если не вышло, показываем ошибку с повтором
   if (!isAuthed && inTelegram) {
     return (
-      <div className="flex h-full items-center justify-center bg-[var(--tg-theme-bg-color)] px-5">
-        <div className="max-w-md rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-5 text-center text-[var(--tg-theme-text-color)]">
+      <div className="flex h-full items-center justify-center bg-[var(--nt-color-canvas)] px-5">
+        <Surface tone="raised" className="max-w-md text-center">
           <h1 className="text-lg font-bold">Не удалось войти</h1>
-          <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">{error ?? 'Откройте приложение через бота.'}</p>
-          <button
+          <p className="mt-2 text-sm text-[var(--nt-color-text-muted)]">{error ?? 'Откройте приложение через бота.'}</p>
+          <Button
             onClick={() => init()}
-            className="mt-4 rounded-[12px] bg-[var(--tg-theme-button-color)] px-5 py-3 font-semibold text-[var(--tg-theme-button-text-color)]"
+            className="mt-4"
           >
             Повторить
-          </button>
-        </div>
+          </Button>
+        </Surface>
       </div>
     );
   }
@@ -152,8 +153,8 @@ function RouteFallback() {
   return (
     <div className="flex h-full items-center justify-center">
       <div className="text-center">
-        <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--tg-theme-button-color)] border-t-transparent" />
-        <p className="text-sm text-[var(--tg-theme-hint-color)]">Загрузка...</p>
+        <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--nt-color-accent)] border-t-transparent" />
+        <p className="text-sm text-[var(--nt-color-text-muted)]">Загрузка...</p>
       </div>
     </div>
   );

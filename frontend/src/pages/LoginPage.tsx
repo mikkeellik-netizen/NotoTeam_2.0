@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { getStoredSessionToken } from '../api/httpClient';
+import { Button, Surface, TextField } from '../components/ui';
 
 export default function LoginPage() {
   const requestCode = useAuthStore((state) => state.requestCode);
@@ -67,10 +68,10 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex h-full items-center justify-center bg-[var(--tg-theme-bg-color)] px-5">
-      <div className="w-full max-w-sm rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] p-6 text-[var(--tg-theme-text-color)]">
+    <div className="flex h-full items-center justify-center bg-[var(--nt-color-canvas)] px-5">
+      <Surface tone="raised" padding="lg" className="w-full max-w-sm">
         <h1 className="text-xl font-bold">Вход</h1>
-        <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">
+        <p className="mt-2 text-sm text-[var(--nt-color-text-muted)]">
           {step === 'username'
             ? 'Введите ваш Telegram-ник. Бот пришлёт одноразовый код для входа.'
             : `Введите код из 6 латинских букв и цифр, который бот отправил в Telegram${cleanUsername ? ` для @${cleanUsername}` : ''}.`}
@@ -78,31 +79,30 @@ export default function LoginPage() {
 
         {step === 'username' ? (
           <>
-            <div className="mt-4 flex items-center rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3">
-              <span className="text-[var(--tg-theme-hint-color)]">@</span>
-              <input
-                autoFocus
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleRequestCode()}
-                placeholder="ваш_ник"
-                className="w-full bg-transparent px-2 py-3 outline-none"
-              />
-            </div>
-            <button
-              disabled={busy}
+            <TextField
+              autoFocus
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleRequestCode()}
+              placeholder="ваш_ник"
+              startAdornment={<span>@</span>}
+              containerClassName="mt-4"
+            />
+            <Button
+              block
+              loading={busy}
               onClick={handleRequestCode}
-              className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-button-color)] px-5 py-3 font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+              className="mt-4"
             >
               {busy ? 'Отправляем…' : 'Получить код'}
-            </button>
-            <p className="mt-4 text-xs text-[var(--tg-theme-hint-color)]">
+            </Button>
+            <p className="mt-4 text-xs text-[var(--nt-color-text-muted)]">
               Сначала запустите бота в Telegram командой /start, иначе код не придёт.
             </p>
           </>
         ) : (
           <>
-            <input
+            <TextField
               autoFocus
               value={code}
               inputMode="text"
@@ -113,43 +113,50 @@ export default function LoginPage() {
               onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
               onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
               placeholder="A7K9Q2"
-              className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-center text-2xl outline-none"
+              containerClassName="mt-4"
+              className="text-center text-2xl tracking-[0.16em]"
             />
-            <button
-              disabled={busy}
+            <Button
+              block
+              loading={busy}
               onClick={handleVerify}
-              className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-button-color)] px-5 py-3 font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+              className="mt-4"
             >
               {busy ? 'Проверяем…' : 'Войти'}
-            </button>
-            <button
+            </Button>
+            <Button
+              block
+              variant="ghost"
+              size="sm"
               onClick={() => {
                 setStep('username');
                 setCode('');
                 setError(null);
                 setInfo(null);
               }}
-              className="mt-3 w-full text-sm text-[var(--tg-theme-link-color,#3390ec)]"
+              className="mt-3"
             >
               Изменить ник
-            </button>
+            </Button>
           </>
         )}
 
         {info && step === 'code' && (
-          <p className="mt-4 text-xs text-[var(--tg-theme-hint-color)]">{info}</p>
+          <p className="mt-4 text-xs text-[var(--nt-color-text-muted)]">{info}</p>
         )}
-        {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
+        {error && <p role="alert" className="mt-4 text-sm text-[var(--nt-color-danger)]">{error}</p>}
         {showLocalDevLogin && (
-          <button
-            disabled={busy}
+          <Button
+            block
+            variant="secondary"
+            loading={busy}
             onClick={handleLocalDevLogin}
-            className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-5 py-3 text-sm font-semibold text-[var(--tg-theme-text-color)] disabled:opacity-60"
+            className="mt-4"
           >
             Local User
-          </button>
+          </Button>
         )}
-      </div>
+      </Surface>
     </div>
   );
 }

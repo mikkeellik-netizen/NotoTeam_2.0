@@ -1,0 +1,75 @@
+:root {
+  --nt-color-canvas: var(--tg-theme-bg-color, #ffffff);
+  --nt-color-surface: var(--tg-theme-secondary-bg-color, #f3f4f6);
+  --nt-color-surface-raised: color-mix(in srgb, var(--nt-color-canvas) 94%, var(--nt-color-text) 6%);
+  --nt-color-surface-hover: color-mix(in srgb, var(--nt-color-surface) 86%, var(--nt-color-text) 14%);
+  --nt-color-overlay: rgb(3 10 18 / 58%);
+  --nt-color-text: var(--tg-theme-text-color, #111827);
+  --nt-color-text-muted: var(--tg-theme-hint-color, #6b7280);
+  --nt-color-accent: var(--tg-theme-button-color, #2481cc);
+  --nt-color-accent-text: var(--tg-theme-button-text-color, #ffffff);
+  --nt-color-link: var(--tg-theme-link-color, #2481cc);
+  --nt-color-border: color-mix(in srgb, var(--nt-color-text) 14%, transparent);
+  --nt-color-border-strong: color-mix(in srgb, var(--nt-color-text) 24%, transparent);
+  --nt-color-success: #16845b;
+  --nt-color-success-soft: color-mix(in srgb, var(--nt-color-success) 14%, var(--nt-color-canvas));
+  --nt-color-warning: #b96b12;
+  --nt-color-warning-soft: color-mix(in srgb, var(--nt-color-warning) 14%, var(--nt-color-canvas));
+  --nt-color-danger: #d14343;
+  --nt-color-danger-soft: color-mix(in srgb, var(--nt-color-danger) 13%, var(--nt-color-canvas));
+
+  --nt-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --nt-font-display: Georgia, "Times New Roman", serif;
+  --nt-text-xs: 0.75rem;
+  --nt-text-sm: 0.875rem;
+  --nt-text-base: 1rem;
+  --nt-text-lg: 1.125rem;
+  --nt-text-xl: 1.25rem;
+  --nt-text-2xl: 1.5rem;
+
+  --nt-space-1: 0.25rem;
+  --nt-space-2: 0.5rem;
+  --nt-space-3: 0.75rem;
+  --nt-space-4: 1rem;
+  --nt-space-5: 1.25rem;
+  --nt-space-6: 1.5rem;
+  --nt-space-8: 2rem;
+
+  --nt-radius-sm: 6px;
+  --nt-radius-control: 8px;
+  --nt-radius-surface: 8px;
+  --nt-radius-modal: 8px;
+  --nt-control-sm: 36px;
+  --nt-control-md: 44px;
+  --nt-control-lg: 50px;
+  --nt-content-sm: 28rem;
+  --nt-content-md: 48rem;
+  --nt-content-lg: 72rem;
+
+  --nt-shadow-sm: 0 1px 2px rgb(0 0 0 / 10%);
+  --nt-shadow-md: 0 12px 36px rgb(0 0 0 / 18%);
+  --nt-shadow-modal: 0 24px 72px rgb(0 0 0 / 30%);
+  --nt-focus-ring: 0 0 0 3px color-mix(in srgb, var(--nt-color-accent) 28%, transparent);
+  --nt-motion-fast: 140ms;
+  --nt-motion-base: 200ms;
+  --nt-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+:root[data-theme="dark"] {
+  --nt-color-overlay: rgb(0 0 0 / 68%);
+  --nt-color-border: color-mix(in srgb, var(--nt-color-text) 18%, transparent);
+  --nt-color-border-strong: color-mix(in srgb, var(--nt-color-text) 30%, transparent);
+  --nt-color-success: #4fd1a1;
+  --nt-color-warning: #f0ad55;
+  --nt-color-danger: #ff7474;
+  --nt-shadow-sm: 0 1px 2px rgb(0 0 0 / 28%);
+  --nt-shadow-md: 0 14px 40px rgb(0 0 0 / 34%);
+  --nt-shadow-modal: 0 28px 80px rgb(0 0 0 / 48%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --nt-motion-fast: 0ms;
+    --nt-motion-base: 0ms;
+  }
+}
