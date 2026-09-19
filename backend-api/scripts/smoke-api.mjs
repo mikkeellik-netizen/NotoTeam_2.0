@@ -4,6 +4,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { assertApiContract, assertPaginatedContract } from "./api-contracts.mjs";
 
 const backendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempRoot = path.join(backendDir, `.tmp-smoke-${Date.now()}-${process.pid}`);
@@ -78,6 +79,7 @@ try {
       lastName: "Admin",
     },
   });
+  assertApiContract("authenticatedUser", user);
 
   await request("/auth/request-code", {
     method: "POST",
@@ -197,6 +199,8 @@ try {
     body: { title: "Smoke Project", ownerId: user.id },
     expected: 201,
   });
+  assertApiContract("project", project);
+  assertApiContract("projectMember", project.members[0]);
   assert(!Object.prototype.hasOwnProperty.call(project, "inviteCode"), "Hydrated project leaked inviteCode");
   assert(!Object.prototype.hasOwnProperty.call(project, "botSettings"), "Hydrated project leaked botSettings");
   assert(project.members.every((member) => !Object.prototype.hasOwnProperty.call(member, "adminNotes")), "Hydrated project leaked member admin notes");
@@ -204,6 +208,7 @@ try {
   const inviteCode = await request(`/projects/${project.id}/invite-code?actorUserId=${encodeURIComponent(user.id)}`);
   assert(inviteCode.inviteCode, "Project invite code endpoint stopped returning inviteCode");
   const botSettings = await request(`/projects/${project.id}/bot-settings`);
+  assertApiContract("botSettings", botSettings);
   assert(Array.isArray(botSettings.kanbanReminderPoints), "Project bot settings endpoint stopped returning settings");
   const clientMembers = await request(`/projects/${project.id}/members`);
   assert(clientMembers.every((member) => !Object.prototype.hasOwnProperty.call(member ?? {}, "telegramId")), "Client project members leaked telegramId");
@@ -259,6 +264,8 @@ try {
   );
   assert(ownerPersonalCalendar, "Personal calendar was not created for the owner");
   assert(projectCalendar, "Project calendar was not created");
+  assertApiContract("calendar", ownerPersonalCalendar);
+  assertApiContract("calendar", projectCalendar);
   assert(ownerPersonalCalendar.permissions?.create === true, "Owner cannot create personal calendar events");
   assert(projectCalendar.permissions?.editAll === true, "Owner did not receive full project calendar permissions");
 
@@ -272,6 +279,8 @@ try {
     body: { label: "Smoke personal category", color: "#14B8A6" },
     expected: 201,
   });
+  assertApiContract("calendarCategory", projectCalendarCategory);
+  assertApiContract("calendarCategory", personalCalendarCategory);
   const updatedProjectCalendarCategory = await request(`/calendars/${projectCalendar.id}/categories/${projectCalendarCategory.id}`, {
     method: "PATCH",
     body: { color: "#A855F7" },
@@ -328,6 +337,7 @@ try {
     },
     expected: 201,
   });
+  assertApiContract("calendarEvent", selectedCalendarEvent);
   const sharedCalendarEvent = await request(`/projects/${project.id}/calendar-events`, {
     method: "POST",
     body: {
@@ -459,6 +469,7 @@ try {
     body: { title: "Owned Area", ownerUserIds: [viewerMember.userId], notes: "" },
     expected: 201,
   });
+  assertApiContract("responsibilityArea", ownedArea);
   const updatedOwnedArea = await request(`/projects/${project.id}/responsibility-areas/${ownedArea.id}`, {
     method: "PATCH",
     auth: "tma",
@@ -492,6 +503,7 @@ try {
   });
 
   const rootTree = await request(`/projects/${project.id}/space/tree?parentId=null`);
+  assertApiContract("pageTree", rootTree);
   assert(rootTree.nodes.length > 0, "Root tree was not created");
   const root = rootTree.nodes[0];
 
@@ -500,6 +512,7 @@ try {
     body: { type: "folder", title: "Smoke Folder", parentId: root.id },
     expected: 201,
   });
+  assertApiContract("pageNode", folder);
 
   const page = await request(`/projects/${project.id}/space/nodes`, {
     method: "POST",
@@ -511,6 +524,7 @@ try {
     },
     expected: 201,
   });
+  assertApiContract("pageNode", page);
 
   const inboxFolder = await request(`/projects/${project.id}/space/nodes`, {
     method: "POST",
@@ -539,6 +553,7 @@ try {
     headers: { "Content-Type": "image/png" },
     expected: 201,
   });
+  assertApiContract("projectFile", uploadedFile);
   assert(uploadedFile.fileName === "smoke.png" && uploadedFile.category === "image", "Project file metadata is invalid");
 
   await request(`/projects/${project.id}/files?fileName=forbidden.png&mode=block`, {
@@ -642,7 +657,9 @@ try {
     body: { type: "paragraph", content: { text: "Smoke block" } },
     expected: 201,
   });
+  assertApiContract("block", createdBlock);
   let pageBlocks = await request(`/projects/${project.id}/space/pages/${page.id}/blocks`);
+  assertApiContract("pageBlocks", pageBlocks);
   assert(
     pageBlocks.blocks.some((block) => block.id === createdBlock.id),
     `Created block is not visible through page blocks API: created=${JSON.stringify(createdBlock)} blocks=${JSON.stringify(pageBlocks.blocks)}`,
@@ -672,6 +689,7 @@ try {
 
   const columns = await request(`/projects/${project.id}/columns?pageId=${encodeURIComponent(kanbanPage.id)}`);
   assert(columns.length >= 3, "Kanban board columns were not created");
+  assertApiContract("column", columns[0]);
 
   const task = await request("/tasks", {
     method: "POST",
@@ -686,6 +704,21 @@ try {
     },
     expected: 201,
   });
+  assertApiContract("task", task);
+
+  const reminder = await request(`/projects/${project.id}/reminders`, {
+    method: "POST",
+    body: {
+      title: "Smoke reminder",
+      targetUserId: user.id,
+      sourceType: "manual",
+      scheduleType: "once",
+      remindAt: new Date(Date.now() + 6 * 3600 * 1000).toISOString(),
+      channels: { app: true, telegramBot: true },
+    },
+    expected: 201,
+  });
+  assertApiContract("reminder", reminder);
 
   const deadlineRange = new URLSearchParams({
     from: new Date(Date.now() - 60 * 1000).toISOString(),
@@ -724,6 +757,7 @@ try {
   });
 
   const pagedTasks = await request(`/projects/${project.id}/tasks?allBoards=1&paginated=1&limit=1`);
+  assertPaginatedContract(pagedTasks, "tasks");
   assert(Array.isArray(pagedTasks.tasks) && pagedTasks.tasks.length === 1 && pagedTasks.total >= 1, "Paginated project tasks response is invalid");
 
   await request(`/projects/${project.id}/activity`, {
@@ -738,6 +772,7 @@ try {
     expected: 201,
   });
   const pagedActivity = await request(`/projects/${project.id}/activity?paginated=1&limit=1`);
+  assertPaginatedContract(pagedActivity, "events");
   assert(Array.isArray(pagedActivity.events) && pagedActivity.events.length === 1 && pagedActivity.total >= 1, "Paginated activity response is invalid");
 
   await request("/notifications", {
@@ -755,6 +790,7 @@ try {
     expected: 201,
   });
   const pagedNotifications = await request(`/notifications/pending?paginated=1&limit=1&before=${encodeURIComponent(new Date().toISOString())}`, { auth: "bot" });
+  assertPaginatedContract(pagedNotifications, "notifications");
   assert(Array.isArray(pagedNotifications.notifications) && pagedNotifications.notifications.length === 1 && pagedNotifications.total >= 1, "Paginated notifications response is invalid");
 
   const completedInFinalColumn = await request(`/tasks/${task.id}/move`, {
@@ -844,12 +880,14 @@ try {
     },
     expected: 201,
   });
+  assertApiContract("aiTokenRecord", aiToken.tokenRecord);
   assert(aiToken.token && aiToken.tokenRecord?.id, "AI connector token was not created");
 
   const aiContext = await request(
     `/projects/${project.id}/ai-context?tool=smoke_mcp_tool&scope=full&includeWorkspace=1&includeBlocks=1&includeActivity=1&maxTasks=50&maxBlocks=50`,
     { auth: "ai", bearerToken: aiToken.token },
   );
+  assertApiContract("aiContext", aiContext);
   assert(aiContext.scope === "summary", "AI connector access policy did not clamp requested scope");
   assert((aiContext.workspace?.nodes ?? []).length === 0, "AI connector access policy leaked disabled workspace nodes");
   assert((aiContext.workspace?.blocks ?? []).length === 0, "AI connector access policy leaked disabled workspace blocks");
@@ -927,6 +965,7 @@ try {
     `/projects/${project.id}/ai-context/changes?since=${encodeURIComponent(new Date(Date.now() - 3600000).toISOString())}&includeBlocks=1&includeArchived=1`,
     { auth: "ai", bearerToken: scopedAiToken.token },
   );
+  assertApiContract("aiChanges", scopedChanges);
   assert(scopedChanges.kind === "noto_project_ai_changes", "AI connector changes endpoint returned an invalid payload");
   assert(!scopedChanges.newPages.some((node) => node.id === page.id), "Unselected page leaked into AI changes");
 
@@ -948,6 +987,7 @@ try {
 
   await request(`/system/users/${rateUser.id}/block`, { method: "POST" });
   const security = await request("/system/security-events?paginated=1&limit=500");
+  assertApiContract("systemSecurity", security);
   assert(security.summary.windows["24h"].failedLogins > 0, "Failed login attempts were not summarized");
   assert(security.summary.windows["24h"].rateLimitHits > 0, "Rate-limit events were not summarized");
   assert(security.summary.windows["24h"].foreignProjectAccessAttempts > 0, "Foreign project access attempts were not summarized");
@@ -957,6 +997,7 @@ try {
   assert(security.events.every((event) => !Object.prototype.hasOwnProperty.call(event, "projectId")), "Security events leaked internal project IDs");
 
   const systemStats = await request("/system/stats");
+  assertApiContract("systemStats", systemStats);
   assert(systemStats.owner.telegramIds.includes("900001"), "System owner access is not bound to Telegram ID");
   assert(systemStats.services.some((service) => service.id === "api" && service.status === "online"), "System service status is missing");
   assert(systemStats.performance.windows["1h"].requests > 0, "System API performance metrics were not collected");

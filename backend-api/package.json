@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
+    "test:contracts": "node scripts/smoke-api.mjs",
     "smoke": "node scripts/smoke-api.mjs",
     "smoke:normalized": "node scripts/smoke-normalized.mjs",
     "migrate:normalized": "node scripts/migrate-normalized.mjs",
