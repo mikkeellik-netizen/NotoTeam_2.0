@@ -67,7 +67,7 @@ export default function TodayPage() {
   return (
     <div className="flex h-full flex-col bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]">
       <header className="flex items-center gap-3 border-b border-[var(--tg-theme-secondary-bg-color)] px-4 py-3">
-        <button type="button" onClick={() => navigate('/')} className="h-9 w-9 text-xl text-[var(--tg-theme-link-color)]" aria-label="Назад">←</button>
+        <button type="button" onClick={() => navigate('/')} className="h-9 w-9 text-xl text-[var(--tg-theme-link-color)] md:hidden" aria-label="Назад">←</button>
         <div className="min-w-0 flex-1">
           <h1 className="text-lg font-bold">Сегодня</h1>
           <p className="truncate text-xs capitalize text-[var(--tg-theme-hint-color)]">{formatLongDate(new Date())}</p>

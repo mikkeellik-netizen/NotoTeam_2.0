@@ -45,6 +45,8 @@
   --nt-content-sm: 28rem;
   --nt-content-md: 48rem;
   --nt-content-lg: 72rem;
+  --nt-shell-sidebar-width: 14rem;
+  --nt-shell-nav-height: calc(3.75rem + env(safe-area-inset-bottom));
 
   --nt-shadow-sm: 0 1px 2px rgb(0 0 0 / 10%);
   --nt-shadow-md: 0 12px 36px rgb(0 0 0 / 18%);

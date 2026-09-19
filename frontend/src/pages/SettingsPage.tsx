@@ -695,7 +695,7 @@ export default function SettingsPage() {
   return (
     <div className="flex flex-col h-full bg-[var(--tg-theme-bg-color)]">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--tg-theme-secondary-bg-color)]">
-        <button onClick={leaveSettings} className="w-8 h-8 text-[var(--tg-theme-link-color)]">
+        <button onClick={leaveSettings} className={`h-8 w-8 text-[var(--tg-theme-link-color)] ${projectId ? '' : 'md:hidden'}`} aria-label="Назад">
           ‹
         </button>
         <h1 className="text-lg font-bold text-[var(--tg-theme-text-color)]">Настройки</h1>

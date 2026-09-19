@@ -432,7 +432,7 @@ export default function MyCalendarPage() {
     <div className="flex h-full flex-col bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]">
       <header className="relative z-30 border-b border-[var(--tg-theme-secondary-bg-color)] px-2 py-2 sm:px-4 sm:py-3">
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => navigate(projectId ? `/project/${projectId}/workspace` : '/')} className="h-9 w-9 shrink-0 text-xl" aria-label="Назад">←</button>
+          <button type="button" onClick={() => navigate(projectId ? `/project/${projectId}/workspace` : '/')} className={`h-9 w-9 shrink-0 text-xl ${projectId ? '' : 'md:hidden'}`} aria-label="Назад">←</button>
           <div className="hidden min-w-0 flex-1 sm:block">
             <h1 className="text-lg font-bold">{projectId ? 'Календарь проекта' : 'Мой календарь'}</h1>
             <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">{projectId ? calendars[0]?.name ?? 'Проект' : 'Личные события и доступные проекты'}</p>
@@ -523,7 +523,7 @@ export default function MyCalendarPage() {
         )}
       </main>
 
-      <div className="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex justify-center sm:hidden">
+      <div className={`pointer-events-none fixed inset-x-0 z-40 flex justify-center sm:hidden ${projectId ? 'bottom-4' : 'bottom-[calc(var(--nt-shell-nav-height)+1rem)]'}`}>
         <button type="button" onClick={goToToday} className="pointer-events-auto h-11 rounded-full border border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-bg-color)] px-5 text-sm font-bold shadow-lg">Сегодня</button>
         <button type="button" onClick={() => openCreate()} disabled={!writableCalendars.length} className="pointer-events-auto absolute right-4 h-12 w-12 rounded-full bg-[var(--tg-theme-button-color)] text-2xl font-medium text-[var(--tg-theme-button-text-color)] shadow-lg disabled:opacity-40" aria-label="Создать событие">+</button>
       </div>

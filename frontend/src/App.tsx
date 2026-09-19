@@ -6,6 +6,7 @@ import LoginPage from './pages/LoginPage';
 import { isWorkspaceApiConfigured } from './api/httpClient';
 import ProjectAccessGate from './components/common/ProjectAccessGate';
 import { Button, Surface } from './components/ui';
+import PersonalAppShell from './components/layout/PersonalAppShell';
 
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
 const BoardPage = lazy(() => import('./pages/BoardPage'));
@@ -100,7 +101,13 @@ export default function App() {
       <TelegramBackButton />
       <Suspense fallback={<RouteFallback />}>
         <Routes>
-          <Route path="/" element={<ProjectsPage />} />
+          <Route element={<PersonalAppShell />}>
+            <Route path="/" element={<ProjectsPage />} />
+            <Route path="/my-calendar" element={<MyCalendarPage />} />
+            <Route path="/today" element={<TodayPage />} />
+            <Route path="/my-tasks" element={<MyTasksPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Route>
           <Route path="/board/:projectId" element={<ProjectAccessGate><BoardPage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/workspace" element={<ProjectAccessGate><WorkspacePage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/workspace/page/:pageId" element={<ProjectAccessGate><WorkspacePage /></ProjectAccessGate>} />
@@ -108,10 +115,6 @@ export default function App() {
           <Route path="/project/:projectId/notifications" element={<ProjectAccessGate><NotificationsPage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/reminders" element={<ProjectAccessGate><RemindersPage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/calendar" element={<ProjectAccessGate><CalendarPage /></ProjectAccessGate>} />
-          <Route path="/my-calendar" element={<MyCalendarPage />} />
-          <Route path="/today" element={<TodayPage />} />
-          <Route path="/my-tasks" element={<MyTasksPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
           <Route path="/system-admin" element={<SystemAdminPage />} />
           <Route path="/project/:projectId/members" element={<ProjectAccessGate><MembersPage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/settings" element={<ProjectAccessGate><SettingsPage /></ProjectAccessGate>} />
