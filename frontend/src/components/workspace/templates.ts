@@ -458,6 +458,18 @@ export const PAGE_TEMPLATES: Template[] = [
     ],
   },
   {
+    id: 'responsibility-areas',
+    title: 'Зоны ответственности',
+    icon: '🧩',
+    description: 'Зоны, ответственные, рабочие задачи и связанные материалы.',
+    blocks: [
+      {
+        type: 'responsibility_map',
+        content: { view: 'cards' },
+      },
+    ],
+  },
+  {
     id: 'kanban',
     title: 'Kanban board',
     icon: '📋',

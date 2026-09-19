@@ -60,6 +60,17 @@ export interface ResponsibilityArea {
   linkedPageIds?: string[];
   linkedKanbanBoardIds?: string[];
   linkedTaskIds?: Array<number | string>;
+  notes?: string;
+  planItems?: ResponsibilityPlanItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResponsibilityPlanItem {
+  id: string;
+  title: string;
+  completed: boolean;
+  dueDate?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -147,6 +158,12 @@ export interface RolePermissions {
   updatePage?: boolean;
   deletePage?: boolean;
   manageTemplates?: boolean;
+  viewCalendar?: boolean;
+  createCalendarEvents?: boolean;
+  editOwnCalendarEvents?: boolean;
+  editAllCalendarEvents?: boolean;
+  deleteOwnCalendarEvents?: boolean;
+  deleteAllCalendarEvents?: boolean;
   manageCalendar?: boolean;
   manageReminders?: boolean;
   manageBot?: boolean;
@@ -206,9 +223,15 @@ export interface Task {
   position: number;
   isArchived: boolean;
   archivedAt?: string;
+  completedAt?: string;
   createdAt: string;
   updatedAt?: string;
   assignee?: User;
+  project?: {
+    id: number;
+    title: string;
+    icon?: string;
+  };
   subtasks?: Subtask[];
   tags?: Tag[];
   linkedPageIds?: string[];
@@ -273,7 +296,9 @@ export type BlockType =
   | 'link_to_page'
   | 'kanban_embed'
   | 'web_embed'
+  | 'file'
   | 'smart_summary'
+  | 'responsibility_map'
   | 'collapsible'
   | 'page_properties';
 
@@ -325,6 +350,29 @@ export interface WebEmbedContent {
   embedUrl?: string;
   mode?: 'auto' | 'preview' | 'embed';
   height?: number;
+}
+
+export type ProjectFileCategory = 'image' | 'document' | 'audio';
+
+export interface ProjectFileRecord {
+  id: string;
+  projectId: string;
+  uploaderUserId: string;
+  fileName: string;
+  mimeType: string;
+  category: ProjectFileCategory;
+  size: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FileBlockContent {
+  fileId: string;
+  fileName: string;
+  mimeType: string;
+  category: ProjectFileCategory;
+  size: number;
+  caption?: string;
 }
 
 export interface MentionEntity {
@@ -392,8 +440,34 @@ export interface Reminder {
   nextRunAt?: string;
 }
 
-export type CalendarEventType = 'meeting' | 'service' | 'deadline' | 'duty' | 'event' | 'custom';
-export type CalendarEventVisibility = 'project' | 'selected';
+export type CalendarEventType = 'meeting' | 'service' | 'deadline' | 'duty' | 'event' | 'birthday' | 'custom';
+export type CalendarType = 'PERSONAL' | 'PROJECT';
+export type CalendarEventVisibility = 'project' | 'selected' | 'private';
+
+export interface CalendarPermissions {
+  create: boolean;
+  editOwn: boolean;
+  editAll: boolean;
+  deleteOwn: boolean;
+  deleteAll: boolean;
+  manage?: boolean;
+}
+
+export interface Calendar {
+  id: string;
+  type: CalendarType;
+  name: string;
+  color: string;
+  ownerUserId?: string;
+  projectId?: string;
+  sourceType?: 'local' | 'external';
+  connectionId?: string;
+  readOnly?: boolean;
+  categories?: CalendarCategory[];
+  permissions?: CalendarPermissions;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface CalendarCategory {
   id: string;
@@ -401,11 +475,26 @@ export interface CalendarCategory {
   color: string;
   type?: CalendarEventType;
   createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CalendarEventNotification {
+  enabled: boolean;
+  remindAt?: string;
+  deliveryStatus?: 'pending' | 'retry' | 'sent' | 'failed' | 'disabled' | 'missed';
+  deliveryAttempts?: number;
+  sentAt?: string;
+  nextAttemptAt?: string;
+  deliveryCompletedAt?: string;
+  deliveryError?: string;
 }
 
 export interface CalendarEvent {
   id: string;
-  projectId: string;
+  calendarId: string;
+  projectId?: string;
+  ownerUserId: string;
+  createdByUserId: string;
   title: string;
   description?: string;
   startsAt: string;
@@ -419,8 +508,27 @@ export interface CalendarEvent {
   participantUserIds: string[];
   location?: string;
   link?: string;
-  sourceType?: 'manual' | 'kanban' | 'table' | 'reminder';
+  sourceType?: 'manual' | 'kanban' | 'table' | 'reminder' | 'external';
   sourceId?: string;
+  readOnly?: boolean;
+  notification: CalendarEventNotification;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalCalendarConnection {
+  id: string;
+  provider: 'yandex' | 'ical';
+  projectId?: string;
+  name: string;
+  color: string;
+  calendarId: string;
+  enabled: boolean;
+  syncIntervalMinutes: number;
+  lastSyncAt?: string;
+  lastSyncStatus: 'pending' | 'success' | 'error';
+  lastSyncError?: string;
+  importedEvents: number;
   createdAt: string;
   updatedAt: string;
 }

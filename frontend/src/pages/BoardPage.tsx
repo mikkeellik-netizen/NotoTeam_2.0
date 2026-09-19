@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useProjectStore } from '../store/projectStore';
 import { useTaskStore } from '../store/taskStore';
 import KanbanBoard from '../components/board/KanbanBoard';
@@ -21,6 +21,7 @@ interface Props {
 export default function BoardPage({ embedded = false, boardPageId }: Props) {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const pid = Number(projectId);
 
@@ -37,6 +38,14 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
   const [showOnlyMyTasks, setShowOnlyMyTasks] = useState(() => localStorage.getItem(MY_TASKS_FILTER_KEY) === 'true');
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
   const [archiveCleanupMode, setArchiveCleanupMode] = useState<ArchiveCleanupMode>('never');
+  const adminReturn = (location.state as {
+    adminReturn?: {
+      projectId: number | string;
+      tab: string;
+      section?: string;
+      label: string;
+    };
+  } | null)?.adminReturn;
 
   useEffect(() => {
     const loadBoard = async () => {
@@ -102,7 +111,7 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
     if (searchParams.has('taskId')) {
       const nextParams = new URLSearchParams(searchParams);
       nextParams.delete('taskId');
-      setSearchParams(nextParams, { replace: true });
+      setSearchParams(nextParams, { replace: true, state: location.state });
     }
     closeTask();
   };
@@ -345,6 +354,8 @@ export default function BoardPage({ embedded = false, boardPageId }: Props) {
           task={selectedTask}
           members={members}
           onClose={handleCloseTask}
+          returnLabel={adminReturn ? `Администратор · ${adminReturn.label}` : undefined}
+          onReturn={adminReturn ? () => navigate(`/project/${projectId}/settings`, { state: { adminReturn } }) : undefined}
           canEdit={canUpdateTask}
           canMove={canMoveTask}
           canArchive={canDeleteTask || canUpdateTask}

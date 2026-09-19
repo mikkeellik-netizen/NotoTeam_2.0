@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { normalizeWebAppBaseUrl } from "./webAppLinks.js";
 export interface BotConfig {
   botToken: string;
   webAppUrl: string;
@@ -32,10 +33,16 @@ export function loadConfig(env = process.env): BotConfig {
   // Можно переопределить через WEBHOOK_PUBLIC_URL, если хостинг другой.
   const publicUrl = (env.WEBHOOK_PUBLIC_URL ?? env.RENDER_EXTERNAL_URL)?.trim();
   const mode = env.BOT_MODE === "webhook" ? "webhook" : env.BOT_MODE === "polling" ? "polling" : publicUrl ? "webhook" : "polling";
+  const requirePublicHttps = env.NODE_ENV === "production" || mode === "webhook";
+  const rawWebAppUrl = env.WEBAPP_URL?.trim() || (requirePublicHttps ? "" : "http://127.0.0.1:5174");
+  if (!rawWebAppUrl) {
+    throw new Error("WEBAPP_URL is required in production and must point to the public Mini App domain");
+  }
+  const webAppUrl = normalizeWebAppBaseUrl(rawWebAppUrl, { requirePublicHttps });
 
   return {
     botToken,
-    webAppUrl: env.WEBAPP_URL ?? "http://127.0.0.1:5174",
+    webAppUrl,
     workspaceApiUrl,
     internalApiToken,
     mode,

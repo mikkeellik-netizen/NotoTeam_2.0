@@ -26,6 +26,11 @@ export type SystemUserRow = {
 
 export type SystemStats = {
   generatedAt: string;
+  owner: {
+    configured: boolean;
+    telegramIds: string[];
+    users: Array<{ id: string; telegramId: string; username: string; firstName: string; lastName: string }>;
+  };
   totals: Record<string, number>;
   database: {
     storage: string;
@@ -33,19 +38,139 @@ export type SystemStats = {
     jsonStateMb: number;
     files: Array<{ path: string; bytes: number }>;
   };
+  services: Array<{
+    id: string;
+    label: string;
+    status: 'online' | 'offline' | 'stale' | 'unknown' | 'idle' | 'not_configured';
+    detail: string;
+  }>;
+  performance: {
+    since: string;
+    retainedRequests: number;
+    windows: Record<'15m' | '1h' | '24h', SystemPerformanceWindow>;
+  };
+  storage: {
+    provider: string;
+    databaseBytes: number;
+    databaseFilesBytes: number;
+    projectFileBytes: number;
+    projectFiles: number;
+    collections: Array<{ name: string; count: number }>;
+    topProjects: Array<{
+      reference: string;
+      dataBytes: number;
+      fileBytes: number;
+      totalBytes: number;
+      tasks: number;
+      files: number;
+    }>;
+  };
+  server: {
+    startedAt: string;
+    uptimeSeconds: number;
+    environment: string;
+    nodeVersion: string;
+    platform: string;
+    architecture: string;
+    pid: number;
+    eventLoopLagMs: number;
+    memory: {
+      rssBytes: number;
+      heapUsedBytes: number;
+      heapTotalBytes: number;
+      externalBytes: number;
+      hostTotalBytes: number;
+      hostFreeBytes: number;
+    };
+    cpu: {
+      cores: number;
+      model: string;
+      loadAverage: number[];
+      processUserMs: number;
+      processSystemMs: number;
+    };
+    disk?: {
+      label: string;
+      totalBytes: number;
+      freeBytes: number;
+      usedBytes: number;
+      usagePercent: number;
+    };
+    databaseWrite: { dirty: boolean; flushPending: boolean };
+  };
+  bot: {
+    status: 'online' | 'offline' | 'stale' | 'unknown' | 'not_configured';
+    configured: boolean;
+    tokenConfigured: boolean;
+    internalApiTokenConfigured: boolean;
+    lastSeenAt?: string;
+    lastPath?: string;
+    lastStatus?: number;
+    requestsSinceApiStart: number;
+    apiRequests1h: number;
+    outbox: { pending: number; total: number };
+    notifications: { total: number; pending: number; due: number; sent: number; failed: number };
+    reminders: { total: number; active: number; due: number; telegramEnabled: number; sent24h: number };
+    projects: { total: number; deadlineNotificationsEnabled: number; mentionNotificationsEnabled: number; dutyNotificationsEnabled: number };
+  };
   users: SystemUserRow[];
   recentUsers: SystemUserRow[];
+};
+
+export type SystemPerformanceWindow = {
+  requests: number;
+  errors: number;
+  rejected: number;
+  requestsPerMinute: number;
+  averageMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+  responseBytes: number;
+  slowRoutes: Array<{
+    route: string;
+    requests: number;
+    errors: number;
+    averageMs: number;
+    p95Ms: number;
+    maxMs: number;
+  }>;
 };
 
 export type SystemSecurityEvent = {
   id: string;
   type: string;
   actorUserId?: string;
-  projectId?: string;
+  projectReference?: string;
   targetUserId?: string;
   outcome: string;
   details: Record<string, string | number | boolean>;
   createdAt: string;
+};
+
+export type SystemSecuritySummary = {
+  generatedAt: string;
+  windows: Record<'24h' | '7d', {
+    failedLogins: number;
+    rateLimitHits: number;
+    foreignProjectAccessAttempts: number;
+    ipBlocks: number;
+  }>;
+  blocked: {
+    ips: Array<{
+      reference: string;
+      blockedUntil: string;
+      reason: string;
+      createdAt: string;
+    }>;
+    users: Array<{
+      id: string;
+      username: string;
+      firstName: string;
+      lastName: string;
+      blockedAt: string;
+    }>;
+  };
 };
 
 export type SystemSecurityEventsResponse = {
@@ -53,6 +178,8 @@ export type SystemSecurityEventsResponse = {
   total: number;
   offset: number;
   limit: number;
+  hasMore: boolean;
+  summary: SystemSecuritySummary;
 };
 
 function actorQuery(actorUserId: number | string) {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { tasksApi } from '../api/tasks';
+import type { UserTaskProgress } from '../api/tasks';
 import { useTaskStore } from '../store/taskStore';
 import { useAuthStore } from '../store/authStore';
 import TaskModal from '../components/task/TaskModal';
@@ -14,8 +15,20 @@ interface MyTasksData {
   yellow: Task[];
   green: Task[];
   noDate: Task[];
-  stats: { completed: number; total: number };
+  stats: UserTaskProgress;
 }
+
+const EMPTY_PROGRESS: UserTaskProgress = {
+  days: 7,
+  since: '',
+  until: '',
+  completed: 0,
+  total: 0,
+  percent: 0,
+  created: 0,
+  active: 0,
+  overdue: 0,
+};
 
 export default function MyTasksPage() {
   const navigate = useNavigate();
@@ -26,7 +39,7 @@ export default function MyTasksPage() {
 
   useEffect(() => {
     if (!currentUser?.id) {
-      setData({ red: [], yellow: [], green: [], noDate: [], stats: { completed: 0, total: 0 } });
+      setData({ red: [], yellow: [], green: [], noDate: [], stats: EMPTY_PROGRESS });
       setLoading(false);
       return;
     }
@@ -38,9 +51,7 @@ export default function MyTasksPage() {
     ? [...data.red, ...data.yellow, ...data.green, ...data.noDate]
     : [];
 
-  const percent = data?.stats.total
-    ? Math.round((data.stats.completed / data.stats.total) * 100)
-    : 0;
+  const percent = data?.stats.percent ?? 0;
 
   return (
     <div className="flex flex-col h-full bg-[var(--tg-theme-bg-color)]">
@@ -59,7 +70,7 @@ export default function MyTasksPage() {
           <div className="flex justify-center py-16">
             <div className="w-6 h-6 border-2 border-[var(--tg-theme-button-color)] border-t-transparent rounded-full animate-spin" />
           </div>
-        ) : !data || allTasks.length === 0 ? (
+        ) : !data ? (
           <div className="text-center py-16">
             <div className="text-4xl mb-3">🎉</div>
             <p className="text-[var(--tg-theme-hint-color)]">Нет активных задач</p>
@@ -70,7 +81,7 @@ export default function MyTasksPage() {
             <div className="bg-[var(--tg-theme-secondary-bg-color)] rounded-[12px] p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-[var(--tg-theme-text-color)]">
-                  Прогресс
+                  Результат за последние 7 дней
                 </span>
                 <span className="text-sm text-[var(--tg-theme-hint-color)]">
                   {data.stats.completed}/{data.stats.total}
@@ -85,8 +96,24 @@ export default function MyTasksPage() {
                   }}
                 />
               </div>
-              <p className="text-xs text-[var(--tg-theme-hint-color)] text-right">{percent}%</p>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                <ProgressMetric label="Выполнено" value={data.stats.completed} />
+                <ProgressMetric label="Новые" value={data.stats.created} />
+                <ProgressMetric label="Активные" value={data.stats.active} />
+              </div>
+              <div className="mt-3 flex items-center justify-between text-xs text-[var(--tg-theme-hint-color)]">
+                <span className={data.stats.overdue > 0 ? 'text-red-500' : ''}>
+                  Просрочено: {data.stats.overdue}
+                </span>
+                <span>{percent}% выполнено</span>
+              </div>
             </div>
+
+            {allTasks.length === 0 && (
+              <div className="py-8 text-center text-sm text-[var(--tg-theme-hint-color)]">
+                Нет активных задач
+              </div>
+            )}
 
             {/* Красная зона */}
             {data.red.length > 0 && (
@@ -139,6 +166,15 @@ export default function MyTasksPage() {
   );
 }
 
+function ProgressMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="min-w-0 rounded-[8px] bg-[var(--tg-theme-bg-color)] px-2 py-2">
+      <div className="text-base font-semibold text-[var(--tg-theme-text-color)]">{value}</div>
+      <div className="truncate text-[11px] text-[var(--tg-theme-hint-color)]">{label}</div>
+    </div>
+  );
+}
+
 function TaskSection({
   title, tasks, color, onTaskClick,
 }: {
@@ -169,14 +205,14 @@ function TaskSection({
                   {task.title}
                 </p>
                 <div className="flex items-center gap-2 mt-1">
-                  {(task as any).project?.title && (
-                    <span className="text-xs text-[var(--tg-theme-hint-color)]">
-                      {(task as any).project.title}
+                  {task.project?.title && (
+                    <span className="max-w-[55%] truncate rounded-[6px] bg-[var(--tg-theme-bg-color)] px-2 py-0.5 text-xs font-medium text-[var(--tg-theme-link-color)]">
+                      {task.project.icon ? `${task.project.icon} ` : ''}{task.project.title}
                     </span>
                   )}
                   {task.deadlineAt && (
                     <span className="text-xs text-[var(--tg-theme-hint-color)]">
-                      · {format(new Date(task.deadlineAt), 'd MMM HH:mm', { locale: ru })}
+                      {format(new Date(task.deadlineAt), 'd MMM HH:mm', { locale: ru })}
                     </span>
                   )}
                   <span className="text-xs ml-auto" style={{ color: PRIORITY_COLOR[task.priority] }}>

@@ -35,6 +35,9 @@ try {
       BOT_TOKEN: botToken,
       TELEGRAM_BOT_TOKEN: botToken,
       INTERNAL_API_TOKEN: authToken,
+      APP_OWNER_TELEGRAM_IDS: "900001",
+      AUTH_CODE_REQUEST_MAX_PER_IP: "5",
+      AUTH_IP_BLOCK_MS: "60000",
       API_MAX_BODY_BYTES: "16384",
       DB_FLUSH_DEBOUNCE_MS: String(flushDebounceMs),
     },
@@ -82,17 +85,46 @@ try {
     body: { username: "smoke_admin" },
   });
   const outbox = await request("/outbox/pending", { auth: "bot" });
-  const loginCode = String(outbox.find((item) => String(item.telegramId) === "900001")?.text ?? "").match(/\b\d{6}\b/)?.[0];
+  const loginCode = String(outbox.find((item) => String(item.telegramId) === "900001")?.text ?? "").match(/\b[A-Z0-9]{6}\b/)?.[0];
   assert(loginCode, "Auth code was not delivered to bot outbox");
+  assert(/[A-Z]/.test(loginCode) && /\d/.test(loginCode), "Auth code must contain both letters and digits");
   await delay(flushDebounceMs + 300);
   await assertAuthCodePersistedHashed(user.id, loginCode);
+  await request("/auth/verify-code", {
+    method: "POST",
+    auth: "none",
+    body: { username: "smoke_admin", code: "AAAAAA" },
+    expected: 400,
+  });
   const login = await request("/auth/verify-code", {
     method: "POST",
     auth: "none",
-    body: { username: "smoke_admin", code: loginCode },
+    body: { username: "smoke_admin", code: loginCode.toLowerCase() },
   });
   sessionToken = login.token;
   await request(`/auth/me?token=${encodeURIComponent(sessionToken)}`, { auth: "none", expected: 401 });
+
+  await request("/auth/request-code", {
+    method: "POST",
+    auth: "none",
+    body: { username: "smoke_admin" },
+  });
+  for (let index = 0; index < 4; index += 1) {
+    const failedAttempt = await request("/auth/verify-code", {
+      method: "POST",
+      auth: "none",
+      body: { username: "smoke_admin", code: "AAAAAA" },
+      expected: 400,
+    });
+    assert(failedAttempt.attemptsRemaining === 4 - index, "Wrong-code attempts remaining are incorrect");
+  }
+  const lockedAttempt = await request("/auth/verify-code", {
+    method: "POST",
+    auth: "none",
+    body: { username: "smoke_admin", code: "AAAAAA" },
+    expected: 429,
+  });
+  assert(lockedAttempt.attemptsRemaining === 0, "Auth code was not invalidated after five wrong attempts");
 
   const freshInitData = createTelegramInitData({
     authDate: Math.floor(Date.now() / 1000),
@@ -124,7 +156,7 @@ try {
   });
   await request("/auth/me", { auth: "tma", initData: staleInitData, expected: 401 });
 
-  await request("/telegram/users", {
+  const rateUser = await request("/telegram/users", {
     method: "POST",
     auth: "bot",
     body: {
@@ -145,6 +177,18 @@ try {
     method: "POST",
     auth: "none",
     body: { username: "rate_user" },
+    expected: 429,
+  });
+  await request("/auth/request-code", {
+    method: "POST",
+    auth: "none",
+    body: { username: "another_unknown_user" },
+    expected: 429,
+  });
+  await request("/auth/request-code", {
+    method: "POST",
+    auth: "none",
+    body: { username: "blocked_by_ip" },
     expected: 429,
   });
 
@@ -207,7 +251,192 @@ try {
       last_name: "Viewer",
     },
   });
+
+  const ownerCalendars = await request("/me/calendars");
+  const ownerPersonalCalendar = ownerCalendars.find((calendar) => calendar.type === "PERSONAL");
+  const projectCalendar = ownerCalendars.find(
+    (calendar) => calendar.type === "PROJECT" && String(calendar.projectId) === String(project.id),
+  );
+  assert(ownerPersonalCalendar, "Personal calendar was not created for the owner");
+  assert(projectCalendar, "Project calendar was not created");
+  assert(ownerPersonalCalendar.permissions?.create === true, "Owner cannot create personal calendar events");
+  assert(projectCalendar.permissions?.editAll === true, "Owner did not receive full project calendar permissions");
+
+  const projectCalendarCategory = await request(`/calendars/${projectCalendar.id}/categories`, {
+    method: "POST",
+    body: { label: "Smoke project category", color: "#EC4899" },
+    expected: 201,
+  });
+  const personalCalendarCategory = await request(`/calendars/${ownerPersonalCalendar.id}/categories`, {
+    method: "POST",
+    body: { label: "Smoke personal category", color: "#14B8A6" },
+    expected: 201,
+  });
+  const updatedProjectCalendarCategory = await request(`/calendars/${projectCalendar.id}/categories/${projectCalendarCategory.id}`, {
+    method: "PATCH",
+    body: { color: "#A855F7" },
+  });
+  assert(updatedProjectCalendarCategory.color === "#A855F7", "Calendar category color was not updated");
+  const calendarsWithCategories = await request("/me/calendars");
+  assert(
+    calendarsWithCategories.find((calendar) => calendar.id === projectCalendar.id)?.categories?.some((category) => category.id === projectCalendarCategory.id && category.color === "#A855F7"),
+    "Project calendar category was not returned",
+  );
+  assert(
+    calendarsWithCategories.find((calendar) => calendar.id === ownerPersonalCalendar.id)?.categories?.some((category) => category.id === personalCalendarCategory.id),
+    "Personal calendar category was not returned",
+  );
+
+  const viewerCalendars = await request("/me/calendars", {
+    auth: "tma",
+    initData: viewerInitData,
+  });
+  const viewerProjectCalendar = viewerCalendars.find(
+    (calendar) => calendar.type === "PROJECT" && String(calendar.projectId) === String(project.id),
+  );
+  assert(viewerProjectCalendar, "Viewer cannot see an accessible project calendar");
+  assert(viewerProjectCalendar.permissions?.create === false, "Viewer received calendar create permission");
+  assert(!viewerCalendars.some((calendar) => calendar.id === ownerPersonalCalendar.id), "Owner personal calendar leaked to viewer");
+  await request(`/calendars/${projectCalendar.id}/categories`, {
+    method: "POST",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { label: "Forbidden viewer category", color: "#000000" },
+    expected: 403,
+  });
+  await request(`/calendars/${projectCalendar.id}/categories/${projectCalendarCategory.id}`, {
+    method: "PATCH",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { color: "#000000" },
+    expected: 403,
+  });
+
+  const selectedCalendarEvent = await request(`/projects/${project.id}/calendar-events`, {
+    method: "POST",
+    body: {
+      title: "Owner-only selected event",
+      startsAt: "2026-10-10T10:00:00.000Z",
+      endsAt: "2026-10-10T11:00:00.000Z",
+      notification: { enabled: true, remindAt: "2026-10-10T09:30:00.000Z" },
+      type: "custom",
+      color: updatedProjectCalendarCategory.color,
+      categoryId: projectCalendarCategory.id,
+      categoryLabel: projectCalendarCategory.label,
+      visibility: "selected",
+      participantUserIds: [user.id],
+    },
+    expected: 201,
+  });
+  const sharedCalendarEvent = await request(`/projects/${project.id}/calendar-events`, {
+    method: "POST",
+    body: {
+      title: "Shared project event",
+      startsAt: "2026-10-11T10:00:00.000Z",
+      visibility: "project",
+    },
+    expected: 201,
+  });
+  assert(String(selectedCalendarEvent.calendarId) === String(projectCalendar.id), "Project event was not linked to its calendar");
+  assert(String(selectedCalendarEvent.createdByUserId) === String(user.id), "Calendar event creator was not recorded");
+  assert(selectedCalendarEvent.notification?.enabled === true, "Calendar event notification was not enabled");
+  assert(selectedCalendarEvent.notification?.remindAt === "2026-10-10T09:30:00.000Z", "Calendar event notification time was not preserved");
+  assert(selectedCalendarEvent.notification?.deliveryStatus === "pending", "Calendar event notification was not queued");
+  assert(selectedCalendarEvent.categoryId === projectCalendarCategory.id, "Calendar event category id was not preserved");
+  assert(selectedCalendarEvent.categoryLabel === projectCalendarCategory.label, "Calendar event category label was not preserved");
+  assert(selectedCalendarEvent.color === updatedProjectCalendarCategory.color, "Calendar event category color was not preserved");
+  assert(sharedCalendarEvent.notification?.enabled === false, "Calendar event notification must be disabled by default");
+
+  const viewerProjectEvents = await request(`/projects/${project.id}/calendar-events`, {
+    auth: "tma",
+    initData: viewerInitData,
+  });
+  assert(viewerProjectEvents.some((event) => event.id === sharedCalendarEvent.id), "Viewer cannot see a shared project event");
+  assert(!viewerProjectEvents.some((event) => event.id === selectedCalendarEvent.id), "Selected calendar event leaked to a non-participant");
+  await request(`/projects/${project.id}/calendar-events`, {
+    method: "POST",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { title: "Forbidden viewer event", startsAt: "2026-10-12T10:00:00.000Z" },
+    expected: 403,
+  });
+  await request(`/calendar-events/${selectedCalendarEvent.id}`, {
+    method: "PATCH",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { title: "Forbidden change" },
+    expected: 403,
+  });
+  const movedCalendarEvent = await request(`/calendar-events/${selectedCalendarEvent.id}`, {
+    method: "PATCH",
+    body: {
+      startsAt: "2026-10-10T12:00:00.000Z",
+      endsAt: "2026-10-10T13:30:00.000Z",
+      notification: { enabled: true, remindAt: "2026-10-10T11:15:00.000Z" },
+    },
+  });
+  assert(movedCalendarEvent.startsAt === "2026-10-10T12:00:00.000Z", "Calendar event move was not persisted");
+  assert(movedCalendarEvent.endsAt === "2026-10-10T13:30:00.000Z", "Calendar event resize was not persisted");
+  assert(movedCalendarEvent.notification?.remindAt === "2026-10-10T11:15:00.000Z", "Calendar event notification was not updated");
+  assert(movedCalendarEvent.notification?.deliveryStatus === "pending", "Updated calendar notification was not re-queued");
+
+  const personalCalendarEvent = await request(`/calendars/${ownerPersonalCalendar.id}/events`, {
+    method: "POST",
+    body: {
+      title: "Private personal event",
+      startsAt: "2026-10-13T10:00:00.000Z",
+      visibility: "project",
+    },
+    expected: 201,
+  });
+  assert(personalCalendarEvent.visibility === "private" && !personalCalendarEvent.projectId, "Personal event was not made private");
+  await request(`/calendars/${ownerPersonalCalendar.id}/events`, {
+    method: "POST",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { title: "Foreign personal event", startsAt: "2026-10-14T10:00:00.000Z" },
+    expected: 403,
+  });
+
+  const aggregateRange = "from=2026-10-01T00%3A00%3A00.000Z&to=2026-11-01T00%3A00%3A00.000Z";
+  const ownerAggregate = await request(`/me/calendar-events?${aggregateRange}`);
+  assert(ownerAggregate.some((event) => event.id === selectedCalendarEvent.id), "Owner aggregate omitted a selected project event");
+  assert(ownerAggregate.some((event) => event.id === personalCalendarEvent.id), "Owner aggregate omitted a personal event");
+  const viewerAggregate = await request(`/me/calendar-events?${aggregateRange}`, {
+    auth: "tma",
+    initData: viewerInitData,
+  });
+  assert(viewerAggregate.some((event) => event.id === sharedCalendarEvent.id), "Viewer aggregate omitted a shared project event");
+  assert(!viewerAggregate.some((event) => event.id === selectedCalendarEvent.id), "Selected event leaked through the aggregate calendar");
+  assert(!viewerAggregate.some((event) => event.id === personalCalendarEvent.id), "Personal event leaked through the aggregate calendar");
+  const recoloredProjectCategory = await request(`/calendars/${projectCalendar.id}/categories/${projectCalendarCategory.id}`, {
+    method: "PATCH",
+    body: { color: "#0EA5E9" },
+  });
+  const projectEventsAfterCategoryRecolor = await request(`/projects/${project.id}/calendar-events`);
+  assert(
+    projectEventsAfterCategoryRecolor.find((event) => event.id === selectedCalendarEvent.id)?.color === recoloredProjectCategory.color,
+    "Existing event colors were not updated with their category",
+  );
+  const deletedProjectCategory = await request(`/calendars/${projectCalendar.id}/categories/${projectCalendarCategory.id}`, {
+    method: "DELETE",
+  });
+  assert(deletedProjectCategory.reassignedEvents === 1, "Deleted category events were not reassigned");
+  const projectEventsAfterCategoryDelete = await request(`/projects/${project.id}/calendar-events`);
+  assert(
+    projectEventsAfterCategoryDelete.find((event) => event.id === selectedCalendarEvent.id)?.categoryId === "base:meeting",
+    "Deleted category event did not fall back to the meeting category",
+  );
+  await request(`/calendars/${ownerPersonalCalendar.id}/categories/${personalCalendarCategory.id}`, { method: "DELETE" });
+  await request("/me/calendar-events", { expected: 400 });
+
   await request(`/projects/${project.id}/bot-settings`, { auth: "tma", initData: viewerInitData, expected: 403 });
+  const privateProject = await request("/projects", {
+    method: "POST",
+    body: { title: "Private Smoke Project", ownerId: user.id },
+    expected: 201,
+  });
+  await request(`/projects/${privateProject.id}/members`, { auth: "tma", initData: viewerInitData, expected: 403 });
   await request(`/projects/${project.id}/activity`, {
     method: "POST",
     auth: "tma",
@@ -219,6 +448,47 @@ try {
       entityId: project.id,
     },
     expected: 403,
+  });
+
+  await request(`/projects/${project.id}/members/${viewerMember.id}/role`, {
+    method: "POST",
+    body: { role: "editor", actorUserId: user.id },
+  });
+  const ownedArea = await request(`/projects/${project.id}/responsibility-areas`, {
+    method: "POST",
+    body: { title: "Owned Area", ownerUserIds: [viewerMember.userId], notes: "" },
+    expected: 201,
+  });
+  const updatedOwnedArea = await request(`/projects/${project.id}/responsibility-areas/${ownedArea.id}`, {
+    method: "PATCH",
+    auth: "tma",
+    initData: viewerInitData,
+    body: {
+      title: "Tampered title",
+      ownerUserIds: [user.id],
+      notes: "Area owner note",
+      planItems: [{ id: "plan_smoke", title: "Area owner plan", completed: false, dueDate: "2026-12-31" }],
+    },
+  });
+  assert(updatedOwnedArea.title === "Owned Area", "Responsibility owner changed protected area fields");
+  assert(updatedOwnedArea.notes === "Area owner note", "Responsibility owner could not update workspace notes");
+  assert(updatedOwnedArea.planItems?.[0]?.title === "Area owner plan", "Responsibility owner could not update workspace plan");
+  assert(updatedOwnedArea.ownerUserIds.some((id) => String(id) === String(viewerMember.userId)), "Responsibility owner changed ownership");
+  const foreignArea = await request(`/projects/${project.id}/responsibility-areas`, {
+    method: "POST",
+    body: { title: "Foreign Area", ownerUserIds: [user.id] },
+    expected: 201,
+  });
+  await request(`/projects/${project.id}/responsibility-areas/${foreignArea.id}`, {
+    method: "PATCH",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { notes: "Forbidden note" },
+    expected: 403,
+  });
+  await request(`/projects/${project.id}/members/${viewerMember.id}/role`, {
+    method: "POST",
+    body: { role: "viewer", actorUserId: user.id },
   });
 
   const rootTree = await request(`/projects/${project.id}/space/tree?parentId=null`);
@@ -238,6 +508,128 @@ try {
       title: "Smoke Page",
       parentId: folder.id,
       initialBlocks: [{ type: "paragraph", content: { text: "Initial smoke text" }, order: 0 }],
+    },
+    expected: 201,
+  });
+
+  const inboxFolder = await request(`/projects/${project.id}/space/nodes`, {
+    method: "POST",
+    body: { type: "folder", title: "Inbox", parentId: null },
+    expected: 201,
+  });
+  const inboxPage = await request(`/projects/${project.id}/space/nodes`, {
+    method: "POST",
+    body: {
+      type: "page",
+      title: "Smoke Inbox idea",
+      parentId: inboxFolder.id,
+      properties: { author: String(user.id) },
+      initialBlocks: [{ type: "paragraph", content: { text: "Inbox text for AI analysis" }, order: 0 }],
+    },
+    expected: 201,
+  });
+
+  const pngBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const uploadedFile = await request(`/projects/${project.id}/files?fileName=smoke.png&mode=block`, {
+    method: "POST",
+    rawBody: pngBytes,
+    headers: { "Content-Type": "image/png" },
+    expected: 201,
+  });
+  assert(uploadedFile.fileName === "smoke.png" && uploadedFile.category === "image", "Project file metadata is invalid");
+
+  await request(`/projects/${project.id}/files?fileName=forbidden.png&mode=block`, {
+    method: "POST",
+    auth: "tma",
+    initData: viewerInitData,
+    rawBody: pngBytes,
+    headers: { "Content-Type": "image/png" },
+    expected: 403,
+  });
+  await request(`/projects/${project.id}/files?fileName=fake.png&mode=block`, {
+    method: "POST",
+    rawBody: Buffer.from("not a png"),
+    headers: { "Content-Type": "image/png" },
+    expected: 400,
+  });
+
+  const additionalFileFixtures = [
+    {
+      fileName: "smoke.pdf",
+      bytes: Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF", "ascii"),
+      mimeType: "application/pdf",
+      category: "document",
+    },
+    {
+      fileName: "smoke.docx",
+      bytes: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]),
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      category: "document",
+    },
+    {
+      fileName: "smoke.mp3",
+      bytes: Buffer.from("ID3smoke-audio", "ascii"),
+      mimeType: "audio/mpeg",
+      category: "audio",
+    },
+  ];
+  for (const fixture of additionalFileFixtures) {
+    const record = await request(`/projects/${project.id}/files?fileName=${encodeURIComponent(fixture.fileName)}&mode=block`, {
+      method: "POST",
+      rawBody: fixture.bytes,
+      headers: { "Content-Type": fixture.mimeType },
+      expected: 201,
+    });
+    assert(record.mimeType === fixture.mimeType && record.category === fixture.category, `Invalid metadata for ${fixture.fileName}`);
+    await request(`/projects/${project.id}/files/${record.id}`, { method: "DELETE" });
+  }
+
+  const fileContentResponse = await fetch(
+    `${baseUrl}/projects/${project.id}/files/${uploadedFile.id}/content`,
+    { headers: { Authorization: `Bearer ${sessionToken}` } },
+  );
+  assert(fileContentResponse.status === 200, "Uploaded project file cannot be read");
+  const downloadedFile = Buffer.from(await fileContentResponse.arrayBuffer());
+  assert(downloadedFile.equals(pngBytes), "Downloaded project file differs from uploaded content");
+
+  const fileBlock = await request(`/projects/${project.id}/space/pages/${page.id}/blocks`, {
+    method: "POST",
+    body: {
+      type: "file",
+      content: {
+        fileId: uploadedFile.id,
+        fileName: uploadedFile.fileName,
+        mimeType: uploadedFile.mimeType,
+        category: uploadedFile.category,
+        size: uploadedFile.size,
+      },
+    },
+    expected: 201,
+  });
+  await request(`/projects/${project.id}/files/${uploadedFile.id}`, { method: "DELETE", expected: 409 });
+  await request(`/projects/${project.id}/space/blocks/${fileBlock.id}`, { method: "DELETE" });
+  await request(`/projects/${project.id}/files/${uploadedFile.id}`, { expected: 404 });
+
+  const persistedFile = await request(`/projects/${project.id}/files?fileName=persisted.png&mode=block`, {
+    method: "POST",
+    rawBody: pngBytes,
+    headers: { "Content-Type": "image/png" },
+    expected: 201,
+  });
+  await request(`/projects/${project.id}/space/pages/${page.id}/blocks`, {
+    method: "POST",
+    body: {
+      type: "file",
+      content: {
+        fileId: persistedFile.id,
+        fileName: persistedFile.fileName,
+        mimeType: persistedFile.mimeType,
+        category: persistedFile.category,
+        size: persistedFile.size,
+      },
     },
     expected: 201,
   });
@@ -294,6 +686,15 @@ try {
     },
     expected: 201,
   });
+
+  const deadlineRange = new URLSearchParams({
+    from: new Date(Date.now() - 60 * 1000).toISOString(),
+    to: new Date(Date.now() + 48 * 3600 * 1000).toISOString(),
+    projectId: String(project.id),
+  });
+  const taskDeadlines = await request(`/me/task-deadlines?${deadlineRange}`);
+  assert(taskDeadlines.some((item) => item.id === task.id), "Active task deadline is missing from the calendar layer");
+  assert(taskDeadlines.find((item) => item.id === task.id)?.project?.title === project.title, "Task deadline does not include its project");
 
   await request("/tasks", {
     method: "POST",
@@ -356,20 +757,64 @@ try {
   const pagedNotifications = await request(`/notifications/pending?paginated=1&limit=1&before=${encodeURIComponent(new Date().toISOString())}`, { auth: "bot" });
   assert(Array.isArray(pagedNotifications.notifications) && pagedNotifications.notifications.length === 1 && pagedNotifications.total >= 1, "Paginated notifications response is invalid");
 
+  const completedInFinalColumn = await request(`/tasks/${task.id}/move`, {
+    method: "POST",
+    body: { columnId: columns.at(-1).id, position: 0 },
+  });
+  assert(Boolean(completedInFinalColumn.completedAt), "Task in the rightmost column was not marked completed");
+  const taskDeadlinesAfterCompletion = await request(`/me/task-deadlines?${deadlineRange}`);
+  assert(!taskDeadlinesAfterCompletion.some((item) => item.id === task.id), "Completed task leaked into the calendar deadline layer");
+
+  const assignedAfterCompletion = await request(`/users/${user.id}/assigned-tasks`);
+  assert(!assignedAfterCompletion.some((item) => item.id === task.id), "Task in the rightmost column is still returned as active");
+  const weeklyProgressAfterCompletion = await request(`/users/${user.id}/task-progress?days=7`);
+  assert(weeklyProgressAfterCompletion.completed >= 1, "Weekly task progress does not count a completed assigned task");
+  assert(weeklyProgressAfterCompletion.percent === 100, "Weekly task progress percentage is invalid after completion");
+
+  const addedRightmostColumn = await request(`/projects/${project.id}/columns`, {
+    method: "POST",
+    body: { title: "Smoke final column", pageId: kanbanPage.id },
+    expected: 201,
+  });
+  const reopenedAfterColumnAdded = await request(`/tasks/${task.id}`);
+  assert(!reopenedAfterColumnAdded.completedAt, "Task stayed completed after a new column was added to its right");
+
+  const reorderedColumnIds = [
+    ...columns.slice(0, -1).map((column) => column.id),
+    addedRightmostColumn.id,
+    columns.at(-1).id,
+  ];
+  await request(`/projects/${project.id}/columns/reorder`, {
+    method: "POST",
+    body: { orderedIds: reorderedColumnIds, pageId: kanbanPage.id },
+  });
+  const completedAfterReorder = await request(`/tasks/${task.id}`);
+  assert(Boolean(completedAfterReorder.completedAt), "Task was not completed after its column became rightmost again");
+
   const movedTask = await request(`/tasks/${task.id}/move`, {
     method: "POST",
     body: { columnId: columns[1].id, position: 0 },
   });
   assert(movedTask.columnId === columns[1].id, "Task was not moved to the target column");
+  const taskDeadlinesAfterReopen = await request(`/me/task-deadlines?${deadlineRange}`);
+  assert(taskDeadlinesAfterReopen.some((item) => item.id === task.id), "Reopened task deadline did not return to the calendar layer");
 
   const assignedTasks = await request(`/users/${user.id}/assigned-tasks`);
   assert(assignedTasks.some((item) => item.id === task.id), "Active assigned task is missing");
+  assert(assignedTasks.find((item) => item.id === task.id)?.project?.title === project.title, "Assigned task does not include its project title");
+  const weeklyProgressWithActiveTask = await request(`/users/${user.id}/task-progress?days=7`);
+  assert(
+    weeklyProgressWithActiveTask.total === weeklyProgressWithActiveTask.completed + weeklyProgressWithActiveTask.active,
+    "Weekly task progress total does not match completed plus active tasks",
+  );
 
   const searchResults = await request(`/projects/${project.id}/search?q=${encodeURIComponent("Smoke task")}`);
   assert(searchResults.some((item) => item.kind === "task" && item.id === task.id), "Search did not find created task");
 
   const archivedTask = await request(`/tasks/${task.id}/archive`, { method: "POST" });
   assert(archivedTask.isArchived === true, "Task archive endpoint did not archive the task");
+  const taskDeadlinesAfterArchive = await request(`/me/task-deadlines?${deadlineRange}`);
+  assert(!taskDeadlinesAfterArchive.some((item) => item.id === task.id), "Archived task leaked into the calendar deadline layer");
 
   const assignedAfterArchive = await request(`/users/${user.id}/assigned-tasks`);
   assert(!assignedAfterArchive.some((item) => item.id === task.id), "Archived task is still returned as active");
@@ -377,12 +822,156 @@ try {
   const allNodes = await request(`/projects/${project.id}/space/nodes`);
   assert(allNodes.nodes.some((item) => item.id === page.id), "All nodes API does not include created page");
 
+  const aiToken = await request(`/projects/${project.id}/ai-tokens`, {
+    method: "POST",
+    body: {
+      name: "Smoke AI token",
+      expiresInDays: 1,
+      accessPolicy: {
+        scope: "summary",
+        includeTasks: true,
+        includeWorkspace: false,
+        includeCalendar: false,
+        includeReminders: false,
+        includeInbox: false,
+        includeResponsibility: false,
+        includeActivity: false,
+        includeBlocks: false,
+        includeArchived: false,
+        maxTasks: 1,
+        maxBlocks: 1,
+      },
+    },
+    expected: 201,
+  });
+  assert(aiToken.token && aiToken.tokenRecord?.id, "AI connector token was not created");
+
+  const aiContext = await request(
+    `/projects/${project.id}/ai-context?tool=smoke_mcp_tool&scope=full&includeWorkspace=1&includeBlocks=1&includeActivity=1&maxTasks=50&maxBlocks=50`,
+    { auth: "ai", bearerToken: aiToken.token },
+  );
+  assert(aiContext.scope === "summary", "AI connector access policy did not clamp requested scope");
+  assert((aiContext.workspace?.nodes ?? []).length === 0, "AI connector access policy leaked disabled workspace nodes");
+  assert((aiContext.workspace?.blocks ?? []).length === 0, "AI connector access policy leaked disabled workspace blocks");
+  assert((aiContext.inboxItems ?? []).length === 0, "AI connector access policy leaked disabled Inbox items");
+  assert(aiContext.limits?.tasksReturned <= 1, "AI connector access policy did not clamp task limit");
+
+  const projectSectionsToken = await request(`/projects/${project.id}/ai-tokens`, {
+    method: "POST",
+    body: {
+      name: "Project sections AI token",
+      expiresInDays: 1,
+      accessPolicy: {
+        scope: "full",
+        includeTasks: false,
+        includeWorkspace: false,
+        includeCalendar: true,
+        includeReminders: true,
+        includeInbox: true,
+        includeResponsibility: false,
+        includeActivity: false,
+        includeBlocks: false,
+        includeArchived: false,
+        maxTasks: 1,
+        maxBlocks: 1,
+      },
+    },
+    expected: 201,
+  });
+  const projectSectionsContext = await request(
+    `/projects/${project.id}/ai-context?scope=full&includeWorkspace=0&includeCalendar=1&includeReminders=1&includeInbox=1`,
+    { auth: "ai", bearerToken: projectSectionsToken.token },
+  );
+  assert(projectSectionsContext.calendarEvents.some((event) => event.id === selectedCalendarEvent.id), "Project calendar did not reach AI context");
+  assert(projectSectionsContext.limits?.sectionsIncluded?.reminders === true, "Project reminders section was not enabled in AI context");
+  assert(projectSectionsContext.inboxItems.some((item) => item.id === inboxPage.id), "Project Inbox did not reach AI context");
+  assert(
+    projectSectionsContext.inboxItems.find((item) => item.id === inboxPage.id)?.blocks?.some((block) => String(block.content).includes("Inbox text for AI analysis")),
+    "Project Inbox block content did not reach AI context",
+  );
+
+  const scopedAiToken = await request(`/projects/${project.id}/ai-tokens`, {
+    method: "POST",
+    body: {
+      name: "Scoped AI token",
+      expiresInDays: 1,
+      accessPolicy: {
+        scope: "full",
+        includeTasks: true,
+        includeWorkspace: true,
+        includeCalendar: false,
+        includeReminders: false,
+        includeInbox: false,
+        includeResponsibility: false,
+        includeActivity: true,
+        includeBlocks: true,
+        includeArchived: true,
+        workspaceAccessMode: "include",
+        workspaceNodeIds: [kanbanPage.id],
+        maxTasks: 50,
+        maxBlocks: 50,
+      },
+    },
+    expected: 201,
+  });
+  const scopedContext = await request(
+    `/projects/${project.id}/ai-context?scope=full&includeBlocks=1&includeArchived=1&maxTasks=50&maxBlocks=50`,
+    { auth: "ai", bearerToken: scopedAiToken.token },
+  );
+  assert(scopedContext.limits?.workspaceAccess?.mode === "include", "AI connector workspace selection mode was not applied");
+  assert(scopedContext.workspace.nodes.some((node) => node.id === kanbanPage.id), "Selected Kanban board was not returned");
+  assert(!scopedContext.workspace.nodes.some((node) => node.id === page.id), "Unselected page leaked into scoped AI context");
+  assert(scopedContext.tasks.some((item) => item.id === task.id), "Task from selected Kanban board was not returned");
+
+  const scopedChanges = await request(
+    `/projects/${project.id}/ai-context/changes?since=${encodeURIComponent(new Date(Date.now() - 3600000).toISOString())}&includeBlocks=1&includeArchived=1`,
+    { auth: "ai", bearerToken: scopedAiToken.token },
+  );
+  assert(scopedChanges.kind === "noto_project_ai_changes", "AI connector changes endpoint returned an invalid payload");
+  assert(!scopedChanges.newPages.some((node) => node.id === page.id), "Unselected page leaked into AI changes");
+
+  const projectSectionsChanges = await request(
+    `/projects/${project.id}/ai-context/changes?since=${encodeURIComponent(new Date(Date.now() - 3600000).toISOString())}&includeCalendar=1&includeReminders=1&includeInbox=1`,
+    { auth: "ai", bearerToken: projectSectionsToken.token },
+  );
+  assert(projectSectionsChanges.newCalendarEvents.some((event) => event.id === selectedCalendarEvent.id), "Calendar changes did not reach AI delta context");
+  assert(projectSectionsChanges.newInboxItems.some((item) => item.id === inboxPage.id), "Inbox changes did not reach AI delta context");
+
+  const aiAccessEvents = await request(`/projects/${project.id}/ai-access-events?limit=20`);
+  assert(aiAccessEvents.some((event) => event.toolName === "smoke_mcp_tool"), "AI connector access log did not store MCP tool name");
+  assert(aiAccessEvents.some((event) => event.toolName === "get_project_changes"), "AI connector access log did not store changes tool name");
+
+  await request(`/projects/${project.id}/ai-tokens/${aiToken.tokenRecord.id}`, { method: "DELETE" });
+  await request(`/projects/${project.id}/ai-tokens/${scopedAiToken.tokenRecord.id}`, { method: "DELETE" });
+  await request(`/projects/${project.id}/ai-tokens/${projectSectionsToken.tokenRecord.id}`, { method: "DELETE" });
+  await request(`/projects/${project.id}/ai-context`, { auth: "ai", bearerToken: aiToken.token, expected: 401 });
+
+  await request(`/system/users/${rateUser.id}/block`, { method: "POST" });
+  const security = await request("/system/security-events?paginated=1&limit=500");
+  assert(security.summary.windows["24h"].failedLogins > 0, "Failed login attempts were not summarized");
+  assert(security.summary.windows["24h"].rateLimitHits > 0, "Rate-limit events were not summarized");
+  assert(security.summary.windows["24h"].foreignProjectAccessAttempts > 0, "Foreign project access attempts were not summarized");
+  assert(security.summary.blocked.ips.length > 0, "Active IP blocks were not returned");
+  assert(security.summary.blocked.users.some((item) => String(item.id) === String(rateUser.id)), "Blocked users were not returned");
+  assert(security.events.some((event) => event.type === "project_access_denied" && /^P-[A-F0-9]{8}$/.test(event.projectReference)), "Foreign project event is incomplete");
+  assert(security.events.every((event) => !Object.prototype.hasOwnProperty.call(event, "projectId")), "Security events leaked internal project IDs");
+
+  const systemStats = await request("/system/stats");
+  assert(systemStats.owner.telegramIds.includes("900001"), "System owner access is not bound to Telegram ID");
+  assert(systemStats.services.some((service) => service.id === "api" && service.status === "online"), "System service status is missing");
+  assert(systemStats.performance.windows["1h"].requests > 0, "System API performance metrics were not collected");
+  assert(systemStats.server.memory.rssBytes > 0 && systemStats.server.cpu.cores > 0, "Server metrics are incomplete");
+  assert(systemStats.storage.topProjects.some((item) => /^P-[A-F0-9]{8}$/.test(item.reference)), "Project storage metrics are incomplete");
+  assert(systemStats.storage.topProjects.every((item) => !Object.prototype.hasOwnProperty.call(item, "id") && !Object.prototype.hasOwnProperty.call(item, "title")), "System stats leaked project identity");
+  assert(systemStats.bot.requestsSinceApiStart > 0 && systemStats.bot.lastSeenAt, "Telegram bot heartbeat was not detected");
+  assert(systemStats.database.files.every((file) => !String(file.path).includes("/") && !String(file.path).includes("\\")), "System stats leaked an absolute database path");
+
   // Node signal delivery for child processes is not reliable on Windows. There we verify
   // the debounced write itself; Linux/macOS still verify the final shutdown flush below.
   if (process.platform === "win32") await delay(flushDebounceMs + 300);
   await stopServer();
 
-  await assertPersisted(project.id, page.id, task.id, sessionToken);
+  await assertPersisted(project.id, page.id, task.id, sessionToken, persistedFile.id);
 
   console.log("Smoke API passed");
 } catch (error) {
@@ -432,7 +1021,7 @@ async function persistedAuthCodes() {
   return persisted.authCodes ?? [];
 }
 
-function assertPersisted(projectId, pageId, taskId, rawSessionToken) {
+function assertPersisted(projectId, pageId, taskId, rawSessionToken, projectFileId) {
   if (workspaceStorage === "sqlite" && normalizedTables) {
     const sqlite = new DatabaseSync(path.join(tempRoot, "database", "app.db"));
     try {
@@ -453,6 +1042,11 @@ function assertPersisted(projectId, pageId, taskId, rawSessionToken) {
       assert(sessionRows.every((row) => hasOnlyHashedSessionToken(JSON.parse(row.payload), rawSessionToken)), "Raw session token leaked into sqlite normalized records");
       const authCodeRows = sqlite.prepare("SELECT payload FROM records WHERE collection = 'authCodes'").all();
       assert(authCodeRows.every((row) => hasOnlyHashedAuthCode(JSON.parse(row.payload))), "Raw auth code leaked into sqlite normalized records");
+      const projectFileRows = sqlite.prepare("SELECT payload FROM records WHERE collection = 'projectFiles'").all();
+      assert(projectFileRows.some((row) => JSON.parse(row.payload).id === projectFileId), "Project file metadata was not persisted in sqlite normalized records");
+      const calendarRows = sqlite.prepare("SELECT payload FROM records WHERE collection = 'calendars'").all();
+      assert(calendarRows.some((row) => JSON.parse(row.payload).type === "PERSONAL"), "Personal calendar was not persisted in sqlite normalized records");
+      assert(calendarRows.some((row) => JSON.parse(row.payload).type === "PROJECT"), "Project calendar was not persisted in sqlite normalized records");
     } finally {
       sqlite.close();
     }
@@ -469,6 +1063,9 @@ function assertPersisted(projectId, pageId, taskId, rawSessionToken) {
       assert(persisted?.tasks?.some((item) => item.id === taskId && item.isArchived), "Archived task was not persisted in sqlite app_state");
       assert((persisted?.sessions ?? []).some((item) => hasOnlyHashedSessionToken(item, rawSessionToken)), "Raw session token leaked into sqlite app_state");
       assert((persisted?.authCodes ?? []).every((item) => hasOnlyHashedAuthCode(item)), "Raw auth code leaked into sqlite app_state");
+      assert((persisted?.projectFiles ?? []).some((item) => item.id === projectFileId), "Project file metadata was not persisted in sqlite app_state");
+      assert((persisted?.calendars ?? []).some((item) => item.type === "PERSONAL"), "Personal calendar was not persisted in sqlite app_state");
+      assert((persisted?.calendars ?? []).some((item) => item.type === "PROJECT"), "Project calendar was not persisted in sqlite app_state");
     } finally {
       sqlite.close();
     }
@@ -482,6 +1079,9 @@ function assertPersisted(projectId, pageId, taskId, rawSessionToken) {
     assert(persisted.tasks.some((item) => item.id === taskId && item.isArchived), "Archived task was not persisted after shutdown flush");
     assert((persisted.sessions ?? []).some((item) => hasOnlyHashedSessionToken(item, rawSessionToken)), "Raw session token leaked into app.json");
     assert((persisted.authCodes ?? []).every((item) => hasOnlyHashedAuthCode(item)), "Raw auth code leaked into app.json");
+    assert((persisted.projectFiles ?? []).some((item) => item.id === projectFileId), "Project file metadata was not persisted in app.json");
+    assert((persisted.calendars ?? []).some((item) => item.type === "PERSONAL"), "Personal calendar was not persisted in app.json");
+    assert((persisted.calendars ?? []).some((item) => item.type === "PROJECT"), "Project calendar was not persisted in app.json");
   });
 }
 
@@ -499,11 +1099,14 @@ async function request(pathname, options = {}) {
   return payload;
 }
 
-async function requestResponse(pathname, { method = "GET", body, expected = 200, auth = "user", initData, headers: extraHeaders = {} } = {}) {
+async function requestResponse(pathname, { method = "GET", body, rawBody, expected = 200, auth = "user", initData, bearerToken, headers: extraHeaders = {} } = {}) {
   const headers = { ...extraHeaders };
   if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
   if (auth === "bot") {
     headers.Authorization = `Bot ${authToken}`;
+  } else if (auth === "ai") {
+    if (!bearerToken) throw new Error(`AI token is not ready for ${method} ${pathname}`);
+    headers.Authorization = `Bearer ${bearerToken}`;
   } else if (auth === "tma") {
     if (!initData) throw new Error(`Telegram initData is not ready for ${method} ${pathname}`);
     headers.Authorization = `tma ${initData}`;
@@ -515,7 +1118,7 @@ async function requestResponse(pathname, { method = "GET", body, expected = 200,
   const response = await fetch(`${baseUrl}${pathname}`, {
     method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: rawBody === undefined ? (body === undefined ? undefined : JSON.stringify(body)) : rawBody,
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;

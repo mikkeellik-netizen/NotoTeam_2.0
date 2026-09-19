@@ -85,7 +85,7 @@ export default function ProjectsPage() {
             </p>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {isSystemOwner && (
             <button
               onClick={() => navigate('/system-admin')}
@@ -96,12 +96,6 @@ export default function ProjectsPage() {
             </button>
           )}
           <button
-            onClick={() => navigate('/my-tasks')}
-            className="text-sm font-medium text-[var(--tg-theme-link-color)]"
-          >
-            Мои задачи
-          </button>
-          <button
             onClick={() => navigate('/settings')}
             className="h-8 w-8 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]"
             aria-label="Настройки"
@@ -110,6 +104,42 @@ export default function ProjectsPage() {
           </button>
         </div>
       </div>
+
+      <nav className="grid grid-cols-3 gap-2 border-b border-[var(--tg-theme-secondary-bg-color)] px-4 py-2.5" aria-label="Личные разделы">
+        <button
+          type="button"
+          onClick={() => navigate('/today')}
+          className="flex min-h-[58px] min-w-0 flex-col items-center justify-center gap-1 rounded-[8px] border border-[color-mix(in_srgb,#F59E0B_38%,transparent)] bg-[color-mix(in_srgb,#F59E0B_10%,var(--tg-theme-bg-color))] px-1.5 text-center transition-colors active:bg-[color-mix(in_srgb,#F59E0B_18%,var(--tg-theme-bg-color))] sm:flex-row sm:gap-2 sm:px-3 sm:text-left"
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] bg-amber-500 text-base" aria-hidden="true">☀️</span>
+          <span className="min-w-0">
+            <span className="block truncate text-xs font-bold text-[var(--tg-theme-text-color)] sm:text-sm">Сегодня</span>
+            <span className="mt-0.5 hidden text-[11px] leading-tight text-[var(--tg-theme-hint-color)] sm:block">Фокус дня</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate('/my-calendar')}
+          className="flex min-h-[58px] min-w-0 flex-col items-center justify-center gap-1 rounded-[8px] border border-[color-mix(in_srgb,var(--tg-theme-link-color)_35%,transparent)] bg-[color-mix(in_srgb,var(--tg-theme-link-color)_10%,var(--tg-theme-bg-color))] px-1.5 text-center transition-colors active:bg-[color-mix(in_srgb,var(--tg-theme-link-color)_18%,var(--tg-theme-bg-color))] sm:flex-row sm:gap-2 sm:px-3 sm:text-left"
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] bg-[var(--tg-theme-link-color)] text-base" aria-hidden="true">📅</span>
+          <span className="min-w-0">
+            <span className="block truncate text-xs font-bold text-[var(--tg-theme-text-color)] sm:text-sm">Календарь</span>
+            <span className="mt-0.5 hidden text-[11px] leading-tight text-[var(--tg-theme-hint-color)] sm:block">Все события</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate('/my-tasks')}
+          className="flex min-h-[58px] min-w-0 flex-col items-center justify-center gap-1 rounded-[8px] border border-[color-mix(in_srgb,#22c55e_35%,transparent)] bg-[color-mix(in_srgb,#22c55e_10%,var(--tg-theme-bg-color))] px-1.5 text-center transition-colors active:bg-[color-mix(in_srgb,#22c55e_18%,var(--tg-theme-bg-color))] sm:flex-row sm:gap-2 sm:px-3 sm:text-left"
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] bg-green-500 text-base" aria-hidden="true">📋</span>
+          <span className="min-w-0">
+            <span className="block truncate text-xs font-bold text-[var(--tg-theme-text-color)] sm:text-sm">Мои задачи</span>
+            <span className="mt-0.5 hidden text-[11px] leading-tight text-[var(--tg-theme-hint-color)] sm:block">Из всех проектов</span>
+          </span>
+        </button>
+      </nav>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
         {isLoading ? (

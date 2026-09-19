@@ -1,0 +1,9 @@
+[mcp_servers.noto_ai_connector]
+command = "node"
+args = ["/absolute/path/to/ai-connector-mcp/src/server.js"]
+enabled = true
+required = false
+startup_timeout_sec = 15
+tool_timeout_sec = 60
+default_tools_approval_mode = "auto"
+env = { AI_CONNECTOR_API_URL = "https://api.example.com", AI_CONNECTOR_AUTH_TOKEN = "noto_ai_replace_with_project_token", AI_CONNECTOR_PROJECT_ID = "1" }

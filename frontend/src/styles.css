@@ -86,6 +86,14 @@ select {
   background: color-mix(in srgb, var(--tg-theme-button-color) 75%, transparent);
 }
 
+.admin-tab-strip {
+  scrollbar-width: none;
+}
+
+.admin-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
 .workspace-breadcrumbs {
   scrollbar-width: none;
 }

@@ -16,11 +16,19 @@ export function setAuthHeader(value: string | undefined) {
 
 export function setSessionToken(token: string | undefined) {
   if (token) {
-    localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
     authHeader = `Bearer ${token}`;
+    try {
+      localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } catch {
+      // Session still works in memory for the current tab.
+    }
   } else {
-    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     authHeader = undefined;
+    try {
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    } catch {
+      // Ignore unavailable browser storage.
+    }
   }
 }
 
@@ -52,7 +60,11 @@ export function getEffectiveAuthHeader(): string | undefined {
 }
 
 export function getStoredSessionToken(): string | undefined {
-  return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? undefined;
+  try {
+    return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Токен сессии можно передать в query (?token=) для прямых ссылок на скачивание файлов.

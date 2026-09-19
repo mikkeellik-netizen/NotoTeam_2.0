@@ -55,10 +55,10 @@ export default function KanbanBoard({
   const dragStartPointerXRef = useRef<number | null>(null);
   const dragStartPointerYRef = useRef<number | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
-  // Р›РѕРєР°Р»СЊРЅРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ РґР»СЏ РѕРїС‚РёРјРёСЃС‚РёС‡РЅРѕРіРѕ UI РІРѕ РІСЂРµРјСЏ РїРµСЂРµС‚Р°СЃРєРёРІР°РЅРёСЏ
+  // Keep a local copy for optimistic updates while dragging.
   const [localTasks, setLocalTasks] = useState<Task[]>(tasks);
 
-  // РЎРёРЅС…СЂРѕРЅРёР·РёСЂСѓРµРј РµСЃР»Рё tasks СЃРЅР°СЂСѓР¶Рё РёР·РјРµРЅРёР»СЃСЏ
+  // Resync when tasks change outside the board.
   useEffect(() => {
     setLocalTasks(tasks);
   }, [tasks]);
@@ -123,7 +123,7 @@ export default function KanbanBoard({
     };
   }, [isDragging]);
 
-  // РЎРµРЅСЃРѕСЂС‹ вЂ” РїРѕРґРґРµСЂР¶РєР° Рё РјС‹С€Рё Рё С‚Р°С‡
+  // Support both pointer and touch input.
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
@@ -140,7 +140,7 @@ export default function KanbanBoard({
     .filter((c) => !c.isHidden && !c.isArchive)
     .sort((a, b) => Number(a.position) - Number(b.position));
 
-  // в”Ђв”Ђв”Ђ РќР°С‡Р°Р»Рѕ РїРµСЂРµС‚Р°СЃРєРёРІР°РЅРёСЏ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // Start dragging.
   const onDragStart = ({ active, activatorEvent }: DragStartEvent) => {
     if (!canMoveTask) return;
     const task = localTasks.find((t) => sameId(t.id, active.id));
@@ -222,7 +222,7 @@ export default function KanbanBoard({
     return columnTasks.length;
   };
 
-  // в”Ђв”Ђв”Ђ РџРµСЂРµС‚Р°СЃРєРёРІР°РЅРёРµ РЅР°Рґ РЅРѕРІРѕР№ РєРѕР»РѕРЅРєРѕР№ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // Handle dragging over a new column.
   const onDragEnd = async ({ active, over }: DragEndEvent) => {
     if (!canMoveTask) return;
     const originalTask = activeDragTask;
@@ -245,7 +245,7 @@ export default function KanbanBoard({
 
     const targetPosition = getTaskInsertPosition(targetColumnId, activeTask.id);
 
-    // РџРµСЂРµРјРµС‰РµРЅРёРµ РјРµР¶РґСѓ РєРѕР»РѕРЅРєР°РјРё
+    // Move the task between columns.
     if (sameId(targetColumnId, activeTask.columnId)) {
       const colTasks = getTasksByColumn(targetColumnId);
       const oldIdx = colTasks.findIndex((task) => sameId(task.id, activeTask.id));
@@ -292,7 +292,7 @@ export default function KanbanBoard({
         setIsDragging(false);
       }}
     >
-      {/* Р“РѕСЂРёР·РѕРЅС‚Р°Р»СЊРЅС‹Р№ СЃРєСЂРѕР»Р» */}
+      {/* Horizontally scrollable board. */}
       <div
         ref={scrollContainerRef}
         className={`kanban-board-scroll flex min-h-full items-start gap-3 overflow-x-auto pb-4 px-4 ${isDragging ? 'snap-none' : 'snap-x snap-mandatory'}`}
@@ -317,15 +317,15 @@ export default function KanbanBoard({
             type="button"
             onClick={() => onAddColumn()}
             className="mt-8 flex h-10 w-10 shrink-0 snap-start items-center justify-center rounded-[12px] border border-dashed border-[var(--tg-theme-hint-color)]/35 bg-[var(--tg-theme-secondary-bg-color)]/60 text-xl font-light text-[var(--tg-theme-hint-color)] transition-colors active:scale-95 hover:border-[var(--tg-theme-button-color)] hover:text-[var(--tg-theme-button-color)]"
-            title="Р”РѕР±Р°РІРёС‚СЊ СЃС‚РѕР»Р±РµС†"
-            aria-label="Р”РѕР±Р°РІРёС‚СЊ СЃС‚РѕР»Р±РµС†"
+            title="Добавить столбец"
+            aria-label="Добавить столбец"
           >
             +
           </button>
         )}
       </div>
 
-      {/* Overlay вЂ” РєР°СЂС‚РѕС‡РєР° РІРѕ РІСЂРµРјСЏ РїРµСЂРµС‚Р°СЃРєРёРІР°РЅРёСЏ */}
+      {/* Drag preview. */}
       <DragOverlay>
         {activeDragTask && (
           <div className="rotate-2 scale-105 shadow-2xl">

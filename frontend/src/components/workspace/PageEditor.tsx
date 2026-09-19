@@ -2,8 +2,9 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState, type MouseEvent a
 import { activityApi } from '../../api/activity';
 import { linkPreviewApi } from '../../api/linkPreview';
 import { tasksApi } from '../../api/tasks';
-import type { Block, BlockType, PageNode, ProjectMember, WebEmbedContent, WebEmbedProvider } from '../../types';
+import type { Block, BlockType, FileBlockContent, PageNode, ProjectFileRecord, ProjectMember, WebEmbedContent, WebEmbedProvider } from '../../types';
 import { usePageStore } from '../../store/pageStore';
+import { projectFileToBlockContent } from '../../api/projectFiles';
 import SlashMenu from './SlashMenu';
 import ContextMenu from '../common/ContextMenu';
 import { copyPlainText } from '../../utils/clipboard';
@@ -127,6 +128,9 @@ const TASK_PLANNING_QUADRANTS = [
 
 const SELECT_OPTION_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#64748B'];
 const BoardPage = lazy(() => import('../../pages/BoardPage'));
+const ResponsibilityMapBlock = lazy(() => import('./ResponsibilityMapBlock'));
+const FileBlock = lazy(() => import('./FileBlock'));
+const FileUploadModal = lazy(() => import('./FileUploadModal'));
 
 export default function PageEditor({ page, projectId, members, onOpenPage, canEdit = true }: Props) {
   const { nodes, createBlock, createBlockWithContent, updateBlock, moveBlock, deleteBlock, renameNode, updateNodeIcon, updatePageProperties, getBlocksByPage } = usePageStore();
@@ -134,6 +138,7 @@ export default function PageEditor({ page, projectId, members, onOpenPage, canEd
   const [slashQuery, setSlashQuery] = useState('');
   const [slashBlockId, setSlashBlockId] = useState<string | null>(null);
   const [plusOpen, setPlusOpen] = useState(false);
+  const [fileUploadOpen, setFileUploadOpen] = useState(false);
   const [focusedBlockId, setFocusedBlockId] = useState<string | null>(null);
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState(page.title);
@@ -261,6 +266,23 @@ export default function PageEditor({ page, projectId, members, onOpenPage, canEd
     setSlashBlockId(null);
     setSlashQuery('');
     setPlusOpen(false);
+  };
+
+  const insertUploadedFiles = (files: ProjectFileRecord[]) => {
+    if (!canEdit || files.length === 0) return;
+    const insertOrder = Math.max(0, blocks.length - 1);
+    files.forEach((file, index) => {
+      createBlockWithContent(page.id, 'file', projectFileToBlockContent(file), insertOrder + index);
+    });
+    activityApi.log({
+      projectId: Number(projectId),
+      type: 'page_edit',
+      title: `Добавил файлы на страницу «${page.title}»`,
+      details: files.map((file) => file.fileName).join(', '),
+      entityType: 'page',
+      entityId: page.id,
+      context: page.title,
+    });
   };
 
   useEffect(() => {
@@ -557,6 +579,7 @@ export default function PageEditor({ page, projectId, members, onOpenPage, canEd
                 onFocused={() => setFocusedBlockId(null)}
                 showPlaceholder={(activeBlockId ? activeBlockId === block.id : emptyPagePlaceholderBlockId === block.id)}
                 onFocus={() => setActiveBlockId(block.id)}
+                canEdit={canEdit}
               />
             </div>
             </div>
@@ -651,12 +674,28 @@ export default function PageEditor({ page, projectId, members, onOpenPage, canEd
         <SlashMenu
           query={slashQuery}
           onSelect={insertBlock}
+          onUploadFiles={() => {
+            setSlashBlockId(null);
+            setSlashQuery('');
+            setPlusOpen(false);
+            setFileUploadOpen(true);
+          }}
           onClose={() => {
             setSlashBlockId(null);
             setSlashQuery('');
             setPlusOpen(false);
           }}
         />
+      )}
+      {canEdit && fileUploadOpen && (
+        <Suspense fallback={null}>
+          <FileUploadModal
+            projectId={projectId}
+            mode="block"
+            onUploaded={insertUploadedFiles}
+            onClose={() => setFileUploadOpen(false)}
+          />
+        </Suspense>
       )}
       {canEdit && contextBlock && (
         <ContextMenu
@@ -736,6 +775,7 @@ function BlockEditor({
   onFocused,
   showPlaceholder,
   onFocus,
+  canEdit,
 }: {
   block: Block;
   projectId: string;
@@ -764,6 +804,7 @@ function BlockEditor({
   onFocused: () => void;
   showPlaceholder: boolean;
   onFocus: () => void;
+  canEdit: boolean;
 }) {
   const text = block.content?.text ?? '';
   const [linkPreviewId, setLinkPreviewId] = useState<string | null>(null);
@@ -850,6 +891,36 @@ function BlockEditor({
           </div>
         )}
       </div>
+    );
+  }
+
+  if (block.type === 'responsibility_map') {
+    const view = block.content?.view === 'summary' ? 'summary' : 'cards';
+    return (
+      <Suspense fallback={<div className="py-6 text-center text-sm text-[var(--tg-theme-hint-color)]">Загрузка карты ответственности...</div>}>
+        <ResponsibilityMapBlock
+          projectId={projectId}
+          pageId={page.id}
+          members={members}
+          nodes={nodes}
+          view={view}
+          canEdit={canEdit}
+          onViewChange={(nextView) => onUpdate({ ...block.content, view: nextView })}
+        />
+      </Suspense>
+    );
+  }
+
+  if (block.type === 'file') {
+    return (
+      <Suspense fallback={<div className="py-4 text-center text-sm text-[var(--tg-theme-hint-color)]">Загрузка файла…</div>}>
+        <FileBlock
+          projectId={projectId}
+          content={block.content as FileBlockContent}
+          canEdit={canEdit}
+          onUpdate={onUpdate}
+        />
+      </Suspense>
     );
   }
 
@@ -2138,6 +2209,8 @@ function getNumberedListIndex(block: Block, blocks: Block[]) {
 
 function isBlockEmpty(block: Block) {
   if (block.type === 'simple_table') return false;
+  if (block.type === 'responsibility_map') return false;
+  if (block.type === 'file') return false;
   if (block.type === 'link_to_page') return !block.content?.targetPageId;
   if (block.type === 'kanban_embed') return false;
   if (block.type === 'web_embed') return !block.content?.url;
@@ -2146,6 +2219,8 @@ function isBlockEmpty(block: Block) {
 
 function blockContextMenuTitle(block: Block) {
   if (block.type === 'simple_table') return 'Таблица целиком';
+  if (block.type === 'responsibility_map') return 'Карта ответственности';
+  if (block.type === 'file') return block.content?.fileName || 'Файл';
   return 'Блок';
 }
 
@@ -5406,6 +5481,7 @@ function extractBlockText(content: any) {
   if (typeof content.text === 'string') return content.text;
   if (typeof content.title === 'string') return content.title;
   if (typeof content.url === 'string') return content.title || content.url;
+  if (typeof content.fileName === 'string') return content.caption || content.fileName;
   if (Array.isArray(content.rows)) return content.rows.flat().join(' ');
   return '';
 }
@@ -5420,6 +5496,8 @@ function blockToPlainText(block: Block) {
   if (block.type === 'numbered_list') return `1. ${content.text ?? ''}`.trim();
   if (block.type === 'link_to_page') return content.displayText ?? content.targetPageId ?? '';
   if (block.type === 'kanban_embed') return 'Kanban-доска';
+  if (block.type === 'responsibility_map') return 'Карта ответственности';
+  if (block.type === 'file') return [content.fileName, content.caption].filter(Boolean).join(' — ');
   if (block.type === 'web_embed') return content.url ?? '';
   return extractBlockText(content);
 }
@@ -5474,7 +5552,9 @@ function defaultContentFor(type: BlockType, projectId: string, pageId: string) {
   if (type === 'link_to_page') return { displayText: '', targetPageId: '' };
   if (type === 'kanban_embed') return { projectId, pageId };
   if (type === 'web_embed') return { url: '', mode: 'auto', provider: 'generic', height: 280 };
+  if (type === 'file') return { fileId: '', fileName: '', mimeType: '', category: 'document', size: 0 };
   if (type === 'smart_summary') return {};
+  if (type === 'responsibility_map') return { view: 'cards' };
   if (type === 'collapsible') return { title: 'Новый раздел', text: '', collapsed: false };
   if (type === 'page_properties') return {};
   return { text: '' };

@@ -31,28 +31,31 @@ export type VoiceIntent =
       text: string;
     };
 
+const NOTE_PATTERN = /(?:запиши(?:\s+заметку)?|сохрани мысль|заметка|идея|note)/i;
+const REMINDER_PATTERN = /(напомни|напоминание|напомнить|remind)/i;
+const NOTIFICATION_PATTERN = /(уведоми|уведомление|сообщи|notification)/i;
+
 export class VoiceIntentParser {
   constructor(private taskParser = new TaskParser()) {}
 
   parse(text: string): VoiceIntent {
     const normalized = text.trim();
-    const lower = normalized.toLowerCase();
     const taskLike = this.taskParser.parse(normalized);
 
-    if (/(заметка|запиши|сохрани мысль|идея|note)/i.test(lower)) {
+    if (NOTE_PATTERN.test(normalized)) {
       return {
         kind: "note",
         originalText: normalized,
-        title: cleanLead(normalized, /(заметка|запиши|сохрани мысль|идея|note)/i) || "Голосовая заметка",
+        title: cleanLead(normalized, NOTE_PATTERN) || "Голосовая заметка",
         text: normalized,
       };
     }
 
-    if (/(напомни|напоминание|напомнить|remind)/i.test(lower)) {
+    if (REMINDER_PATTERN.test(normalized)) {
       return {
         kind: "reminder",
         originalText: normalized,
-        title: cleanLead(taskLike.title, /(напомни|напоминание|напомнить|remind)/i) || taskLike.title,
+        title: cleanLead(taskLike.title, REMINDER_PATTERN) || taskLike.title,
         description: normalized,
         remindAt: taskLike.deadlineAt,
         scheduleType: "once",
@@ -60,11 +63,11 @@ export class VoiceIntentParser {
       };
     }
 
-    if (/(уведоми|уведомление|сообщи|notification)/i.test(lower)) {
+    if (NOTIFICATION_PATTERN.test(normalized)) {
       return {
         kind: "notification",
         originalText: normalized,
-        title: cleanLead(taskLike.title, /(уведоми|уведомление|сообщи|notification)/i) || taskLike.title,
+        title: cleanLead(taskLike.title, NOTIFICATION_PATTERN) || taskLike.title,
         description: normalized,
         assigneeUsername: taskLike.assigneeUsername,
       };

@@ -2,6 +2,7 @@ import type { BotMessenger, WorkspaceRepository } from "../ports.js";
 import type { NotificationEvent, Project, ProjectBotSettings, Reminder, Task, User } from "../types.js";
 import { mergeBotSettings } from "../defaultSettings.js";
 import { escapeMarkdown, formatMentionNotification, formatTaskNotification } from "./formatters.js";
+import { buildWebAppUrl } from "../webAppLinks.js";
 
 const MSK_UTC_OFFSET_HOURS = 3;
 
@@ -200,7 +201,7 @@ export class NotificationService {
           sourceTitle: payload.title ?? "Рабочее пространство",
           text: payload.text ?? "",
         }),
-        { webAppUrl: `${this.webAppUrl}/project/${project.id}/workspace` },
+        { webAppUrl: this.appLink(`/project/${project.id}/workspace`) },
       );
       return;
     }
@@ -218,7 +219,7 @@ export class NotificationService {
           `📁 Проект: ${escapeMarkdown(project.title)}`,
           comment ? `📝 ${escapeMarkdown(comment)}` : "",
         ].filter(Boolean).join("\n"),
-        { webAppUrl: `${this.webAppUrl}/project/${project.id}/workspace${event.payload.pageId ? `/page/${event.payload.pageId}` : ""}` },
+        { webAppUrl: this.appLink(`/project/${project.id}/workspace${event.payload.pageId ? `/page/${event.payload.pageId}` : ""}`) },
       );
       return;
     }
@@ -238,10 +239,10 @@ export class NotificationService {
               ? "🎤 *ГОЛОСОВАЯ ЗАМЕТКА*"
               : "🔔 *УВЕДОМЛЕНИЕ*";
       const webAppUrl = isJoinRequest
-        ? `${this.webAppUrl}/project/${project.id}/settings`
+        ? this.appLink(`/project/${project.id}/settings`)
         : isJoinApproved
-          ? `${this.webAppUrl}/project/${project.id}/workspace`
-          : this.webAppUrl;
+          ? this.appLink(`/project/${project.id}/workspace`)
+          : this.appLink();
       await this.messenger.sendMessage(
         user.telegramId,
         [
@@ -273,7 +274,7 @@ export class NotificationService {
         reminder.description ? `📝 ${escapeMarkdown(reminder.description)}` : "",
         `📁 Проект: ${escapeMarkdown(project.title)}`,
       ].filter(Boolean).join("\n"),
-      { webAppUrl: `${this.webAppUrl}/project/${project.id}/reminders` },
+      { webAppUrl: this.appLink(`/project/${project.id}/reminders`) },
     );
   }
 
@@ -300,9 +301,13 @@ export class NotificationService {
 
   private taskUrl(projectId: string, task: Task) {
     if (task.pageId) {
-      return `${this.webAppUrl}/project/${projectId}/workspace/page/${task.pageId}?taskId=${task.id}`;
+      return this.appLink(`/project/${projectId}/workspace/page/${task.pageId}?taskId=${task.id}`);
     }
-    return `${this.webAppUrl}/project/${projectId}/workspace?taskId=${task.id}`;
+    return this.appLink(`/project/${projectId}/workspace?taskId=${task.id}`);
+  }
+
+  private appLink(target?: string) {
+    return buildWebAppUrl(this.webAppUrl, target);
   }
 }
 

@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { activityApi } from '../../api/activity';
 import { templatesApi } from '../../api/templates';
-import type { PageNode, PageNodeType, RolePermissions, Template } from '../../types';
+import type { PageNode, PageNodeType, ProjectFileRecord, RolePermissions, Template } from '../../types';
 import { usePageStore } from '../../store/pageStore';
+import { projectFileIcon, projectFileToBlockContent } from '../../api/projectFiles';
 import { PAGE_TEMPLATES } from './templates';
 import TemplateBuilderModal from './TemplateBuilderModal';
 import IconPickerModal from './IconPickerModal';
 import ContextMenu from '../common/ContextMenu';
 import HierarchyDnd from './HierarchyDnd';
+import FileUploadModal from './FileUploadModal';
 
 interface Props {
   projectId: string;
@@ -50,6 +52,7 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
   const [contextNode, setContextNode] = useState<{ node: PageNode; x: number; y: number } | null>(null);
   const [nodeToMove, setNodeToMove] = useState<PageNode | null>(null);
   const [iconTarget, setIconTarget] = useState<PageNode | null>(null);
+  const [fileUploadParentId, setFileUploadParentId] = useState<string | null | undefined>(undefined);
 
   const roots = useMemo(
     () => nodes.filter((n) => !n.isDeleted && n.parentId === null).sort((a, b) => a.order - b.order),
@@ -119,6 +122,27 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
       onCloseDrawer?.();
     }
     setTemplatesOpen(false);
+  };
+
+  const createPagesForFiles = (files: ProjectFileRecord[]) => {
+    if (!canCreate || fileUploadParentId === undefined) return;
+    let firstPageId = '';
+    files.forEach((file) => {
+      const node = createNode({
+        projectId,
+        parentId: fileUploadParentId,
+        type: 'page',
+        title: file.fileName,
+        icon: projectFileIcon(file),
+        initialBlocks: [{ type: 'file', content: projectFileToBlockContent(file) }],
+      });
+      firstPageId ||= node.id;
+    });
+    setFileUploadParentId(undefined);
+    if (firstPageId) {
+      onOpenPage(firstPageId);
+      onCloseDrawer?.();
+    }
   };
 
   const moveTemplate = async (templateId: string, direction: -1 | 1) => {
@@ -338,6 +362,9 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
                 <button onClick={() => addNode('kanban', node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
                   + kanban
                 </button>
+                <button onClick={() => setFileUploadParentId(node.id)} className="text-xs text-[var(--tg-theme-link-color)]">
+                  + файл
+                </button>
               </div>
             )}
           </div>
@@ -353,9 +380,14 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
           <h2 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Страницы</h2>
           <div className="flex items-center gap-2">
             {canCreate && (
-              <button onClick={() => setTemplatesOpen(true)} className="text-xs text-[var(--tg-theme-link-color)]">
-                Шаблоны
-              </button>
+              <>
+                <button onClick={() => setFileUploadParentId(null)} className="text-xs text-[var(--tg-theme-link-color)]">
+                  Файл
+                </button>
+                <button onClick={() => setTemplatesOpen(true)} className="text-xs text-[var(--tg-theme-link-color)]">
+                  Шаблоны
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -691,6 +723,15 @@ export default function PageTree({ projectId, selectedPageId, onOpenPage, onClos
             setIconTarget(null);
           }}
           onClose={() => setIconTarget(null)}
+        />
+      )}
+
+      {fileUploadParentId !== undefined && canCreate && (
+        <FileUploadModal
+          projectId={projectId}
+          mode="node"
+          onUploaded={createPagesForFiles}
+          onClose={() => setFileUploadParentId(undefined)}
         />
       )}
 

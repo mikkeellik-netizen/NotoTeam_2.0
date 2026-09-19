@@ -19,6 +19,7 @@ const BLOCK_OPTIONS: Array<{
   { type: 'web_embed', title: 'Web embed', hint: 'Ссылка, preview или iframe-виджет', keywords: 'embed iframe web youtube figma miro preview link url' },
   { type: 'kanban_embed', title: 'Kanban embed', hint: 'Встроить доску', keywords: 'kanban board embed' },
   { type: 'smart_summary', title: 'Smart summary', hint: 'Краткое содержание', keywords: 'summary smart ai кратко' },
+  { type: 'responsibility_map', title: 'Карта ответственности', hint: 'Зоны, ответственные и связанные задачи', keywords: 'responsibility area map зоны ответственность карта' },
   { type: 'collapsible', title: 'Toggle', hint: 'Сворачиваемый блок', keywords: 'toggle collapse collapsible' },
   { type: 'page_properties', title: 'Свойства страницы', hint: 'Статус, дедлайн, ответственный, теги', keywords: 'properties status deadline tags свойства статус дедлайн' },
 ];
@@ -26,15 +27,19 @@ const BLOCK_OPTIONS: Array<{
 interface Props {
   query: string;
   onSelect: (type: BlockType) => void;
+  onUploadFiles?: () => void;
   onClose: () => void;
 }
 
-export default function SlashMenu({ query, onSelect, onClose }: Props) {
+export default function SlashMenu({ query, onSelect, onUploadFiles, onClose }: Props) {
   const normalized = query.toLowerCase().replace('/', '').trim();
   const options = BLOCK_OPTIONS.filter((option) => {
     if (!normalized) return true;
     return `${option.title} ${option.hint} ${option.keywords}`.toLowerCase().includes(normalized);
   });
+  const showUpload = Boolean(
+    onUploadFiles && (!normalized || 'файл фото изображение word doc docx pdf музыка аудио upload file'.includes(normalized)),
+  );
 
   return (
     <div className="fixed inset-0 z-50" onClick={onClose}>
@@ -42,28 +47,43 @@ export default function SlashMenu({ query, onSelect, onClose }: Props) {
         className="absolute left-4 right-4 bottom-24 max-h-[52vh] overflow-y-auto rounded-[12px] bg-[var(--tg-theme-bg-color)] shadow-2xl border border-[var(--tg-theme-secondary-bg-color)]"
         onClick={(e) => e.stopPropagation()}
       >
-        {options.length === 0 ? (
+        {options.length === 0 && !showUpload ? (
           <div className="px-4 py-3 text-sm text-[var(--tg-theme-hint-color)]">
             Ничего не найдено
           </div>
         ) : (
-          options.map((option) => (
-            <button
-              key={option.type}
-              onClick={() => onSelect(option.type)}
-              className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left active:bg-[var(--tg-theme-secondary-bg-color)]"
-            >
-              <span>
-                <span className="block text-sm font-medium text-[var(--tg-theme-text-color)]">
-                  {option.title}
+          <>
+            {showUpload && (
+              <button
+                type="button"
+                onClick={onUploadFiles}
+                className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left active:bg-[var(--tg-theme-secondary-bg-color)]"
+              >
+                <span>
+                  <span className="block text-sm font-medium text-[var(--tg-theme-text-color)]">Файл или медиа</span>
+                  <span className="block text-xs text-[var(--tg-theme-hint-color)]">Фото, Word, PDF или аудио</span>
                 </span>
-                <span className="block text-xs text-[var(--tg-theme-hint-color)]">
-                  {option.hint}
+                <span className="text-[var(--tg-theme-hint-color)]">↑</span>
+              </button>
+            )}
+            {options.map((option) => (
+              <button
+                key={option.type}
+                onClick={() => onSelect(option.type)}
+                className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left active:bg-[var(--tg-theme-secondary-bg-color)]"
+              >
+                <span>
+                  <span className="block text-sm font-medium text-[var(--tg-theme-text-color)]">
+                    {option.title}
+                  </span>
+                  <span className="block text-xs text-[var(--tg-theme-hint-color)]">
+                    {option.hint}
+                  </span>
                 </span>
-              </span>
-              <span className="text-[var(--tg-theme-hint-color)]">›</span>
-            </button>
-          ))
+                <span className="text-[var(--tg-theme-hint-color)]">›</span>
+              </button>
+            ))}
+          </>
         )}
       </div>
     </div>

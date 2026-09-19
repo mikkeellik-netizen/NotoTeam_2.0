@@ -1,0 +1,202 @@
+name: nototime
+
+services:
+  backend-api:
+    build:
+      context: ./backend-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: "8787"
+      TZ: ${TZ:-Europe/Moscow}
+      APP_DATA_DIR: /data
+      WORKSPACE_STORAGE: sqlite
+      WORKSPACE_NORMALIZED_TABLES: primary
+      CORS_ORIGIN: https://${APP_DOMAIN:?Set APP_DOMAIN in deploy/.env}
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in deploy/.env}
+      TELEGRAM_WEB_APP_URL: https://${APP_DOMAIN:?Set APP_DOMAIN in deploy/.env}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?Set INTERNAL_API_TOKEN in deploy/.env}
+      EXTERNAL_CALENDAR_CREDENTIALS_SECRET: ${EXTERNAL_CALENDAR_CREDENTIALS_SECRET:?Set EXTERNAL_CALENDAR_CREDENTIALS_SECRET in deploy/.env}
+      SYSTEM_STATS_PSEUDONYM_SECRET: ${SYSTEM_STATS_PSEUDONYM_SECRET:?Set SYSTEM_STATS_PSEUDONYM_SECRET in deploy/.env}
+      APP_OWNER_TELEGRAM_IDS: ${APP_OWNER_TELEGRAM_IDS:-}
+      LOCAL_DEV_LOGIN: "0"
+      LOCAL_DEV_SYSTEM_OWNER: "0"
+      TELEGRAM_INIT_DATA_MAX_AGE_SECONDS: ${TELEGRAM_INIT_DATA_MAX_AGE_SECONDS:-86400}
+      AUTH_CODE_REQUEST_WINDOW_MS: ${AUTH_CODE_REQUEST_WINDOW_MS:-60000}
+      AUTH_CODE_REQUEST_MAX: ${AUTH_CODE_REQUEST_MAX:-3}
+      AUTH_CODE_REQUEST_MAX_PER_IP: ${AUTH_CODE_REQUEST_MAX_PER_IP:-30}
+      AUTH_CODE_VERIFY_WINDOW_MS: ${AUTH_CODE_VERIFY_WINDOW_MS:-60000}
+      AUTH_CODE_VERIFY_MAX: ${AUTH_CODE_VERIFY_MAX:-20}
+      AUTH_CODE_VERIFY_MAX_PER_IP: ${AUTH_CODE_VERIFY_MAX_PER_IP:-100}
+      AUTH_CODE_MAX_ATTEMPTS: ${AUTH_CODE_MAX_ATTEMPTS:-5}
+      AUTH_IP_BLOCK_MS: ${AUTH_IP_BLOCK_MS:-900000}
+      API_MAX_BODY_BYTES: ${API_MAX_BODY_BYTES:-41943040}
+      PROJECT_FILE_MAX_BYTES: ${PROJECT_FILE_MAX_BYTES:-26214400}
+      REQUEST_METRIC_LIMIT: ${REQUEST_METRIC_LIMIT:-5000}
+      CALENDAR_NOTIFICATION_INTERVAL_MS: ${CALENDAR_NOTIFICATION_INTERVAL_MS:-15000}
+      CALENDAR_NOTIFICATION_RETRY_MS: ${CALENDAR_NOTIFICATION_RETRY_MS:-60000}
+      CALENDAR_NOTIFICATION_MAX_ATTEMPTS: ${CALENDAR_NOTIFICATION_MAX_ATTEMPTS:-5}
+      CALENDAR_NOTIFICATION_BATCH_SIZE: ${CALENDAR_NOTIFICATION_BATCH_SIZE:-50}
+      CALENDAR_NOTIFICATION_STALE_AFTER_MS: ${CALENDAR_NOTIFICATION_STALE_AFTER_MS:-900000}
+      EXTERNAL_CALENDAR_SYNC_INTERVAL_MS: ${EXTERNAL_CALENDAR_SYNC_INTERVAL_MS:-900000}
+      EXTERNAL_CALENDAR_FETCH_TIMEOUT_MS: ${EXTERNAL_CALENDAR_FETCH_TIMEOUT_MS:-12000}
+      EXTERNAL_CALENDAR_MAX_BYTES: ${EXTERNAL_CALENDAR_MAX_BYTES:-5242880}
+      FILE_STORAGE: ${FILE_STORAGE:-local}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_PREFIX: ${S3_PREFIX:-project-files}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+    volumes:
+      - app-data:/data
+    expose:
+      - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      - app-network
+
+  speech-recognition:
+    build:
+      context: ./speech-recognition
+      dockerfile: Dockerfile
+      args:
+        WHISPER_MODEL: ${SPEECH_MODEL:-small}
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      SPEECH_MODEL: ${SPEECH_MODEL:-small}
+      SPEECH_MODEL_ROOT: /models
+      SPEECH_DEVICE: cpu
+      SPEECH_COMPUTE_TYPE: int8
+      SPEECH_LANGUAGE: ${SPEECH_LANGUAGE:-ru}
+      SPEECH_CPU_THREADS: ${SPEECH_CPU_THREADS:-2}
+      SPEECH_MAX_CONCURRENT: ${SPEECH_MAX_CONCURRENT:-1}
+      SPEECH_MAX_FILE_BYTES: ${VOICE_MAX_FILE_BYTES:-20971520}
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: ${SPEECH_MEMORY_LIMIT:-3g}
+    networks:
+      - app-network
+
+  backend-bot:
+    build:
+      context: ./backend-bot
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      TZ: ${TZ:-Europe/Moscow}
+      BOT_TIMEZONE: ${TZ:-Europe/Moscow}
+      BOT_MODE: polling
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in deploy/.env}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?Set INTERNAL_API_TOKEN in deploy/.env}
+      WEBAPP_URL: https://${APP_DOMAIN:?Set APP_DOMAIN in deploy/.env}
+      WORKSPACE_API_URL: http://backend-api:8787
+      SPEECH_TO_TEXT_URL: http://speech-recognition:8000
+      SPEECH_TRANSCRIPTION_TIMEOUT_MS: ${SPEECH_TRANSCRIPTION_TIMEOUT_MS:-180000}
+      VOICE_MAX_DURATION_SECONDS: ${VOICE_MAX_DURATION_SECONDS:-120}
+      VOICE_MAX_FILE_BYTES: ${VOICE_MAX_FILE_BYTES:-20971520}
+      VOICE_RATE_WINDOW_MS: ${VOICE_RATE_WINDOW_MS:-600000}
+      VOICE_RATE_MAX: ${VOICE_RATE_MAX:-5}
+      VOICE_MAX_CONCURRENT: ${VOICE_MAX_CONCURRENT:-2}
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      speech-recognition:
+        condition: service_healthy
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_WORKSPACE_API_URL: /api
+    restart: unless-stopped
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - app-network
+
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_healthy
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in deploy/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  app-data:
+    name: nototime-app-data
+  caddy-data:
+    name: nototime-caddy-data
+  caddy-config:
+    name: nototime-caddy-config

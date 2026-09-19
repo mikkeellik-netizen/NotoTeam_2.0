@@ -4,6 +4,18 @@ import { apiRequest, normalizeArray, normalizeNumberId } from './httpClient';
 
 export type { ArchiveCleanupMode } from '../types';
 
+export interface UserTaskProgress {
+  days: number;
+  since: string;
+  until: string;
+  completed: number;
+  total: number;
+  percent: number;
+  created: number;
+  active: number;
+  overdue: number;
+}
+
 export const tasksApi = {
   async getByProject(projectId: number, pageId?: string, includeArchived = false): Promise<Task[]> {
     const params = new URLSearchParams();
@@ -41,7 +53,7 @@ export const tasksApi = {
     activityApi.log({
       projectId,
       type: 'task_create',
-      title: `РЎРѕР·РґР°Р» Р·Р°РґР°С‡Сѓ В«${task.title}В»`,
+      title: `Создал задачу «${task.title}»`,
       entityType: 'task',
       entityId: String(task.id),
       context: 'Kanban',
@@ -54,10 +66,10 @@ export const tasksApi = {
     activityApi.log({
       projectId: updated.projectId,
       type: data.assigneeId !== undefined ? 'task_assign' : 'task_update',
-      title: `РР·РјРµРЅРёР» Р·Р°РґР°С‡Сѓ В«${updated.title}В»`,
+      title: `Изменил задачу «${updated.title}»`,
       entityType: 'task',
       entityId: String(updated.id),
-      context: 'РљР°СЂС‚РѕС‡РєР° Р·Р°РґР°С‡Рё',
+      context: 'Карточка задачи',
     });
     return updated;
   },
@@ -70,7 +82,7 @@ export const tasksApi = {
     activityApi.log({
       projectId: updated.projectId,
       type: 'task_move',
-      title: `РџРµСЂРµРјРµСЃС‚РёР» Р·Р°РґР°С‡Сѓ В«${updated.title}В»`,
+      title: `Переместил задачу «${updated.title}»`,
       entityType: 'task',
       entityId: String(updated.id),
       context: 'Kanban',
@@ -90,10 +102,10 @@ export const tasksApi = {
     activityApi.log({
       projectId: task.projectId,
       type: 'task_complete',
-      title: `Р—Р°РІРµСЂС€РёР» Р·Р°РґР°С‡Сѓ В«${task.title}В»`,
+      title: `Завершил задачу «${task.title}»`,
       entityType: 'task',
       entityId: String(task.id),
-      context: 'РљР°СЂС‚РѕС‡РєР° Р·Р°РґР°С‡Рё',
+      context: 'Карточка задачи',
     });
     return task;
   },
@@ -103,7 +115,12 @@ export const tasksApi = {
   },
 
   async getMyTasks(userId: number | string) {
-    const active = normalizeArray(await apiRequest<Task[]>(`/users/${encodeURIComponent(String(userId))}/assigned-tasks`));
+    const encodedUserId = encodeURIComponent(String(userId));
+    const [activeResponse, stats] = await Promise.all([
+      apiRequest<Task[]>(`/users/${encodedUserId}/assigned-tasks`),
+      apiRequest<UserTaskProgress>(`/users/${encodedUserId}/task-progress?days=7`),
+    ]);
+    const active = normalizeArray(activeResponse);
     const now = Date.now();
     const red: Task[] = [];
     const yellow: Task[] = [];
@@ -118,7 +135,7 @@ export const tasksApi = {
         else green.push(task);
       }
     }
-    return { red, yellow, green, noDate, stats: { completed: 0, total: active.length } };
+    return { red, yellow, green, noDate, stats };
   },
 
   async createSubtask(taskId: number, title: string): Promise<Subtask> {

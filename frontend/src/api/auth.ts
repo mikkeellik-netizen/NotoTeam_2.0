@@ -37,6 +37,14 @@ export const authApi = {
     return { token: result.token, user: normalizeNumberId(result.user) };
   },
 
+  async loginLocalDev(): Promise<{ token: string; user: User }> {
+    const result = await apiRequest<{ token: string; user: User }>('/auth/dev-local', {
+      method: 'POST',
+      body: {},
+    });
+    return { token: result.token, user: normalizeNumberId(result.user) };
+  },
+
   async logout(): Promise<void> {
     await apiRequest('/auth/logout', { method: 'POST' });
   },

@@ -2,31 +2,48 @@
 node_modules/
 .pnp
 .pnp.js
+.venv/
+__pycache__/
+*.py[cod]
 
-# Environment variables (tokens, secrets — НЕ загружать!)
+# Environment variables and secrets
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
 
-# Build output
+# Build and coverage output
 dist/
 build/
+coverage/
 
-# Logs
+# Logs and temporary files
 *.log
 npm-debug.log*
-.tmp-smoke*/
-backend-api/.tmp-smoke*/
+.tmp-*/
+backend-api/.tmp-*/
+*.tmp
+*.temp
 
-# SQLite database (локальные данные)
+# Local databases and persistent application data
 *.sqlite
 *.sqlite3
 *.db
+app-data/*
+!app-data/.gitignore
 
-# OS files
+# Deployment backups and local speech models
+deploy/backups/
+*.tar.gz
+speech-recognition/models/
+
+# Local Codex/browser artifacts
+.codex-remote-attachments/
+.agents/
+!doctype.html
+
+# OS and editor files
 .DS_Store
 Thumbs.db
-
-# Data directory (локальные данные)
-app-data/database/
-app-data/backups/
+.idea/
+.vscode/
+*.swp

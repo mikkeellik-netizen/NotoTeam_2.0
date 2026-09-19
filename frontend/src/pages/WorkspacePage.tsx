@@ -1,15 +1,16 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { activityApi } from '../api/activity';
 import { useProjectStore } from '../store/projectStore';
 import Breadcrumbs from '../components/workspace/Breadcrumbs';
 import { usePageStore } from '../store/pageStore';
-import type { PageNode, PageNodeType } from '../types';
+import type { PageNode, PageNodeType, ProjectFileRecord } from '../types';
 import ContextMenu from '../components/common/ContextMenu';
 import { getInboxReadAt, loadInboxUnreadSummary } from '../services/inboxService';
 import { remindersApi } from '../api/reminders';
 import { useAuthStore } from '../store/authStore';
 import { getProjectPermissions } from '../utils/projectPermissions';
+import { projectFileIcon, projectFileToBlockContent } from '../api/projectFiles';
 
 const BoardPage = lazy(() => import('../pages/BoardPage'));
 const CommandPalette = lazy(() => import('../components/workspace/CommandPalette'));
@@ -17,10 +18,12 @@ const PageEditor = lazy(() => import('../components/workspace/PageEditor'));
 const PageTree = lazy(() => import('../components/workspace/PageTree'));
 const QuickCaptureModal = lazy(() => import('../components/workspace/QuickCaptureModal'));
 const IconPickerModal = lazy(() => import('../components/workspace/IconPickerModal'));
+const FileUploadModal = lazy(() => import('../components/workspace/FileUploadModal'));
 
 export default function WorkspacePage() {
   const { projectId, pageId } = useParams<{ projectId: string; pageId?: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const pid = Number(projectId);
   const [treeOpen, setTreeOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -262,9 +265,42 @@ export default function WorkspacePage() {
     openPage(activePage.parentId);
   };
 
+  const navigationState = location.state as {
+    adminReturn?: {
+      projectId: number | string;
+      tab: 'overview' | 'people' | 'responsibility' | 'risks' | 'meeting' | 'reports' | 'bot' | 'ai';
+      section?: 'action-plan';
+      label: string;
+    };
+    responsibilityReturn?: {
+      projectId: string;
+      pageId: string;
+      areaId: string;
+      areaTitle: string;
+    };
+  } | null;
+  const adminReturn = navigationState?.adminReturn;
+  const responsibilityReturn = navigationState?.responsibilityReturn;
+
+  const returnToAdminPanel = () => {
+    if (!adminReturn || String(adminReturn.projectId) !== String(projectId)) return;
+    navigate(`/project/${projectId}/settings`, { state: { adminReturn } });
+  };
+
+  const returnToResponsibilityArea = () => {
+    if (!responsibilityReturn || String(responsibilityReturn.projectId) !== String(projectId)) return;
+    selectPage(responsibilityReturn.pageId);
+    navigate(`/project/${projectId}/workspace/page/${responsibilityReturn.pageId}`, {
+      state: {
+        responsibilityAreaId: responsibilityReturn.areaId,
+        responsibilitySourcePageId: responsibilityReturn.pageId,
+      },
+    });
+  };
+
   useEffect(() => {
     const isProjectRoot = activePage?.type === 'folder' && activePage.parentId === null;
-    if (pageId && isProjectRoot) {
+    if (pageId && activePage?.id === pageId && isProjectRoot) {
       openPage(activePage.id, { replace: true });
     }
   }, [activePage?.id, activePage?.parentId, activePage?.type, pageId]);
@@ -437,7 +473,32 @@ export default function WorkspacePage() {
           </button>
         )}
 
-        <div className="flex-1 min-h-0">
+        <div className="flex min-h-0 flex-1 flex-col">
+          {responsibilityReturn && String(responsibilityReturn.projectId) === String(projectId) && (
+            <div className="shrink-0 border-b border-[var(--tg-theme-secondary-bg-color)] px-4 py-2">
+              <button
+                type="button"
+                onClick={returnToResponsibilityArea}
+                className="flex max-w-full items-center gap-2 rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-sm font-semibold text-[var(--tg-theme-link-color)]"
+              >
+                <span aria-hidden="true">←</span>
+                <span className="truncate">Вернуться к зоне «{responsibilityReturn.areaTitle}»</span>
+              </button>
+            </div>
+          )}
+          {adminReturn && String(adminReturn.projectId) === String(projectId) && (
+            <div className="shrink-0 border-b border-[var(--tg-theme-secondary-bg-color)] px-4 py-2">
+              <button
+                type="button"
+                onClick={returnToAdminPanel}
+                className="flex max-w-full items-center gap-2 rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-sm font-semibold text-[var(--tg-theme-link-color)]"
+              >
+                <span aria-hidden="true">←</span>
+                <span className="truncate">Вернуться: Администратор · {adminReturn.label}</span>
+              </button>
+            </div>
+          )}
+          <div className="min-h-0 flex-1">
           {!activePage ? (
             <div className="h-full flex items-center justify-center text-sm text-[var(--tg-theme-hint-color)]">
               Выбери страницу
@@ -479,6 +540,7 @@ export default function WorkspacePage() {
               />
             </Suspense>
           )}
+          </div>
         </div>
       </section>
 
@@ -565,11 +627,13 @@ function FolderView({
   const [iconTarget, setIconTarget] = useState<PageNode | null>(null);
   const [renameTarget, setRenameTarget] = useState<PageNode | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [fileUploadOpen, setFileUploadOpen] = useState(false);
   const longPressTimerRef = useRef<number | null>(null);
   const {
     loadedTreeParentIds,
     loadingTreeParentIds,
     ensureFolderChildrenLoaded,
+    createNode,
   } = usePageStore();
   const children = useMemo(
     () =>
@@ -636,6 +700,22 @@ function FolderView({
     setRenameDraft('');
   };
 
+  const createPagesForFiles = (files: ProjectFileRecord[]) => {
+    let firstPageId = '';
+    files.forEach((file) => {
+      const node = createNode({
+        projectId,
+        parentId: folder.id,
+        type: 'page',
+        title: file.fileName,
+        icon: projectFileIcon(file),
+        initialBlocks: [{ type: 'file', content: projectFileToBlockContent(file) }],
+      });
+      firstPageId ||= node.id;
+    });
+    if (firstPageId) onOpenPage(firstPageId);
+  };
+
   const startNodeLongPress = (node: PageNode, x: number, y: number) => {
     if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = window.setTimeout(() => openNodeMenu(node, x, y), 600);
@@ -684,7 +764,7 @@ function FolderView({
         </div>
 
         {canCreate && (
-        <div className="mb-4 grid grid-cols-3 gap-2">
+        <div className="mb-4 grid grid-cols-2 gap-2">
           <button
             onClick={() => onCreate('page')}
             className="rounded-[12px] bg-[var(--tg-theme-button-color)] px-3 py-3 text-sm font-semibold text-[var(--tg-theme-button-text-color)] active:scale-[0.98]"
@@ -703,6 +783,12 @@ function FolderView({
           >
             + Kanban
           </button>
+          <button
+            onClick={() => setFileUploadOpen(true)}
+            className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-3 text-sm font-semibold text-[var(--tg-theme-text-color)] active:scale-[0.98]"
+          >
+            ↑ Файл
+          </button>
         </div>
         )}
 
@@ -712,7 +798,7 @@ function FolderView({
           </div>
         ) : children.length === 0 ? (
           <div className="rounded-[14px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-8 text-center text-sm text-[var(--tg-theme-hint-color)]">
-            Создай страницу, папку или Kanban-доску внутри этой папки.
+            Создай страницу, папку, Kanban-доску или загрузи файл внутрь этой папки.
           </div>
         ) : (
           <div className="space-y-2">
@@ -929,6 +1015,16 @@ function FolderView({
             node={iconTarget}
             onSelect={(icon) => onIconChange(iconTarget.id, icon)}
             onClose={() => setIconTarget(null)}
+          />
+        </Suspense>
+      )}
+      {fileUploadOpen && (
+        <Suspense fallback={null}>
+          <FileUploadModal
+            projectId={projectId}
+            mode="node"
+            onUploaded={createPagesForFiles}
+            onClose={() => setFileUploadOpen(false)}
           />
         </Suspense>
       )}

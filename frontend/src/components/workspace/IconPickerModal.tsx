@@ -47,13 +47,17 @@ const ICON_CATEGORIES: { title: string; icons: string[] }[] = [
 const ALL_ICONS = ICON_CATEGORIES.flatMap((category) => category.icons);
 
 interface Props {
-  node: PageNode;
+  node?: Pick<PageNode, 'title' | 'icon'>;
+  title?: string;
+  currentIcon?: string;
   onSelect: (icon: string) => void;
   onClose: () => void;
 }
 
-export default function IconPickerModal({ node, onSelect, onClose }: Props) {
+export default function IconPickerModal({ node, title, currentIcon, onSelect, onClose }: Props) {
   const [query, setQuery] = useState('');
+  const selectedIcon = currentIcon ?? node?.icon;
+  const subjectTitle = title ?? node?.title;
 
   const filtered = useMemo(() => {
     const q = query.trim();
@@ -71,11 +75,11 @@ export default function IconPickerModal({ node, onSelect, onClose }: Props) {
   const gridClass = 'grid grid-cols-6 gap-2 sm:grid-cols-8';
   const buttonClass = (icon: string) =>
     `flex aspect-square items-center justify-center rounded-[12px] text-2xl active:scale-[0.96] ${
-      node.icon === icon ? 'bg-[var(--tg-theme-button-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)]'
+      selectedIcon === icon ? 'bg-[var(--tg-theme-button-color)]' : 'bg-[var(--tg-theme-secondary-bg-color)]'
     }`;
 
   return (
-    <div className="fixed inset-0 z-[96] flex items-end bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-[196] flex items-end bg-black/50" onClick={(event) => { event.stopPropagation(); onClose(); }}>
       <div
         className="flex max-h-[80vh] w-full flex-col rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-4"
         onClick={(event) => event.stopPropagation()}
@@ -83,7 +87,7 @@ export default function IconPickerModal({ node, onSelect, onClose }: Props) {
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <h3 className="text-base font-semibold text-[var(--tg-theme-text-color)]">Сменить иконку</h3>
-            <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">{node.title}</p>
+            {subjectTitle && <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">{subjectTitle}</p>}
           </div>
           <button
             type="button"

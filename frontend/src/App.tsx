@@ -14,6 +14,8 @@ const InboxPage = lazy(() => import('./pages/InboxPage'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
 const RemindersPage = lazy(() => import('./pages/RemindersPage'));
 const CalendarPage = lazy(() => import('./pages/CalendarPage'));
+const MyCalendarPage = lazy(() => import('./pages/MyCalendarPage'));
+const TodayPage = lazy(() => import('./pages/TodayPage'));
 const MembersPage = lazy(() => import('./pages/MembersPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const ArchivePage = lazy(() => import('./pages/ArchivePage'));
@@ -93,6 +95,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <WebAppEntryRedirect />
       <TelegramBackButton />
       <Suspense fallback={<RouteFallback />}>
         <Routes>
@@ -104,6 +107,8 @@ export default function App() {
           <Route path="/project/:projectId/notifications" element={<ProjectAccessGate><NotificationsPage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/reminders" element={<ProjectAccessGate><RemindersPage /></ProjectAccessGate>} />
           <Route path="/project/:projectId/calendar" element={<ProjectAccessGate><CalendarPage /></ProjectAccessGate>} />
+          <Route path="/my-calendar" element={<MyCalendarPage />} />
+          <Route path="/today" element={<TodayPage />} />
           <Route path="/my-tasks" element={<MyTasksPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/system-admin" element={<SystemAdminPage />} />
@@ -115,6 +120,32 @@ export default function App() {
       </Suspense>
     </BrowserRouter>
   );
+}
+
+function WebAppEntryRedirect() {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    const target = new URLSearchParams(location.search).get('open');
+    if (!target || !isAllowedWebAppTarget(target)) return;
+
+    const cleanEntryUrl = new URL(window.location.href);
+    cleanEntryUrl.searchParams.delete('open');
+    window.history.replaceState(window.history.state, '', `${cleanEntryUrl.pathname}${cleanEntryUrl.search}${cleanEntryUrl.hash}`);
+    navigate(target);
+  }, [location.search, navigate]);
+
+  return null;
+}
+
+function isAllowedWebAppTarget(target: string) {
+  if (!target.startsWith('/') || target.startsWith('//')) return false;
+  const url = new URL(target, window.location.origin);
+  if (url.origin !== window.location.origin) return false;
+  if (['/', '/my-calendar', '/today', '/my-tasks', '/settings', '/system-admin'].includes(url.pathname)) return true;
+  if (/^\/board\/[^/]+$/.test(url.pathname)) return true;
+  return /^\/project\/[^/]+\/(workspace(?:\/page\/[^/]+)?|inbox|notifications|reminders|calendar|members|settings|archive)$/.test(url.pathname);
 }
 
 function RouteFallback() {

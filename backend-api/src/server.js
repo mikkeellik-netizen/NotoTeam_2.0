@@ -2,16 +2,44 @@ import http from "node:http";
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import ical from "node-ical";
 import { createDataRepository, resolveAppDataDir } from "./dataRepository.js";
 import { contentDisposition, createProjectExportFile, normalizeExportOptions, validateExportTarget } from "./exportService.js";
+import { createFileStorage } from "./fileStorage.js";
 
 loadDotEnv();
 
 const PORT = Number(process.env.PORT ?? 8787);
-const DEFAULT_DEV_CORS_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174", "http://127.0.0.1:5173", "http://localhost:5173"];
+const DEFAULT_DEV_CORS_ORIGINS = [
+  "http://127.0.0.1:5175",
+  "http://localhost:5175",
+  "http://127.0.0.1:5174",
+  "http://localhost:5174",
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+];
 const CORS_CONFIG = createCorsConfig(process.env.CORS_ORIGIN ?? "");
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? process.env.BOT_TOKEN ?? "";
+const TELEGRAM_WEB_APP_URL = String(process.env.TELEGRAM_WEB_APP_URL ?? "").trim().replace(/\/$/, "");
+const CALENDAR_NOTIFICATION_INTERVAL_MS = envPositiveNumber("CALENDAR_NOTIFICATION_INTERVAL_MS", 15_000);
+const CALENDAR_NOTIFICATION_RETRY_MS = envPositiveNumber("CALENDAR_NOTIFICATION_RETRY_MS", 60_000);
+const CALENDAR_NOTIFICATION_MAX_ATTEMPTS = envPositiveNumber("CALENDAR_NOTIFICATION_MAX_ATTEMPTS", 5);
+const CALENDAR_NOTIFICATION_BATCH_SIZE = envPositiveNumber("CALENDAR_NOTIFICATION_BATCH_SIZE", 50);
+const CALENDAR_NOTIFICATION_STALE_AFTER_MS = envPositiveNumber("CALENDAR_NOTIFICATION_STALE_AFTER_MS", 15 * 60_000);
+const EXTERNAL_CALENDAR_SYNC_INTERVAL_MS = envPositiveNumber("EXTERNAL_CALENDAR_SYNC_INTERVAL_MS", 15 * 60_000);
+const EXTERNAL_CALENDAR_FETCH_TIMEOUT_MS = envPositiveNumber("EXTERNAL_CALENDAR_FETCH_TIMEOUT_MS", 12_000);
+const EXTERNAL_CALENDAR_MAX_BYTES = envPositiveNumber("EXTERNAL_CALENDAR_MAX_BYTES", 5 * 1024 * 1024);
+const EXTERNAL_CALENDAR_CREDENTIALS_SECRET = String(process.env.EXTERNAL_CALENDAR_CREDENTIALS_SECRET ?? "").trim();
+const YANDEX_CALENDAR_HOSTS = new Set([
+  "calendar.yandex.ru",
+  "calendar.yandex.com",
+  "calendar.360.yandex.ru",
+  "caldav.yandex.ru",
+  "caldav.yandex.com",
+]);
+const YANDEX_ICAL_LINK_HINT = "Нужна ссылка iCal из настроек календаря: Экспорт -> iCal. Код iframe и публичный адрес /embed/week не подходят";
 const APP_OWNER_TELEGRAM_IDS = new Set(
   String(process.env.APP_OWNER_TELEGRAM_IDS ?? process.env.APP_OWNER_TELEGRAM_ID ?? "")
     .split(",")
@@ -23,6 +51,8 @@ const APP_OWNER_TELEGRAM_IDS = new Set(
 // Важно: это отдельный секрет, не Telegram bot token. Если Telegram bot token
 // утечёт, он не должен автоматически открывать полный доступ к Workspace API.
 const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN?.trim() ?? "";
+const SYSTEM_STATS_PSEUDONYM_SECRET =
+  process.env.SYSTEM_STATS_PSEUDONYM_SECRET?.trim() || INTERNAL_API_TOKEN || crypto.randomBytes(32).toString("hex");
 const TELEGRAM_INIT_DATA_MAX_AGE_SECONDS = envPositiveNumber("TELEGRAM_INIT_DATA_MAX_AGE_SECONDS", 24 * 3600);
 const TELEGRAM_INIT_DATA_FUTURE_SKEW_SECONDS = envPositiveNumber("TELEGRAM_INIT_DATA_FUTURE_SKEW_SECONDS", 300);
 const AUTH_CODE_REQUEST_WINDOW_MS = envPositiveNumber("AUTH_CODE_REQUEST_WINDOW_MS", 60 * 1000);
@@ -31,6 +61,7 @@ const AUTH_CODE_REQUEST_MAX_PER_IP = envPositiveNumber("AUTH_CODE_REQUEST_MAX_PE
 const AUTH_CODE_VERIFY_WINDOW_MS = envPositiveNumber("AUTH_CODE_VERIFY_WINDOW_MS", 60 * 1000);
 const AUTH_CODE_VERIFY_MAX = envPositiveNumber("AUTH_CODE_VERIFY_MAX", 20);
 const AUTH_CODE_VERIFY_MAX_PER_IP = envPositiveNumber("AUTH_CODE_VERIFY_MAX_PER_IP", 100);
+const AUTH_IP_BLOCK_MS = envPositiveNumber("AUTH_IP_BLOCK_MS", 15 * 60 * 1000);
 const API_MAX_BODY_BYTES = envPositiveNumber("API_MAX_BODY_BYTES", 5 * 1024 * 1024);
 const LINK_PREVIEW_MAX_BODY_BYTES = envPositiveNumber("LINK_PREVIEW_MAX_BODY_BYTES", 160 * 1024);
 const LINK_PREVIEW_TIMEOUT_MS = envPositiveNumber("LINK_PREVIEW_TIMEOUT_MS", 6000);
@@ -48,13 +79,55 @@ const OUTBOX_ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
 ]);
 const USER_AVATAR_MAX_BYTES = envPositiveNumber("USER_AVATAR_MAX_BYTES", 512 * 1024);
 const USER_AVATAR_ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const PROJECT_FILE_MAX_BYTES = envPositiveNumber("PROJECT_FILE_MAX_BYTES", 25 * 1024 * 1024);
+const PROJECT_FILE_ALLOWED_TYPES = new Map([
+  [".jpg", { mimeType: "image/jpeg", category: "image" }],
+  [".jpeg", { mimeType: "image/jpeg", category: "image" }],
+  [".png", { mimeType: "image/png", category: "image" }],
+  [".webp", { mimeType: "image/webp", category: "image" }],
+  [".gif", { mimeType: "image/gif", category: "image" }],
+  [".pdf", { mimeType: "application/pdf", category: "document" }],
+  [".doc", { mimeType: "application/msword", category: "document" }],
+  [".docx", { mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", category: "document" }],
+  [".mp3", { mimeType: "audio/mpeg", category: "audio" }],
+  [".wav", { mimeType: "audio/wav", category: "audio" }],
+  [".ogg", { mimeType: "audio/ogg", category: "audio" }],
+  [".m4a", { mimeType: "audio/mp4", category: "audio" }],
+  [".aac", { mimeType: "audio/aac", category: "audio" }],
+  [".flac", { mimeType: "audio/flac", category: "audio" }],
+  [".webm", { mimeType: "audio/webm", category: "audio" }],
+]);
 const SECURITY_EVENT_LIMIT = envPositiveNumber("SECURITY_EVENT_LIMIT", 5000);
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 дней
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 минут
-const AUTH_CODE_MAX_ATTEMPTS = 5;
+const AUTH_CODE_MAX_ATTEMPTS = envPositiveNumber("AUTH_CODE_MAX_ATTEMPTS", 5);
+const AI_CONNECTOR_TOKEN_PREFIX = "noto_ai_";
+const AI_CONNECTOR_TOKEN_DEFAULT_TTL_DAYS = envPositiveNumber("AI_CONNECTOR_TOKEN_DEFAULT_TTL_DAYS", 90);
+const AI_CONNECTOR_TOKEN_MAX_TTL_DAYS = envPositiveNumber("AI_CONNECTOR_TOKEN_MAX_TTL_DAYS", 365);
+const AI_CONNECTOR_ACCESS_LOG_LIMIT = envPositiveNumber("AI_CONNECTOR_ACCESS_LOG_LIMIT", 1000);
+const fileStorage = await createFileStorage();
 
 const now = () => new Date().toISOString();
 const authRateLimitBuckets = new Map();
+const PROCESS_STARTED_AT = Date.now();
+const REQUEST_METRIC_LIMIT = envPositiveNumber("REQUEST_METRIC_LIMIT", 5000);
+const requestMetrics = [];
+const botRuntime = {
+  lastSeenAt: undefined,
+  lastPath: undefined,
+  lastStatus: undefined,
+  requestCount: 0,
+};
+let calendarNotificationTickRunning = false;
+let externalCalendarSyncRunning = false;
+let eventLoopLagMs = 0;
+let eventLoopExpectedAt = Date.now() + 1000;
+const eventLoopMonitor = setInterval(() => {
+  const currentTime = Date.now();
+  eventLoopLagMs = Math.max(0, currentTime - eventLoopExpectedAt);
+  eventLoopExpectedAt = currentTime + 1000;
+}, 1000);
+eventLoopMonitor.unref?.();
 
 function isProductionRuntime() {
   return process.env.NODE_ENV === "production" || Boolean(process.env.RENDER || process.env.RAILWAY_ENVIRONMENT || process.env.FLY_APP_NAME);
@@ -96,6 +169,30 @@ function requestOrigin(req) {
   const raw = req.headers.origin;
   if (!raw) return undefined;
   return String(Array.isArray(raw) ? raw[0] : raw).trim();
+}
+
+function hostnameFromHeader(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  try {
+    return new URL(raw.includes("://") ? raw : `http://${raw}`).hostname;
+  } catch {
+    return raw.replace(/^\[/, "").replace(/\]$/, "").split(":")[0];
+  }
+}
+
+function isLocalHostname(value) {
+  const host = String(value ?? "").toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function isLocalDevRequest(req) {
+  if (process.env.LOCAL_DEV_LOGIN !== "1") return false;
+  if (isProductionRuntime()) return false;
+  const hostName = hostnameFromHeader(req.headers.host);
+  const origin = requestOrigin(req);
+  const originHost = origin ? hostnameFromHeader(origin) : hostName;
+  return isLocalHostname(hostName) && isLocalHostname(originHost);
 }
 
 function corsForRequest(req) {
@@ -145,6 +242,230 @@ function sessionTokenHash(token) {
   return crypto.createHash("sha256").update(`workspace-session:${token}`).digest("hex");
 }
 
+function aiConnectorTokenHash(token) {
+  return crypto.createHash("sha256").update(`ai-connector-token:${token}`).digest("hex");
+}
+
+function isAiConnectorTokenValue(value) {
+  return String(value ?? "").startsWith(AI_CONNECTOR_TOKEN_PREFIX);
+}
+
+function isAiConnectorTokenExpired(record) {
+  return Boolean(record?.expiresAt && new Date(record.expiresAt).getTime() < Date.now());
+}
+
+function clampAiConnectorLimit(value, fallback = 300) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(Math.floor(parsed), 2000));
+}
+
+function normalizeAiConnectorWorkspaceAccessMode(value) {
+  return value === "include" || value === "exclude" ? value : "all";
+}
+
+function normalizeAiConnectorWorkspaceNodeIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))].slice(0, 2000);
+}
+
+function normalizeAiConnectorAccessPolicy(input = {}) {
+  const raw = input?.accessPolicy ?? input ?? {};
+  const includeWorkspace = raw.includeWorkspace !== false;
+  return {
+    scope: raw.scope === "full" ? "full" : "summary",
+    includeTasks: raw.includeTasks !== false,
+    includeWorkspace,
+    includeCalendar: raw.includeCalendar !== false,
+    includeReminders: raw.includeReminders !== false,
+    // Inbox access is opt-in so tokens created before this field existed do not
+    // silently gain access to newly exposed project data.
+    includeInbox: raw.includeInbox === true,
+    includeResponsibility: raw.includeResponsibility !== false,
+    includeActivity: raw.includeActivity !== false,
+    includeBlocks: includeWorkspace && raw.includeBlocks === true,
+    includeArchived: raw.includeArchived === true,
+    workspaceAccessMode: normalizeAiConnectorWorkspaceAccessMode(raw.workspaceAccessMode),
+    workspaceNodeIds: normalizeAiConnectorWorkspaceNodeIds(raw.workspaceNodeIds),
+    maxTasks: clampAiConnectorLimit(raw.maxTasks, 300),
+    maxBlocks: clampAiConnectorLimit(raw.maxBlocks, 300),
+  };
+}
+
+function legacyAiConnectorAccessPolicy() {
+  return {
+    scope: "full",
+    includeTasks: true,
+    includeWorkspace: true,
+    includeCalendar: true,
+    includeReminders: true,
+    includeInbox: false,
+    includeResponsibility: true,
+    includeActivity: true,
+    includeBlocks: true,
+    includeArchived: true,
+    workspaceAccessMode: "all",
+    workspaceNodeIds: [],
+    maxTasks: 2000,
+    maxBlocks: 2000,
+  };
+}
+
+function aiConnectorAccessPolicyFor(record) {
+  return record?.accessPolicy ? normalizeAiConnectorAccessPolicy(record.accessPolicy) : legacyAiConnectorAccessPolicy();
+}
+
+function applyAiConnectorAccessPolicy(options, tokenRecord) {
+  const policy = aiConnectorAccessPolicyFor(tokenRecord);
+  const effectiveScope = options.scope === "full" && policy.scope === "full" ? "full" : "summary";
+  const includeWorkspace = Boolean(options.includeWorkspace && policy.includeWorkspace);
+  return {
+    scope: effectiveScope,
+    includeTasks: Boolean(options.includeTasks && policy.includeTasks),
+    includeWorkspace,
+    includeCalendar: Boolean(options.includeCalendar && policy.includeCalendar),
+    includeReminders: Boolean(options.includeReminders && policy.includeReminders),
+    includeInbox: Boolean(options.includeInbox && policy.includeInbox),
+    includeResponsibility: Boolean(options.includeResponsibility && policy.includeResponsibility),
+    includeActivity: Boolean(options.includeActivity && policy.includeActivity),
+    includeBlocks: Boolean(options.includeBlocks && policy.includeBlocks && includeWorkspace),
+    includeArchived: Boolean(options.includeArchived && policy.includeArchived),
+    workspaceAccessMode: policy.workspaceAccessMode,
+    workspaceNodeIds: policy.workspaceNodeIds,
+    maxTasks: Math.min(clampAiConnectorLimit(options.maxTasks, 300), policy.maxTasks),
+    maxBlocks: Math.min(clampAiConnectorLimit(options.maxBlocks, 300), policy.maxBlocks),
+  };
+}
+
+function publicAiConnectorToken(record) {
+  return {
+    id: record.id,
+    projectId: record.projectId,
+    name: record.name,
+    createdByUserId: record.createdByUserId,
+    createdAt: record.createdAt,
+    lastUsedAt: record.lastUsedAt,
+    expiresAt: record.expiresAt,
+    revokedAt: record.revokedAt,
+    revokedByUserId: record.revokedByUserId,
+    useCount: Number(record.useCount ?? 0),
+    isActive: !record.revokedAt && !isAiConnectorTokenExpired(record),
+    accessPolicy: aiConnectorAccessPolicyFor(record),
+  };
+}
+
+function publicAiConnectorAccessEvent(record) {
+  return {
+    id: record.id,
+    projectId: record.projectId,
+    tokenId: record.tokenId,
+    tokenName: record.tokenName,
+    toolName: record.toolName,
+    status: record.status,
+    scope: record.scope,
+    sections: record.sections ?? {},
+    maxTasks: record.maxTasks,
+    maxBlocks: record.maxBlocks,
+    tasksReturned: record.tasksReturned,
+    tasksTotal: record.tasksTotal,
+    blocksReturned: record.blocksReturned,
+    blocksTotal: record.blocksTotal,
+    error: record.error,
+    createdAt: record.createdAt,
+  };
+}
+
+function normalizeAiConnectorToolName(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return undefined;
+  return text.replace(/[^\w.-]/g, "_").slice(0, 80);
+}
+
+function logAiConnectorAccessEvent(db, input = {}) {
+  db.aiConnectorAccessEvents ??= [];
+  const contextLimits = input.context?.limits ?? {};
+  const options = input.options ?? {};
+  db.aiConnectorAccessEvents.unshift({
+    id: randomToken(8),
+    projectId: String(input.projectId ?? input.tokenRecord?.projectId ?? ""),
+    tokenId: input.tokenRecord?.id ? String(input.tokenRecord.id) : undefined,
+    tokenName: input.tokenRecord?.name ? String(input.tokenRecord.name).slice(0, 80) : undefined,
+    toolName: normalizeAiConnectorToolName(input.toolName),
+    status: input.status === "error" ? "error" : "success",
+    scope: options.scope === "full" ? "full" : "summary",
+    sections: {
+      tasks: options.includeTasks !== false,
+      workspace: options.includeWorkspace !== false,
+      calendar: options.includeCalendar !== false,
+      reminders: options.includeReminders !== false,
+      inbox: options.includeInbox !== false,
+      responsibility: options.includeResponsibility !== false,
+      activity: options.includeActivity !== false,
+      blocks: Boolean(options.includeBlocks),
+      archived: Boolean(options.includeArchived),
+    },
+    maxTasks: Number(options.maxTasks ?? 0) || undefined,
+    maxBlocks: Number(options.maxBlocks ?? 0) || undefined,
+    tasksReturned: Number(contextLimits.tasksReturned ?? 0),
+    tasksTotal: Number(contextLimits.tasksTotal ?? 0),
+    blocksReturned: Number(contextLimits.blocksReturned ?? 0),
+    blocksTotal: Number(contextLimits.blocksTotal ?? 0),
+    clientRef: input.req ? securityHash(clientIpFor(input.req)) : undefined,
+    error: input.error ? String(input.error).slice(0, 180) : undefined,
+    createdAt: now(),
+  });
+  db.aiConnectorAccessEvents = db.aiConnectorAccessEvents.slice(0, AI_CONNECTOR_ACCESS_LOG_LIMIT);
+  db._dirty = true;
+}
+
+function normalizeAiConnectorTokenTtlDays(value) {
+  const fallback = Math.min(AI_CONNECTOR_TOKEN_DEFAULT_TTL_DAYS, AI_CONNECTOR_TOKEN_MAX_TTL_DAYS);
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(Math.floor(parsed), AI_CONNECTOR_TOKEN_MAX_TTL_DAYS));
+}
+
+function createAiConnectorToken(db, projectId, userId, input = {}) {
+  db.aiConnectorTokens ??= [];
+  const rawToken = `${AI_CONNECTOR_TOKEN_PREFIX}${randomToken(24)}`;
+  const ttlDays = normalizeAiConnectorTokenTtlDays(input.expiresInDays);
+  const name = String(input.name ?? "AI Connector").trim().slice(0, 80) || "AI Connector";
+  const record = {
+    id: randomToken(8),
+    projectId: String(projectId),
+    name,
+    tokenHash: aiConnectorTokenHash(rawToken),
+    createdByUserId: String(userId),
+    createdAt: now(),
+    expiresAt: new Date(Date.now() + ttlDays * 24 * 3600 * 1000).toISOString(),
+    lastUsedAt: undefined,
+    revokedAt: undefined,
+    revokedByUserId: undefined,
+    useCount: 0,
+    accessPolicy: normalizeAiConnectorAccessPolicy(input),
+  };
+  db.aiConnectorTokens.unshift(record);
+  return { token: rawToken, record };
+}
+
+function findAiConnectorTokenByValue(db, token) {
+  db.aiConnectorTokens ??= [];
+  const rawToken = String(token ?? "").trim();
+  if (!isAiConnectorTokenValue(rawToken)) return undefined;
+  const hash = aiConnectorTokenHash(rawToken);
+  const record = db.aiConnectorTokens.find((item) => item.tokenHash === hash || item.token === rawToken);
+  if (record?.token === rawToken) {
+    record.tokenHash = hash;
+    delete record.token;
+    db._dirty = true;
+  }
+  if (!record || record.revokedAt || isAiConnectorTokenExpired(record)) return undefined;
+  record.lastUsedAt = now();
+  record.useCount = Number(record.useCount ?? 0) + 1;
+  db._dirty = true;
+  return record;
+}
+
 function findSessionByToken(db, token) {
   const hash = sessionTokenHash(token);
   const session = db.sessions.find((item) => item.tokenHash === hash || item.token === token);
@@ -163,19 +484,51 @@ function revokeSessionByToken(db, token) {
   return db.sessions.length !== before;
 }
 
+function createSessionForUser(db, user) {
+  const token = randomToken(32);
+  db.sessions.push({
+    id: randomToken(8),
+    tokenHash: sessionTokenHash(token),
+    userId: user.id,
+    createdAt: now(),
+    lastSeenAt: now(),
+    expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+  });
+  return token;
+}
+
+const AUTH_CODE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const AUTH_CODE_DIGITS = "0123456789";
+const AUTH_CODE_ALPHABET = `${AUTH_CODE_LETTERS}${AUTH_CODE_DIGITS}`;
+
 function generateAuthCode() {
-  return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  const characters = [
+    AUTH_CODE_LETTERS[crypto.randomInt(0, AUTH_CODE_LETTERS.length)],
+    AUTH_CODE_DIGITS[crypto.randomInt(0, AUTH_CODE_DIGITS.length)],
+  ];
+  while (characters.length < 6) {
+    characters.push(AUTH_CODE_ALPHABET[crypto.randomInt(0, AUTH_CODE_ALPHABET.length)]);
+  }
+  for (let index = characters.length - 1; index > 0; index -= 1) {
+    const target = crypto.randomInt(0, index + 1);
+    [characters[index], characters[target]] = [characters[target], characters[index]];
+  }
+  return characters.join("");
+}
+
+function normalizeAuthCode(code) {
+  return String(code ?? "").trim().toUpperCase();
 }
 
 function authCodeHash(userId, code) {
   const secret = INTERNAL_API_TOKEN || TELEGRAM_BOT_TOKEN || "workspace-local-auth-code-secret";
-  return crypto.createHmac("sha256", secret).update(`${userId}:${String(code).trim()}`).digest("hex");
+  return crypto.createHmac("sha256", secret).update(`${userId}:${normalizeAuthCode(code)}`).digest("hex");
 }
 
 function isAuthCodeMatch(record, userId, code) {
   if (!record) return false;
   if (record.codeHash) return safeEqual(record.codeHash, authCodeHash(userId, code));
-  if (record.code) return safeEqual(String(record.code), String(code).trim());
+  if (record.code) return safeEqual(normalizeAuthCode(record.code), normalizeAuthCode(code));
   return false;
 }
 
@@ -203,6 +556,31 @@ function isAuthRateLimited(key, maxAttempts, windowMs) {
   attempts.push(nowMs);
   authRateLimitBuckets.set(key, attempts);
   return false;
+}
+
+function activeAuthIpBlock(db, clientIp, currentTime = Date.now()) {
+  const ipRef = securityHash(clientIp);
+  return (db.securityEvents ?? []).find((event) =>
+    event.type === "auth_ip_block" &&
+    event.details?.ipRef === ipRef &&
+    new Date(event.details?.blockedUntil ?? 0).getTime() > currentTime
+  );
+}
+
+function blockAuthIp(db, clientIp, reason) {
+  const existing = activeAuthIpBlock(db, clientIp);
+  if (existing) return existing.details.blockedUntil;
+  const blockedUntil = new Date(Date.now() + AUTH_IP_BLOCK_MS).toISOString();
+  logSecurityEvent(db, {
+    type: "auth_ip_block",
+    outcome: "blocked",
+    details: {
+      ipRef: securityHash(clientIp),
+      reason,
+      blockedUntil,
+    },
+  });
+  return blockedUntil;
 }
 
 function trimAuthRateLimitBuckets(nowMs) {
@@ -259,6 +637,12 @@ function resolveAuth(req, db, url) {
     const user = upsertTelegramUser(db, tgUser);
     if (!user || user.isBlocked) return undefined;
     return { kind: "user", user };
+  }
+
+  if (header?.scheme === "bearer" && isAiConnectorTokenValue(header.value)) {
+    const tokenRecord = findAiConnectorTokenByValue(db, header.value);
+    if (!tokenRecord) return undefined;
+    return { kind: "ai", token: tokenRecord };
   }
 
   // Веб-сессия по Bearer-токену (или ?token= для скачивания файлов)
@@ -579,8 +963,179 @@ function canViewUserAvatar(auth, db, targetUser) {
   });
 }
 
+function projectFileDirectoryKey(projectId) {
+  const projectKey = crypto.createHash("sha256").update(`project-file-dir:${String(projectId)}`).digest("hex").slice(0, 24);
+  return projectKey;
+}
+
+function sanitizeProjectFileName(value) {
+  const base = path.basename(String(value ?? "")).replace(/[\x00-\x1f\x7f<>:"/\\|?*]+/g, " ").trim();
+  if (!base) throw new RequestBodyError(400, "File name is required");
+  return base.slice(0, 180);
+}
+
+function projectFileTypeForName(fileName) {
+  const extension = path.extname(fileName).toLowerCase();
+  const type = PROJECT_FILE_ALLOWED_TYPES.get(extension);
+  if (!type) throw new RequestBodyError(400, "Unsupported file type");
+  return { extension, ...type };
+}
+
+function projectFileStorageKey(record) {
+  const storageName = String(record?.storageName ?? "");
+  const extension = path.extname(storageName).toLowerCase();
+  if (!/^[a-f0-9]{24}\.[a-z0-9]+$/.test(storageName) || !PROJECT_FILE_ALLOWED_TYPES.has(extension)) return undefined;
+  return `${projectFileDirectoryKey(record.projectId)}/${storageName}`;
+}
+
+function validateProjectFileSignature(prefix, extension) {
+  const starts = (...bytes) => bytes.every((value, index) => prefix[index] === value);
+  const ascii = (start, length) => prefix.subarray(start, start + length).toString("ascii");
+  let valid = false;
+
+  if (extension === ".jpg" || extension === ".jpeg") valid = starts(0xff, 0xd8, 0xff);
+  else if (extension === ".png") valid = starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  else if (extension === ".webp") valid = ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP";
+  else if (extension === ".gif") valid = ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a";
+  else if (extension === ".pdf") valid = prefix.toString("latin1").includes("%PDF-");
+  else if (extension === ".doc") valid = starts(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1);
+  else if (extension === ".docx") valid = starts(0x50, 0x4b, 0x03, 0x04) || starts(0x50, 0x4b, 0x05, 0x06);
+  else if (extension === ".mp3") valid = ascii(0, 3) === "ID3" || (prefix[0] === 0xff && (prefix[1] & 0xe0) === 0xe0);
+  else if (extension === ".wav") valid = ascii(0, 4) === "RIFF" && ascii(8, 4) === "WAVE";
+  else if (extension === ".ogg") valid = ascii(0, 4) === "OggS";
+  else if (extension === ".m4a") valid = ascii(4, 4) === "ftyp";
+  else if (extension === ".aac") valid = prefix[0] === 0xff && (prefix[1] === 0xf1 || prefix[1] === 0xf9);
+  else if (extension === ".flac") valid = ascii(0, 4) === "fLaC";
+  else if (extension === ".webm") valid = starts(0x1a, 0x45, 0xdf, 0xa3);
+
+  if (!valid) throw new RequestBodyError(400, "File content does not match its extension");
+}
+
+async function saveProjectFileFromRequest(req, projectId, uploaderUserId, requestedName) {
+  const fileName = sanitizeProjectFileName(requestedName);
+  const type = projectFileTypeForName(fileName);
+  const contentLength = Number(req.headers["content-length"] ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > PROJECT_FILE_MAX_BYTES) {
+    throw new RequestBodyError(413, "File is too large");
+  }
+
+  const id = randomToken(12);
+  const storageName = `${id}${type.extension}`;
+  const directory = path.join(resolveAppDataDir(), "tmp", "project-file-uploads");
+  const temporaryPath = path.join(directory, `.upload-${id}.tmp`);
+  await fs.promises.mkdir(directory, { recursive: true });
+  const handle = await fs.promises.open(temporaryPath, "wx");
+  let totalBytes = 0;
+  let prefix = Buffer.alloc(0);
+
+  try {
+    for await (const chunk of req) {
+      totalBytes += chunk.length;
+      if (totalBytes > PROJECT_FILE_MAX_BYTES) throw new RequestBodyError(413, "File is too large");
+      if (prefix.length < 1024) prefix = Buffer.concat([prefix, chunk.subarray(0, 1024 - prefix.length)]);
+      await handle.write(chunk);
+    }
+    if (totalBytes === 0) throw new RequestBodyError(400, "File is empty");
+    validateProjectFileSignature(prefix, type.extension);
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await fs.promises.unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+
+  await handle.close();
+  const record = {
+    id,
+    projectId: String(projectId),
+    uploaderUserId: String(uploaderUserId),
+    fileName,
+    storageName,
+    mimeType: type.mimeType,
+    category: type.category,
+    size: totalBytes,
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  try {
+    await fileStorage.putFile({
+      key: projectFileStorageKey(record),
+      filePath: temporaryPath,
+      contentType: record.mimeType,
+      contentLength: record.size,
+    });
+  } finally {
+    await fs.promises.unlink(temporaryPath).catch(() => undefined);
+  }
+  return record;
+}
+
+function projectFileForClient(record) {
+  return {
+    id: record.id,
+    projectId: record.projectId,
+    uploaderUserId: record.uploaderUserId,
+    fileName: record.fileName,
+    mimeType: record.mimeType,
+    category: record.category,
+    size: record.size,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function isProjectFileReferenced(db, fileId) {
+  return Object.values(db.spaces ?? {}).some((space) =>
+    (space.blocks ?? []).some((block) => block.type === "file" && String(block.content?.fileId ?? "") === String(fileId)),
+  );
+}
+
+async function removeProjectFileRecord(db, record) {
+  db.projectFiles = (db.projectFiles ?? []).filter((item) => item.id !== record.id);
+  const storageKey = projectFileStorageKey(record);
+  if (!storageKey) return;
+  try {
+    await fileStorage.deleteObject(storageKey);
+  } catch (error) {
+    console.warn(`Failed to delete project file ${record.id}:`, error?.message ?? error);
+  }
+}
+
+async function removeUnreferencedProjectFiles(db, fileIds) {
+  for (const fileId of new Set(fileIds.filter(Boolean).map(String))) {
+    if (isProjectFileReferenced(db, fileId)) continue;
+    const record = (db.projectFiles ?? []).find((item) => item.id === fileId);
+    if (record) await removeProjectFileRecord(db, record);
+  }
+}
+
+async function sendProjectFileContent(res, record) {
+  const storageKey = projectFileStorageKey(record);
+  if (!storageKey) return false;
+  const stored = await fileStorage.getObject(storageKey);
+  if (!stored?.body) return false;
+  const inline = record.category === "image" || record.category === "audio" || record.mimeType === "application/pdf";
+  const disposition = contentDisposition(record.fileName).replace(/^attachment/i, inline ? "inline" : "attachment");
+  res.writeHead(200, {
+    "Content-Type": record.mimeType,
+    ...(Number.isFinite(stored.contentLength) ? { "Content-Length": stored.contentLength } : {}),
+    "Content-Disposition": disposition,
+    "Cache-Control": "private, max-age=3600",
+    ...responseCorsHeaders(res),
+    ...securityHeaders(record.mimeType),
+    "Access-Control-Expose-Headers": "Content-Disposition,Content-Length",
+  });
+  const stream = stored.body;
+  stream.on("error", (error) => res.destroy(error));
+  stream.pipe(res);
+  return true;
+}
+
 function securityHash(value) {
-  return crypto.createHash("sha256").update(`workspace-security:${String(value ?? "")}`).digest("hex").slice(0, 16);
+  return crypto
+    .createHmac("sha256", SYSTEM_STATS_PSEUDONYM_SECRET)
+    .update(`workspace-security:${String(value ?? "")}`)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 function loadDotEnv() {
@@ -684,6 +1239,12 @@ const PROJECT_ROLE_PERMISSIONS = {
     updatePage: true,
     deletePage: true,
     manageTemplates: true,
+    viewCalendar: true,
+    createCalendarEvents: true,
+    editOwnCalendarEvents: true,
+    editAllCalendarEvents: true,
+    deleteOwnCalendarEvents: true,
+    deleteAllCalendarEvents: true,
     manageCalendar: true,
     manageReminders: true,
     manageBot: true,
@@ -704,6 +1265,12 @@ const PROJECT_ROLE_PERMISSIONS = {
     updatePage: true,
     deletePage: true,
     manageTemplates: true,
+    viewCalendar: true,
+    createCalendarEvents: true,
+    editOwnCalendarEvents: true,
+    editAllCalendarEvents: true,
+    deleteOwnCalendarEvents: true,
+    deleteAllCalendarEvents: true,
     manageCalendar: true,
     manageReminders: true,
     manageBot: true,
@@ -724,6 +1291,12 @@ const PROJECT_ROLE_PERMISSIONS = {
     updatePage: true,
     deletePage: true,
     manageTemplates: true,
+    viewCalendar: true,
+    createCalendarEvents: true,
+    editOwnCalendarEvents: true,
+    editAllCalendarEvents: true,
+    deleteOwnCalendarEvents: true,
+    deleteAllCalendarEvents: true,
     manageCalendar: true,
     manageReminders: true,
     manageBot: false,
@@ -744,6 +1317,12 @@ const PROJECT_ROLE_PERMISSIONS = {
     updatePage: false,
     deletePage: false,
     manageTemplates: false,
+    viewCalendar: true,
+    createCalendarEvents: false,
+    editOwnCalendarEvents: false,
+    editAllCalendarEvents: false,
+    deleteOwnCalendarEvents: false,
+    deleteAllCalendarEvents: false,
     manageCalendar: false,
     manageReminders: false,
     manageBot: false,
@@ -769,12 +1348,17 @@ function createDefaultDb() {
     blocks: [],
     templates: [],
     reminders: [],
+    calendars: [],
     calendarEvents: [],
+    externalCalendarConnections: [],
     spaces: {},
     activity: [],
     securityEvents: [],
     notifications: [],
     joinRequests: [],
+    aiConnectorTokens: [],
+    aiConnectorAccessEvents: [],
+    projectFiles: [],
   };
 }
 
@@ -788,7 +1372,9 @@ async function readJson() {
   db.blocks ??= [];
   db.templates ??= [];
   db.reminders ??= [];
+  db.calendars ??= [];
   db.calendarEvents ??= [];
+  db.externalCalendarConnections ??= [];
   db.spaces ??= {};
   db.activity ??= [];
   db.securityEvents ??= [];
@@ -797,6 +1383,9 @@ async function readJson() {
   db.sessions ??= [];
   db.authCodes ??= [];
   db.outbox ??= [];
+  db.aiConnectorTokens ??= [];
+  db.aiConnectorAccessEvents ??= [];
+  db.projectFiles ??= [];
   const repairedTasks = normalizeDatabaseIds(db);
   const removedLocalDev = purgeLocalDevUser(db);
   if (repairedTasks > 0 || removedLocalDev) {
@@ -870,15 +1459,18 @@ process.once("SIGINT", () => void flushDbBeforeExit("SIGINT"));
 process.once("SIGTERM", () => void flushDbBeforeExit("SIGTERM"));
 
 function send(res, status, data) {
+  const body = JSON.stringify(data);
+  res.metricResponseBytes = Buffer.byteLength(body, "utf8");
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     ...responseCorsHeaders(res),
     ...securityHeaders("application/json"),
   });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 
 function sendRaw(res, status, body, contentType, headers = {}) {
+  res.metricResponseBytes = Buffer.isBuffer(body) ? body.length : Buffer.byteLength(String(body ?? ""), "utf8");
   res.writeHead(status, {
     "Content-Type": contentType,
     ...responseCorsHeaders(res),
@@ -973,6 +1565,14 @@ function numberQuery(value, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
+function booleanQuery(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 function paginationQuery(url, options = {}) {
   const defaultLimit = options.defaultLimit ?? 100;
   const maxLimit = options.maxLimit ?? 500;
@@ -1009,7 +1609,7 @@ function isBotServiceRoute(method, pathname) {
 
   if (method === "GET" && /^\/users\/[^/]+$/.test(pathname)) return true;
   if (method === "GET" && /^\/users\/by-username\/[^/]+$/.test(pathname)) return true;
-  if (/^\/users\/[^/]+\/(projects|assigned-tasks|bot-preferences)$/.test(pathname)) return true;
+  if (/^\/users\/[^/]+\/(projects|assigned-tasks|task-progress|bot-preferences)$/.test(pathname)) return true;
 
   if (method === "GET" && /^\/projects\/[^/]+$/.test(pathname)) return true;
   if (method === "GET" && /^\/projects\/[^/]+\/(members|columns|tasks|blocks|calendar-events|bot-settings)$/.test(pathname)) return true;
@@ -1246,6 +1846,18 @@ async function handle(req, res) {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const method = req.method ?? "GET";
   const pathname = url.pathname;
+  const metricStartedAt = process.hrtime.bigint();
+  res.once("finish", () => {
+    recordRequestMetric({
+      method,
+      pathname,
+      statusCode: res.statusCode,
+      durationMs: Number(process.hrtime.bigint() - metricStartedAt) / 1_000_000,
+      requestBytes: Number(req.headers["content-length"] ?? 0) || 0,
+      responseBytes: Number(res.metricResponseBytes ?? res.getHeader("content-length") ?? 0) || 0,
+      authKind: res.metricAuthKind ?? "public",
+    });
+  });
   const cors = corsForRequest(req);
   res.corsHeaders = cors.headers;
 
@@ -1265,10 +1877,25 @@ async function handle(req, res) {
       const username = String(body.username ?? "").trim().replace(/^@/, "").toLowerCase();
       if (!username) return send(res, 400, { error: "Укажите Telegram-ник" });
       const clientIp = clientIpFor(req);
-      if (
-        isAuthRateLimited(`auth-code-request:ip:${clientIp}`, AUTH_CODE_REQUEST_MAX_PER_IP, AUTH_CODE_REQUEST_WINDOW_MS) ||
-        isAuthRateLimited(`auth-code-request:username:${username}`, AUTH_CODE_REQUEST_MAX, AUTH_CODE_REQUEST_WINDOW_MS)
-      ) {
+      if (activeAuthIpBlock(db, clientIp)) {
+        return send(res, 429, { error: "Слишком много запросов. Попробуйте позже." });
+      }
+      const ipRateLimited = isAuthRateLimited(`auth-code-request:ip:${clientIp}`, AUTH_CODE_REQUEST_MAX_PER_IP, AUTH_CODE_REQUEST_WINDOW_MS);
+      const usernameRateLimited = isAuthRateLimited(`auth-code-request:username:${username}`, AUTH_CODE_REQUEST_MAX, AUTH_CODE_REQUEST_WINDOW_MS);
+      if (ipRateLimited || usernameRateLimited) {
+        const blockedUntil = ipRateLimited ? blockAuthIp(db, clientIp, "auth_code_request_rate_limit") : undefined;
+        logSecurityEvent(db, {
+          type: "rate_limit",
+          outcome: "rejected",
+          details: {
+            route: "/auth/request-code",
+            scope: [ipRateLimited && "ip", usernameRateLimited && "username"].filter(Boolean).join(","),
+            usernameRef: securityHash(username),
+            ipRef: securityHash(clientIp),
+            blockedUntil,
+          },
+        });
+        await writeJson(db);
         return send(res, 429, { error: "Слишком много запросов. Попробуйте позже." });
       }
 
@@ -1306,6 +1933,7 @@ async function handle(req, res) {
           "",
           `Ваш код: ${code}`,
           "⏳ Действует 10 минут.",
+          "Код содержит латинские буквы и цифры.",
           "",
           "Если вы не запрашивали вход — просто игнорируйте.",
         ].join("\n"),
@@ -1324,14 +1952,32 @@ async function handle(req, res) {
     if (method === "POST" && pathname === "/auth/verify-code") {
       const body = await parseBody(req);
       const username = String(body.username ?? "").trim().replace(/^@/, "").toLowerCase();
-      const code = String(body.code ?? "").trim();
+      const code = normalizeAuthCode(body.code);
       if (!username || !code) return send(res, 400, { error: "Укажите Telegram-ник и код" });
       const clientIp = clientIpFor(req);
-      if (
-        isAuthRateLimited(`auth-code-verify:ip:${clientIp}`, AUTH_CODE_VERIFY_MAX_PER_IP, AUTH_CODE_VERIFY_WINDOW_MS) ||
-        isAuthRateLimited(`auth-code-verify:username:${username}`, AUTH_CODE_VERIFY_MAX, AUTH_CODE_VERIFY_WINDOW_MS)
-      ) {
+      if (activeAuthIpBlock(db, clientIp)) {
         return send(res, 429, { error: "Слишком много попыток. Попробуйте позже." });
+      }
+      const ipRateLimited = isAuthRateLimited(`auth-code-verify:ip:${clientIp}`, AUTH_CODE_VERIFY_MAX_PER_IP, AUTH_CODE_VERIFY_WINDOW_MS);
+      const usernameRateLimited = isAuthRateLimited(`auth-code-verify:username:${username}`, AUTH_CODE_VERIFY_MAX, AUTH_CODE_VERIFY_WINDOW_MS);
+      if (ipRateLimited || usernameRateLimited) {
+        const blockedUntil = ipRateLimited ? blockAuthIp(db, clientIp, "auth_code_verify_rate_limit") : undefined;
+        logSecurityEvent(db, {
+          type: "rate_limit",
+          outcome: "rejected",
+          details: {
+            route: "/auth/verify-code",
+            scope: [ipRateLimited && "ip", usernameRateLimited && "username"].filter(Boolean).join(","),
+            usernameRef: securityHash(username),
+            ipRef: securityHash(clientIp),
+            blockedUntil,
+          },
+        });
+        await writeJson(db);
+        return send(res, 429, { error: "Слишком много попыток. Попробуйте позже." });
+      }
+      if (!/^[A-Z0-9]{6}$/.test(code)) {
+        return send(res, 400, { error: "Код должен состоять из 6 латинских букв и цифр" });
       }
       const user = db.users.find((item) => item.username?.toLowerCase() === username);
       const record = user ? db.authCodes.find((item) => item.userId === user.id) : undefined;
@@ -1370,27 +2016,37 @@ async function handle(req, res) {
       }
       if (!isAuthCodeMatch(record, user.id, code)) {
         record.attempts += 1;
+        const attemptsRemaining = Math.max(0, AUTH_CODE_MAX_ATTEMPTS - record.attempts);
+        if (attemptsRemaining === 0) {
+          db.authCodes = db.authCodes.filter((item) => item.id !== record.id);
+          logSecurityEvent(db, {
+            type: "auth_code_verify",
+            outcome: "locked",
+            targetUserId: user.id,
+            details: { usernameRef: securityHash(username), ipRef: securityHash(clientIp), attempts: record.attempts },
+          });
+          await writeJson(db);
+          return send(res, 429, {
+            error: "Слишком много неверных попыток. Запросите новый код.",
+            attemptsRemaining: 0,
+          });
+        }
         logSecurityEvent(db, {
           type: "auth_code_verify",
           outcome: "failed_code",
           targetUserId: user.id,
-          details: { usernameRef: securityHash(username), ipRef: securityHash(clientIp), attempts: record.attempts },
+          details: { usernameRef: securityHash(username), ipRef: securityHash(clientIp), attempts: record.attempts, attemptsRemaining },
         });
         await writeJson(db);
-        return send(res, 400, { error: "Неверный код" });
+        return send(res, 400, {
+          error: `Неверный код. Осталось попыток: ${attemptsRemaining}.`,
+          attemptsRemaining,
+        });
       }
 
       // Успех: удаляем код, создаём сессию
       db.authCodes = db.authCodes.filter((item) => item.id !== record.id);
-      const token = randomToken(32);
-      db.sessions.push({
-        id: randomToken(8),
-        tokenHash: sessionTokenHash(token),
-        userId: user.id,
-        createdAt: now(),
-        lastSeenAt: now(),
-        expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
-      });
+      const token = createSessionForUser(db, user);
       logSecurityEvent(db, {
         type: "auth_code_verify",
         outcome: "success",
@@ -1402,12 +2058,39 @@ async function handle(req, res) {
     }
 
     // ===== АУТЕНТИФИКАЦИЯ =====
+    if (method === "POST" && pathname === "/auth/dev-local") {
+      if (!isLocalDevRequest(req)) return send(res, 404, { error: "Not found" });
+      const localUser = db.users.find(
+        (item) => item.telegramId === "local-dev" || item.username?.toLowerCase() === "local_user",
+      );
+      if (!localUser || localUser.isBlocked) return send(res, 404, { error: "Local user not found" });
+      const token = createSessionForUser(db, localUser);
+      logSecurityEvent(db, {
+        type: "auth_dev_local",
+        outcome: "success",
+        targetUserId: localUser.id,
+        details: { ipRef: securityHash(clientIpFor(req)) },
+      });
+      await writeJson(db);
+      return send(res, 200, { token, user: localUser });
+    }
+
     const auth = resolveAuth(req, db, url);
     if (db._dirty) {
       delete db._dirty;
       await writeJson(db);
     }
     if (!auth) return send(res, 401, { error: "Unauthorized" });
+    res.metricAuthKind = auth.kind;
+    if (auth.kind === "bot") {
+      botRuntime.lastSeenAt = now();
+      botRuntime.lastPath = normalizeMetricRoute(pathname);
+      botRuntime.requestCount += 1;
+    }
+
+    if (auth.kind === "ai" && !(method === "GET" && /^\/projects\/[^/]+\/ai-context(?:\/changes)?$/.test(pathname))) {
+      return send(res, 403, { error: "AI connector token is read-only" });
+    }
 
     // Текущий пользователь
     if (method === "GET" && pathname === "/auth/me") return send(res, 200, auth.user ?? null);
@@ -1436,7 +2119,22 @@ async function handle(req, res) {
 
     // ===== АВТОРИЗАЦИЯ ДОСТУПА К РЕСУРСАМ =====
     const denied = authorizeRequest(auth, method, pathname, db);
-    if (denied) return send(res, denied.status, { error: denied.error });
+    if (denied) {
+      if (denied.audit) {
+        logSecurityEvent(db, {
+          ...denied.audit,
+          actorUserId: auth.user?.id,
+          details: {
+            ...denied.audit.details,
+            method,
+            route: normalizeMetricRoute(pathname),
+            ipRef: securityHash(clientIpFor(req)),
+          },
+        });
+        await writeJson(db);
+      }
+      return send(res, denied.status, { error: denied.error });
+    }
 
     if (method === "GET" && pathname === "/projects") return send(res, 200, db.projects.filter((project) => !project.isDeleted));
 
@@ -1758,7 +2456,17 @@ async function handle(req, res) {
 
     if (method === "GET" && pathname === "/system/security-events") {
       if (!isSystemOwner(auth, db)) return send(res, 403, { error: "Forbidden" });
-      return sendPaginatedOrArray(res, url, db.securityEvents ?? [], { key: "events", defaultLimit: 100, maxLimit: 500 });
+      const events = (db.securityEvents ?? []).map(publicSystemSecurityEvent);
+      if (!wantsPaginatedResponse(url)) return send(res, 200, events);
+      const { offset, limit } = paginationQuery(url, { defaultLimit: 100, maxLimit: 500 });
+      return send(res, 200, {
+        events: events.slice(offset, offset + limit),
+        offset,
+        limit,
+        total: events.length,
+        hasMore: offset + limit < events.length,
+        summary: createSystemSecuritySummary(db),
+      });
     }
 
     if (method === "GET" && pathname === "/system/users/export.json") {
@@ -1831,6 +2539,57 @@ async function handle(req, res) {
     if (params) {
       const project = findProjectById(db, params.id);
       return send(res, 200, project && !project.isDeleted ? hydrateProject(db, project) : null);
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<id>[^/]+)\/files$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      if (auth.kind !== "user") return send(res, 403, { error: "User access required" });
+      const mode = url.searchParams.get("mode") === "node" ? "node" : "block";
+      const permission = mode === "node" ? "createPage" : "updatePage";
+      if (!hasProjectPermission(project, auth.user.id, permission)) {
+        return send(res, 403, { error: `Permission denied: ${permission}` });
+      }
+      const record = await saveProjectFileFromRequest(
+        req,
+        params.id,
+        auth.user.id,
+        url.searchParams.get("fileName"),
+      );
+      db.projectFiles.push(record);
+      await writeJson(db);
+      return send(res, 201, projectFileForClient(record));
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/files\/(?<fileId>[^/]+)\/content$/ });
+    if (params) {
+      const record = db.projectFiles.find(
+        (item) => item.id === params.fileId && String(item.projectId) === String(params.id),
+      );
+      if (!record) return send(res, 404, { error: "File not found" });
+      if (!(await sendProjectFileContent(res, record))) return send(res, 404, { error: "File content not found" });
+      return;
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/files\/(?<fileId>[^/]+)$/ });
+    if (params) {
+      const record = db.projectFiles.find(
+        (item) => item.id === params.fileId && String(item.projectId) === String(params.id),
+      );
+      return send(res, record ? 200 : 404, record ? projectFileForClient(record) : { error: "File not found" });
+    }
+
+    params = route(method, pathname, { method: "DELETE", path: /^\/projects\/(?<id>[^/]+)\/files\/(?<fileId>[^/]+)$/ });
+    if (params) {
+      const record = db.projectFiles.find(
+        (item) => item.id === params.fileId && String(item.projectId) === String(params.id),
+      );
+      if (!record) return send(res, 404, { error: "File not found" });
+      if (isProjectFileReferenced(db, record.id)) return send(res, 409, { error: "File is used on a page" });
+      await removeProjectFileRecord(db, record);
+      await writeJson(db);
+      return send(res, 200, { success: true });
     }
 
     params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/export$/ });
@@ -1965,11 +2724,18 @@ async function handle(req, res) {
       const project = findProjectById(db, params.projectId);
       if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
       const actorUserId = actorFor(auth, body.actorUserId);
-      if (!canManageProjectAccess(project, actorUserId)) return send(res, 403, { error: "Access denied" });
       project.responsibilityAreas = normalizeResponsibilityAreas(project.responsibilityAreas, project.id);
       const index = project.responsibilityAreas.findIndex((area) => String(area.id) === String(params.areaId));
       if (index === -1) return send(res, 404, { error: "Responsibility area not found" });
-      project.responsibilityAreas[index] = normalizeResponsibilityArea(body, project.id, project.responsibilityAreas[index]);
+      const currentArea = project.responsibilityAreas[index];
+      const canManageArea = canManageProjectAccess(project, actorUserId);
+      const canWorkInArea = isProjectMemberRecord(project, actorUserId)
+        && hasProjectPermission(project, actorUserId, "updatePage")
+        && currentArea.ownerUserIds.some((userId) => String(userId) === String(actorUserId));
+      if (!canManageArea && !canWorkInArea) return send(res, 403, { error: "Access denied" });
+      const patch = canManageArea ? body : pickResponsibilityWorkspacePatch(body);
+      if (!canManageArea && Object.keys(patch).length === 0) return send(res, 400, { error: "No editable fields" });
+      project.responsibilityAreas[index] = normalizeResponsibilityArea(patch, project.id, currentArea);
       project.updatedAt = now();
       await writeJson(db);
       return send(res, 200, project.responsibilityAreas[index]);
@@ -2030,11 +2796,13 @@ async function handle(req, res) {
       if (!project) return send(res, 404, { error: "Project not found" });
       if (!isProjectOwner(project, actorUserId)) return send(res, 403, { error: "Only project owner can permanently delete project" });
       const projectTaskIds = new Set(db.tasks.filter((task) => task.projectId === params.id).map((task) => task.id));
+      const projectFileRecords = db.projectFiles.filter((file) => String(file.projectId) === String(params.id));
       db.projects = db.projects.filter((item) => item.id !== params.id);
       db.columns = db.columns.filter((item) => item.projectId !== params.id);
       db.tasks = db.tasks.filter((item) => item.projectId !== params.id);
       db.subtasks = db.subtasks.filter((subtask) => db.tasks.some((task) => task.id === subtask.taskId));
       db.notifications = db.notifications.filter((notification) => !projectTaskIds.has(notification.entityId));
+      for (const file of projectFileRecords) await removeProjectFileRecord(db, file);
       await writeJson(db);
       return send(res, 200, { success: true });
     }
@@ -2243,6 +3011,7 @@ async function handle(req, res) {
         isHidden: false,
       };
       db.columns.push(column);
+      syncBoardTaskCompletionStates(db, column.projectId, column.pageId);
       await writeJson(db);
       return send(res, 201, column);
     }
@@ -2267,6 +3036,7 @@ async function handle(req, res) {
       db.tasks = db.tasks.map((task) => task.columnId === column.id ? { ...task, columnId: fallback.id, updatedAt: now() } : task);
       db.columns = db.columns.filter((item) => item.id !== column.id);
       normalizeColumnPositions(db, column.projectId, column.pageId);
+      syncBoardTaskCompletionStates(db, column.projectId, column.pageId);
       await writeJson(db);
       return send(res, 200, db.columns.filter((item) => item.projectId === column.projectId && sameBoard(item.pageId, column.pageId)).sort((a, b) => a.position - b.position));
     }
@@ -2278,6 +3048,7 @@ async function handle(req, res) {
         const position = body.orderedIds.map(String).indexOf(column.id);
         return column.projectId === params.id && position !== -1 ? { ...column, position } : column;
       });
+      syncBoardTaskCompletionStates(db, params.id, body.pageId);
       await writeJson(db);
       return send(res, 200, db.columns.filter((column) => column.projectId === params.id && sameBoard(column.pageId, body.pageId)).sort((a, b) => a.position - b.position));
     }
@@ -2331,41 +3102,581 @@ async function handle(req, res) {
       return send(res, 200, buildProjectAdminSummary(db, project, days));
     }
 
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/ai-tokens$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const tokens = (db.aiConnectorTokens ?? [])
+        .filter((token) => String(token.projectId) === String(project.id))
+        .sort((left, right) => new Date(right.createdAt ?? 0).getTime() - new Date(left.createdAt ?? 0).getTime())
+        .map(publicAiConnectorToken);
+      return send(res, 200, tokens);
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/ai-access-events$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const limit = numberQuery(url.searchParams.get("limit"), 50, 1, 200);
+      const events = (db.aiConnectorAccessEvents ?? [])
+        .filter((event) => String(event.projectId) === String(project.id))
+        .sort((left, right) => new Date(right.createdAt ?? 0).getTime() - new Date(left.createdAt ?? 0).getTime())
+        .slice(0, limit)
+        .map(publicAiConnectorAccessEvent);
+      return send(res, 200, events);
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<id>[^/]+)\/ai-tokens$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const body = await parseBody(req);
+      const created = createAiConnectorToken(db, project.id, auth.user.id, body);
+      logSecurityEvent(db, {
+        type: "ai_connector_token_create",
+        actorUserId: auth.user.id,
+        projectId: project.id,
+        details: { tokenId: created.record.id, expiresAt: created.record.expiresAt },
+      });
+      await writeJson(db);
+      return send(res, 201, { token: created.token, tokenRecord: publicAiConnectorToken(created.record) });
+    }
+
+    params = route(method, pathname, { method: "DELETE", path: /^\/projects\/(?<projectId>[^/]+)\/ai-tokens\/(?<tokenId>[^/]+)$/ });
+    if (params) {
+      const project = findProjectById(db, params.projectId);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const tokenRecord = (db.aiConnectorTokens ?? []).find(
+        (token) => String(token.projectId) === String(project.id) && String(token.id) === String(params.tokenId),
+      );
+      if (!tokenRecord) return send(res, 404, { error: "Token not found" });
+      if (!tokenRecord.revokedAt) {
+        tokenRecord.revokedAt = now();
+        tokenRecord.revokedByUserId = auth.user.id;
+        logSecurityEvent(db, {
+          type: "ai_connector_token_revoke",
+          actorUserId: auth.user.id,
+          projectId: project.id,
+          details: { tokenId: tokenRecord.id },
+        });
+        await writeJson(db);
+      }
+      return send(res, 200, publicAiConnectorToken(tokenRecord));
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/ai-context\/changes$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const since = url.searchParams.get("since");
+      if (!since) return send(res, 400, { error: "since is required" });
+      const scope = url.searchParams.get("scope") === "full" ? "full" : "summary";
+      const options = {
+        scope,
+        includeBlocks: url.searchParams.get("includeBlocks") === "1",
+        includeArchived: url.searchParams.get("includeArchived") === "1",
+        includeTasks: booleanQuery(url.searchParams.get("includeTasks"), true),
+        includeWorkspace: booleanQuery(url.searchParams.get("includeWorkspace"), true),
+        includeCalendar: booleanQuery(url.searchParams.get("includeCalendar"), true),
+        includeReminders: booleanQuery(url.searchParams.get("includeReminders"), true),
+        includeInbox: booleanQuery(url.searchParams.get("includeInbox"), true),
+        includeResponsibility: booleanQuery(url.searchParams.get("includeResponsibility"), true),
+        includeActivity: booleanQuery(url.searchParams.get("includeActivity"), true),
+        maxTasks: numberQuery(url.searchParams.get("maxTasks"), scope === "full" ? 1000 : 300, 1, 2000),
+        maxBlocks: numberQuery(url.searchParams.get("maxBlocks"), scope === "full" ? 1000 : 300, 1, 2000),
+      };
+      const effectiveOptions = auth.kind === "ai" ? applyAiConnectorAccessPolicy(options, auth.token) : options;
+      const context = buildProjectAiChanges(db, project, effectiveOptions, since);
+      if (auth.kind === "ai") {
+        logAiConnectorAccessEvent(db, {
+          projectId: project.id,
+          tokenRecord: auth.token,
+          req,
+          options: effectiveOptions,
+          context,
+          toolName: normalizeAiConnectorToolName(url.searchParams.get("tool")) ?? "get_project_changes",
+        });
+        await writeJson(db);
+      }
+      return send(res, 200, context);
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/ai-context$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const scope = url.searchParams.get("scope") === "full" ? "full" : "summary";
+      const includeBlocks = url.searchParams.get("includeBlocks") === "1";
+      const includeArchived = url.searchParams.get("includeArchived") === "1";
+      const includeTasks = booleanQuery(url.searchParams.get("includeTasks"), true);
+      const includeWorkspace = booleanQuery(url.searchParams.get("includeWorkspace"), true);
+      const includeCalendar = booleanQuery(url.searchParams.get("includeCalendar"), true);
+      const includeReminders = booleanQuery(url.searchParams.get("includeReminders"), true);
+      const includeInbox = booleanQuery(url.searchParams.get("includeInbox"), true);
+      const includeResponsibility = booleanQuery(url.searchParams.get("includeResponsibility"), true);
+      const includeActivity = booleanQuery(url.searchParams.get("includeActivity"), true);
+      const maxTasks = numberQuery(url.searchParams.get("maxTasks"), scope === "full" ? 1000 : 300, 1, 2000);
+      const maxBlocks = numberQuery(url.searchParams.get("maxBlocks"), scope === "full" ? 1000 : 300, 1, 2000);
+      const toolName = normalizeAiConnectorToolName(url.searchParams.get("tool"));
+      const options = {
+        scope,
+        includeBlocks,
+        includeArchived,
+        includeTasks,
+        includeWorkspace,
+        includeCalendar,
+        includeReminders,
+        includeInbox,
+        includeResponsibility,
+        includeActivity,
+        maxTasks,
+        maxBlocks,
+      };
+      const effectiveOptions = auth.kind === "ai" ? applyAiConnectorAccessPolicy(options, auth.token) : options;
+      const context = buildProjectAiContext(db, project, effectiveOptions);
+      if (auth.kind === "ai") {
+        logAiConnectorAccessEvent(db, {
+          projectId: project.id,
+          tokenRecord: auth.token,
+          req,
+          options: effectiveOptions,
+          context,
+          toolName,
+        });
+        await writeJson(db);
+      }
+      return send(res, 200, context);
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<projectId>[^/]+)\/external-calendar-connections$/ });
+    if (params) {
+      const project = findProjectById(db, params.projectId);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const connections = (db.externalCalendarConnections ?? [])
+        .filter((connection) => String(connection.projectId) === String(project.id))
+        .map(publicExternalCalendarConnection)
+        .sort((left, right) => left.name.localeCompare(right.name, "ru"));
+      return send(res, 200, connections);
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<projectId>[^/]+)\/external-calendar-connections\/yandex$/ });
+    if (params) {
+      if (!externalCalendarCredentialsKey()) {
+        return send(res, 503, { error: "External calendar encryption is not configured" });
+      }
+      const project = findProjectById(db, params.projectId);
+      if (!project || project.isDeleted) return send(res, 404, { error: "Project not found" });
+      const body = await parseBody(req);
+      const feedUrl = String(body.feedUrl ?? "").trim();
+      try {
+        await normalizeYandexCalendarUrl(feedUrl);
+      } catch (error) {
+        return send(res, 400, { error: error instanceof Error ? error.message : "Invalid calendar URL" });
+      }
+      const createdAt = now();
+      const connectionId = `external_calendar_${crypto.randomUUID()}`;
+      const calendarId = `calendar_external_${crypto.randomUUID()}`;
+      const name = String(body.name ?? "Яндекс Календарь").trim().slice(0, 80) || "Яндекс Календарь";
+      const color = normalizeHexColor(body.color, "#FFCC00");
+      const connection = {
+        id: connectionId,
+        provider: "yandex",
+        projectId: project.id,
+        ownerUserId: String(auth.user.id),
+        calendarId,
+        name,
+        color,
+        encryptedFeedUrl: encryptExternalCalendarValue(feedUrl),
+        enabled: true,
+        syncIntervalMinutes: 15,
+        lastSyncStatus: "pending",
+        importedEvents: 0,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      db.externalCalendarConnections.push(connection);
+      db.calendars.push({
+        id: calendarId,
+        type: "PROJECT",
+        projectId: project.id,
+        sourceType: "external",
+        connectionId,
+        readOnly: true,
+        name,
+        color,
+        ownerUserId: String(auth.user.id),
+        createdAt,
+        updatedAt: createdAt,
+      });
+      try {
+        await syncExternalCalendarConnection(db, connection);
+      } catch (error) {
+        db.externalCalendarConnections = db.externalCalendarConnections.filter((item) => item.id !== connectionId);
+        db.calendars = db.calendars.filter((item) => item.id !== calendarId);
+        return send(res, 400, { error: error instanceof Error ? error.message : "Calendar sync failed" });
+      }
+      await writeJson(db);
+      return send(res, 201, publicExternalCalendarConnection(connection));
+    }
+
+    params = route(method, pathname, { method: "PATCH", path: /^\/projects\/(?<projectId>[^/]+)\/external-calendar-connections\/(?<id>[^/]+)$/ });
+    if (params) {
+      const connection = db.externalCalendarConnections.find(
+        (item) => item.id === params.id && String(item.projectId) === String(params.projectId),
+      );
+      if (!connection) return send(res, 404, { error: "External calendar not found" });
+      const body = await parseBody(req);
+      const calendar = db.calendars.find((item) => String(item.id) === String(connection.calendarId));
+      if (body.enabled !== undefined) connection.enabled = Boolean(body.enabled);
+      if (body.name !== undefined) connection.name = String(body.name).trim().slice(0, 80) || connection.name;
+      if (body.color !== undefined) connection.color = normalizeHexColor(body.color, connection.color);
+      connection.updatedAt = now();
+      if (calendar) {
+        calendar.name = connection.name;
+        calendar.color = connection.color;
+        calendar.updatedAt = connection.updatedAt;
+        for (const event of db.calendarEvents.filter((item) => String(item.calendarId) === String(calendar.id))) {
+          event.color = calendar.color;
+          event.categoryLabel = calendar.name;
+          event.updatedAt = connection.updatedAt;
+        }
+      }
+      await writeJson(db);
+      return send(res, 200, publicExternalCalendarConnection(connection));
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<projectId>[^/]+)\/external-calendar-connections\/(?<id>[^/]+)\/sync$/ });
+    if (params) {
+      const connection = db.externalCalendarConnections.find(
+        (item) => item.id === params.id && String(item.projectId) === String(params.projectId),
+      );
+      if (!connection) return send(res, 404, { error: "External calendar not found" });
+      try {
+        const result = await syncExternalCalendarConnection(db, connection);
+        await writeJson(db);
+        return send(res, 200, result);
+      } catch (error) {
+        await writeJson(db);
+        return send(res, 502, { error: error instanceof Error ? error.message : "Calendar sync failed" });
+      }
+    }
+
+    params = route(method, pathname, { method: "DELETE", path: /^\/projects\/(?<projectId>[^/]+)\/external-calendar-connections\/(?<id>[^/]+)$/ });
+    if (params) {
+      const connection = db.externalCalendarConnections.find(
+        (item) => item.id === params.id && String(item.projectId) === String(params.projectId),
+      );
+      if (!connection) return send(res, 404, { error: "External calendar not found" });
+      db.externalCalendarConnections = db.externalCalendarConnections.filter((item) => item.id !== connection.id);
+      db.calendarEvents = db.calendarEvents.filter((item) => String(item.calendarId) !== String(connection.calendarId));
+      db.calendars = db.calendars.filter((item) => String(item.id) !== String(connection.calendarId));
+      await writeJson(db);
+      return send(res, 200, { success: true });
+    }
+
+    if (method === "GET" && pathname === "/me/external-calendar-connections") {
+      const connections = (db.externalCalendarConnections ?? [])
+        .filter((connection) => !connection.projectId && String(connection.ownerUserId) === String(auth.user.id))
+        .map(publicExternalCalendarConnection)
+        .sort((left, right) => left.name.localeCompare(right.name, "ru"));
+      return send(res, 200, connections);
+    }
+
+    if (method === "POST" && pathname === "/me/external-calendar-connections/yandex") {
+      if (!externalCalendarCredentialsKey()) {
+        return send(res, 503, { error: "External calendar encryption is not configured" });
+      }
+      const body = await parseBody(req);
+      const feedUrl = String(body.feedUrl ?? "").trim();
+      try {
+        await normalizeYandexCalendarUrl(feedUrl);
+      } catch (error) {
+        return send(res, 400, { error: error instanceof Error ? error.message : "Invalid calendar URL" });
+      }
+      const createdAt = now();
+      const connectionId = `external_calendar_${crypto.randomUUID()}`;
+      const calendarId = `calendar_external_${crypto.randomUUID()}`;
+      const name = String(body.name ?? "Яндекс Календарь").trim().slice(0, 80) || "Яндекс Календарь";
+      const color = normalizeHexColor(body.color, "#FFCC00");
+      const connection = {
+        id: connectionId,
+        provider: "yandex",
+        ownerUserId: String(auth.user.id),
+        calendarId,
+        name,
+        color,
+        encryptedFeedUrl: encryptExternalCalendarValue(feedUrl),
+        enabled: true,
+        syncIntervalMinutes: 15,
+        lastSyncStatus: "pending",
+        importedEvents: 0,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      db.externalCalendarConnections.push(connection);
+      db.calendars.push({
+        id: calendarId,
+        type: "PERSONAL",
+        sourceType: "external",
+        connectionId,
+        readOnly: true,
+        name,
+        color,
+        ownerUserId: String(auth.user.id),
+        createdAt,
+        updatedAt: createdAt,
+      });
+      try {
+        await syncExternalCalendarConnection(db, connection);
+      } catch (error) {
+        db.externalCalendarConnections = db.externalCalendarConnections.filter((item) => item.id !== connectionId);
+        db.calendars = db.calendars.filter((item) => item.id !== calendarId);
+        return send(res, 400, { error: error instanceof Error ? error.message : "Calendar sync failed" });
+      }
+      await writeJson(db);
+      return send(res, 201, publicExternalCalendarConnection(connection));
+    }
+
+    params = route(method, pathname, { method: "PATCH", path: /^\/me\/external-calendar-connections\/(?<id>[^/]+)$/ });
+    if (params) {
+      const connection = db.externalCalendarConnections.find(
+        (item) => !item.projectId && item.id === params.id && String(item.ownerUserId) === String(auth.user.id),
+      );
+      if (!connection) return send(res, 404, { error: "External calendar not found" });
+      const body = await parseBody(req);
+      const calendar = db.calendars.find((item) => String(item.id) === String(connection.calendarId));
+      if (body.enabled !== undefined) connection.enabled = Boolean(body.enabled);
+      if (body.name !== undefined) connection.name = String(body.name).trim().slice(0, 80) || connection.name;
+      if (body.color !== undefined) connection.color = normalizeHexColor(body.color, connection.color);
+      connection.updatedAt = now();
+      if (calendar) {
+        calendar.name = connection.name;
+        calendar.color = connection.color;
+        calendar.updatedAt = connection.updatedAt;
+        for (const event of db.calendarEvents.filter((item) => String(item.calendarId) === String(calendar.id))) {
+          event.color = calendar.color;
+          event.categoryLabel = calendar.name;
+          event.updatedAt = connection.updatedAt;
+        }
+      }
+      await writeJson(db);
+      return send(res, 200, publicExternalCalendarConnection(connection));
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/me\/external-calendar-connections\/(?<id>[^/]+)\/sync$/ });
+    if (params) {
+      const connection = db.externalCalendarConnections.find(
+        (item) => !item.projectId && item.id === params.id && String(item.ownerUserId) === String(auth.user.id),
+      );
+      if (!connection) return send(res, 404, { error: "External calendar not found" });
+      try {
+        const result = await syncExternalCalendarConnection(db, connection);
+        await writeJson(db);
+        return send(res, 200, result);
+      } catch (error) {
+        await writeJson(db);
+        return send(res, 502, { error: error instanceof Error ? error.message : "Calendar sync failed" });
+      }
+    }
+
+    params = route(method, pathname, { method: "DELETE", path: /^\/me\/external-calendar-connections\/(?<id>[^/]+)$/ });
+    if (params) {
+      const connection = db.externalCalendarConnections.find(
+        (item) => !item.projectId && item.id === params.id && String(item.ownerUserId) === String(auth.user.id),
+      );
+      if (!connection) return send(res, 404, { error: "External calendar not found" });
+      db.externalCalendarConnections = db.externalCalendarConnections.filter((item) => item.id !== connection.id);
+      db.calendarEvents = db.calendarEvents.filter((item) => String(item.calendarId) !== String(connection.calendarId));
+      db.calendars = db.calendars.filter((item) => String(item.id) !== String(connection.calendarId));
+      await writeJson(db);
+      return send(res, 200, { success: true });
+    }
+
+    if (method === "GET" && pathname === "/me/calendars") {
+      const calendars = accessibleCalendarsForUser(db, auth.user.id)
+        .map((calendar) => calendarWithUserPermissions(db, auth.user.id, calendar))
+        .sort((left, right) => left.type === right.type ? left.name.localeCompare(right.name, "ru") : left.type === "PERSONAL" ? -1 : 1);
+      return send(res, 200, calendars);
+    }
+
+    if (method === "GET" && pathname === "/me/calendar-events") {
+      const range = calendarRangeFromUrl(url);
+      if (range.error) return send(res, 400, { error: range.error });
+      const calendars = accessibleCalendarsForUser(db, auth.user.id);
+      const accessibleIds = new Set(calendars.map((calendar) => String(calendar.id)));
+      const selectedIds = requestedCalendarIds(url);
+      const enabledIds = selectedIds.size > 0
+        ? new Set([...selectedIds].filter((id) => accessibleIds.has(id)))
+        : accessibleIds;
+      const events = db.calendarEvents
+        .filter((event) => enabledIds.has(String(event.calendarId)))
+        .filter((event) => canUserReadCalendarEvent(db, auth.user.id, event))
+        .filter((event) => calendarEventOverlapsRange(event, range))
+        .sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime());
+      return sendPaginatedOrArray(res, url, events, { key: "events", defaultLimit: 250, maxLimit: 1000 });
+    }
+
+    if (method === "GET" && pathname === "/me/task-deadlines") {
+      const range = calendarRangeFromUrl(url);
+      if (range.error) return send(res, 400, { error: range.error });
+      const projectIdFilter = url.searchParams.get("projectId");
+      const accessibleProjectIds = new Set(
+        db.projects
+          .filter((project) => !project.isDeleted)
+          .filter((project) => isProjectMemberRecord(project, auth.user.id))
+          .filter((project) => hasProjectPermission(project, auth.user.id, "viewCalendar"))
+          .filter((project) => !projectIdFilter || String(project.id) === String(projectIdFilter))
+          .map((project) => String(project.id)),
+      );
+      const deadlines = db.tasks
+        .filter((task) => accessibleProjectIds.has(String(task.projectId)))
+        .filter((task) => !task.isArchived && !isTaskInFinalColumn(db, task))
+        .filter((task) => {
+          const deadline = task.deadlineAt ? new Date(task.deadlineAt).getTime() : Number.NaN;
+          return Number.isFinite(deadline) && deadline >= range.from && deadline < range.to;
+        })
+        .map((task) => {
+          const project = findProjectById(db, task.projectId);
+          return {
+            ...hydrateTask(db, task),
+            project: project ? { id: project.id, title: project.title, icon: project.icon } : undefined,
+          };
+        })
+        .sort((left, right) => new Date(left.deadlineAt).getTime() - new Date(right.deadlineAt).getTime());
+      return sendPaginatedOrArray(res, url, deadlines, { key: "tasks", defaultLimit: 250, maxLimit: 1000 });
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/calendar$/ });
+    if (params) {
+      const calendar = projectCalendarFor(db, params.id);
+      if (!calendar) return send(res, 404, { error: "Calendar not found" });
+      return send(res, 200, calendarWithUserPermissions(db, auth.user.id, calendar));
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/calendars\/(?<id>[^/]+)\/categories$/ });
+    if (params) {
+      const calendar = db.calendars.find((item) => String(item.id) === String(params.id));
+      const denied = calendarCategoryManagePermissionError(db, auth.user.id, calendar);
+      if (denied) return send(res, denied.status, { error: denied.error });
+      const body = await parseBody(req);
+      const label = String(body.label ?? "").trim().slice(0, 80);
+      if (!label) return send(res, 400, { error: "Category label is required" });
+      const categories = calendarCategoriesFor(db, calendar);
+      const allCategoryLabels = [...Object.values(BASE_CALENDAR_CATEGORIES), ...categories];
+      if (allCategoryLabels.some((category) => category.label.localeCompare(label, "ru", { sensitivity: "accent" }) === 0)) {
+        return send(res, 409, { error: "Category with this label already exists" });
+      }
+      const category = {
+        id: `category_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        label,
+        color: normalizeHexColor(body.color, "#64748B"),
+        type: "custom",
+        createdAt: now(),
+      };
+      if (calendar.type === "PERSONAL") {
+        calendar.categories = [...normalizeCalendarCategories(calendar.categories), category];
+        calendar.updatedAt = now();
+      } else {
+        const project = findProjectById(db, calendar.projectId);
+        project.calendarCategories = [...normalizeCalendarCategories(project.calendarCategories), category];
+        project.updatedAt = now();
+      }
+      await writeJson(db);
+      return send(res, 201, category);
+    }
+
+    params = route(method, pathname, { method: "PATCH", path: /^\/calendars\/(?<id>[^/]+)\/categories\/(?<categoryId>[^/]+)$/ });
+    if (params) {
+      const calendar = db.calendars.find((item) => String(item.id) === String(params.id));
+      const denied = calendarCategoryManagePermissionError(db, auth.user.id, calendar);
+      if (denied) return send(res, denied.status, { error: denied.error });
+      const body = await parseBody(req);
+      const categories = calendarCategoriesFor(db, calendar);
+      const existing = categories.find((category) => String(category.id) === String(params.categoryId));
+      const base = BASE_CALENDAR_CATEGORIES[params.categoryId];
+      if (!existing && !base) return send(res, 404, { error: "Category not found" });
+      const updated = {
+        ...(base ?? {}),
+        ...(existing ?? {}),
+        id: params.categoryId,
+        label: String(existing?.label ?? base?.label ?? body.label ?? "").trim().slice(0, 80),
+        color: normalizeHexColor(body.color, existing?.color ?? base?.color ?? "#64748B"),
+        type: normalizeCalendarEventType(existing?.type ?? base?.type ?? body.type),
+        createdAt: existing?.createdAt ?? now(),
+        updatedAt: now(),
+      };
+      setCalendarCategories(db, calendar, [
+        ...categories.filter((category) => String(category.id) !== String(params.categoryId)),
+        updated,
+      ]);
+      for (const event of db.calendarEvents.filter((item) => String(item.calendarId) === String(calendar.id) && String(item.categoryId) === String(updated.id))) {
+        event.color = updated.color;
+        event.categoryLabel = updated.label;
+        event.type = updated.type;
+        event.updatedAt = now();
+      }
+      await writeJson(db);
+      return send(res, 200, updated);
+    }
+
+    params = route(method, pathname, { method: "DELETE", path: /^\/calendars\/(?<id>[^/]+)\/categories\/(?<categoryId>[^/]+)$/ });
+    if (params) {
+      const calendar = db.calendars.find((item) => String(item.id) === String(params.id));
+      const denied = calendarCategoryManagePermissionError(db, auth.user.id, calendar);
+      if (denied) return send(res, denied.status, { error: denied.error });
+      if (BASE_CALENDAR_CATEGORIES[params.categoryId]) {
+        return send(res, 400, { error: "Base categories cannot be deleted" });
+      }
+      const categories = calendarCategoriesFor(db, calendar);
+      if (!categories.some((category) => String(category.id) === String(params.categoryId))) {
+        return send(res, 404, { error: "Category not found" });
+      }
+      setCalendarCategories(db, calendar, categories.filter((category) => String(category.id) !== String(params.categoryId)));
+      const fallback = calendarCategoryById(db, calendar, "base:meeting") ?? BASE_CALENDAR_CATEGORIES["base:meeting"];
+      let reassignedEvents = 0;
+      for (const event of db.calendarEvents.filter((item) => String(item.calendarId) === String(calendar.id) && String(item.categoryId) === String(params.categoryId))) {
+        event.categoryId = "base:meeting";
+        event.categoryLabel = fallback.label;
+        event.type = fallback.type;
+        event.color = fallback.color;
+        event.updatedAt = now();
+        reassignedEvents += 1;
+      }
+      await writeJson(db);
+      return send(res, 200, { success: true, reassignedEvents });
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/calendars\/(?<id>[^/]+)\/events$/ });
+    if (params) {
+      const calendar = db.calendars.find((item) => String(item.id) === String(params.id));
+      const denied = calendarCreatePermissionError(db, auth.user.id, calendar);
+      if (denied) return send(res, denied.status, { error: denied.error });
+      const body = await parseBody(req);
+      const created = createCalendarEventRecord(db, calendar, body, auth.user.id);
+      if (created.error) return send(res, 400, { error: created.error });
+      db.calendarEvents.push(created.event);
+      await writeJson(db);
+      return send(res, 201, created.event);
+    }
+
     params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/calendar-events$/ });
     if (params) {
       return send(res, 200, db.calendarEvents
         .filter((event) => event.projectId === params.id)
+        .filter((event) => auth.kind !== "user" || canUserReadCalendarEvent(db, auth.user.id, event))
         .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime()));
     }
 
     params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<id>[^/]+)\/calendar-events$/ });
     if (params) {
       const body = await parseBody(req);
-      const createdAt = now();
-      const event = {
-        id: `event_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-        projectId: params.id,
-        title: String(body.title || "Новое событие").trim(),
-        description: body.description ? String(body.description) : "",
-        startsAt: body.startsAt ? new Date(body.startsAt).toISOString() : createdAt,
-        endsAt: body.endsAt ? new Date(body.endsAt).toISOString() : undefined,
-        allDay: Boolean(body.allDay),
-        type: normalizeCalendarEventType(body.type),
-        color: String(body.color || "#3B82F6"),
-        categoryId: body.categoryId ? String(body.categoryId) : undefined,
-        categoryLabel: body.categoryLabel ? String(body.categoryLabel) : "",
-        visibility: body.visibility === "selected" ? "selected" : "project",
-        participantUserIds: Array.isArray(body.participantUserIds) ? body.participantUserIds.map(String) : [],
-        location: body.location ? String(body.location) : "",
-        link: body.link ? String(body.link) : "",
-        sourceType: body.sourceType ? String(body.sourceType) : "manual",
-        sourceId: body.sourceId ? String(body.sourceId) : undefined,
-        createdAt,
-        updatedAt: createdAt,
-      };
-      db.calendarEvents.push(event);
+      const calendar = projectCalendarFor(db, params.id);
+      if (!calendar) return send(res, 404, { error: "Calendar not found" });
+      const created = createCalendarEventRecord(db, calendar, body, auth.user.id);
+      if (created.error) return send(res, 400, { error: created.error });
+      db.calendarEvents.push(created.event);
       await writeJson(db);
-      return send(res, 201, event);
+      return send(res, 201, created.event);
     }
 
     params = route(method, pathname, { method: "PATCH", path: /^\/calendar-events\/(?<id>[^/]+)$/ });
@@ -2373,22 +3684,8 @@ async function handle(req, res) {
       const body = await parseBody(req);
       const event = db.calendarEvents.find((item) => item.id === params.id);
       if (!event) return send(res, 404, { error: "Calendar event not found" });
-      Object.assign(event, {
-        title: body.title !== undefined ? String(body.title).trim() : event.title,
-        description: body.description !== undefined ? String(body.description) : event.description,
-        startsAt: body.startsAt !== undefined ? new Date(body.startsAt).toISOString() : event.startsAt,
-        endsAt: body.endsAt !== undefined ? (body.endsAt ? new Date(body.endsAt).toISOString() : undefined) : event.endsAt,
-        allDay: body.allDay !== undefined ? Boolean(body.allDay) : event.allDay,
-        type: body.type !== undefined ? normalizeCalendarEventType(body.type) : event.type,
-        color: body.color !== undefined ? String(body.color) : event.color,
-        categoryId: body.categoryId !== undefined ? (body.categoryId ? String(body.categoryId) : undefined) : event.categoryId,
-        categoryLabel: body.categoryLabel !== undefined ? String(body.categoryLabel) : event.categoryLabel,
-        visibility: body.visibility === "selected" ? "selected" : body.visibility === "project" ? "project" : event.visibility,
-        participantUserIds: body.participantUserIds !== undefined && Array.isArray(body.participantUserIds) ? body.participantUserIds.map(String) : event.participantUserIds,
-        location: body.location !== undefined ? String(body.location) : event.location,
-        link: body.link !== undefined ? String(body.link) : event.link,
-        updatedAt: now(),
-      });
+      const updated = applyCalendarEventPatch(db, event, body);
+      if (updated.error) return send(res, 400, { error: updated.error });
       await writeJson(db);
       return send(res, 200, event);
     }
@@ -2860,6 +4157,9 @@ async function handle(req, res) {
       const purgedIds = collectSpaceDescendantIds(space.nodes ?? [], node.id);
       purgedIds.add(node.id);
       const parentId = node.parentId ?? null;
+      const purgedFileIds = (space.blocks ?? [])
+        .filter((block) => purgedIds.has(block.pageId) && block.type === "file")
+        .map((block) => block.content?.fileId);
       space.nodes = (space.nodes ?? []).filter((item) => !purgedIds.has(item.id));
       space.blocks = (space.blocks ?? []).filter((block) => !purgedIds.has(block.pageId));
       space.recentPages = (space.recentPages ?? []).filter((id) => !purgedIds.has(id));
@@ -2867,6 +4167,7 @@ async function handle(req, res) {
         if (purgedIds.has(pageId)) delete space.dailyNotes?.[date];
       }
       reorderSpaceSiblings(space, parentId);
+      await removeUnreferencedProjectFiles(db, purgedFileIds);
       db.blocks = syncBlocksFromSpaces(db.spaces);
       await writeJson(db);
       return send(res, 200, { success: true, purgedIds: [...purgedIds] });
@@ -2992,8 +4293,10 @@ async function handle(req, res) {
       if (!findSpacePage(space, params.id, block.pageId)) return send(res, 404, { error: "Page not found" });
 
       const pageId = block.pageId;
+      const removedFileId = block.type === "file" ? block.content?.fileId : undefined;
       space.blocks = (space.blocks ?? []).filter((item) => item.id !== block.id);
       reorderPageBlocks(space, pageId);
+      await removeUnreferencedProjectFiles(db, [removedFileId]);
       db.blocks = syncBlocksFromSpaces(db.spaces);
       await writeJson(db);
       return send(res, 200, { success: true });
@@ -3027,8 +4330,24 @@ async function handle(req, res) {
       const resolvedId = auth.kind === "user" ? String(auth.user.id) : String(params.id);
       const tasks = db.tasks
         .filter((task) => String(task.assigneeId) === resolvedId && isTaskActiveForUserList(db, task))
-        .map((task) => hydrateTask(db, task));
+        .map((task) => {
+          const hydrated = hydrateTask(db, task);
+          const project = db.projects.find((item) => String(item.id) === String(task.projectId));
+          return {
+            ...hydrated,
+            project: project
+              ? { id: project.id, title: project.title, icon: project.icon }
+              : undefined,
+          };
+        });
       return sendPaginatedOrArray(res, url, tasks, { key: "tasks", defaultLimit: 100, maxLimit: 500 });
+    }
+
+    params = route(method, pathname, { method: "GET", path: /^\/users\/(?<id>[^/]+)\/task-progress$/ });
+    if (params) {
+      const resolvedId = auth.kind === "user" ? String(auth.user.id) : String(params.id);
+      const days = clampWholeNumber(url.searchParams.get("days"), 1, 31, 7);
+      return send(res, 200, buildUserTaskProgress(db, resolvedId, days));
     }
 
     params = route(method, pathname, { method: "GET", path: /^\/tasks\/(?<id>[^/]+)$/ });
@@ -3545,17 +4864,41 @@ function normalizeDatabaseIds(db) {
     },
     nextRunAt: reminder.nextRunAt ?? computeReminderNextRun(reminder),
   }));
+  db.calendars = (db.calendars ?? []).map((calendar) => ({
+    ...calendar,
+    id: asRef(calendar.id) || (calendar.type === "PERSONAL" ? personalCalendarId(calendar.ownerUserId) : projectCalendarId(calendar.projectId)),
+    type: calendar.type === "PERSONAL" ? "PERSONAL" : "PROJECT",
+    ownerUserId: asRef(calendar.ownerUserId),
+    projectId: asRef(calendar.projectId),
+    name: String(calendar.name || (calendar.type === "PERSONAL" ? "Личный" : "Календарь")),
+    color: normalizeHexColor(calendar.color),
+    categories: calendar.type === "PERSONAL" ? normalizeCalendarCategories(calendar.categories) : [],
+  }));
+  db.externalCalendarConnections = (db.externalCalendarConnections ?? []).map((connection) => ({
+    ...connection,
+    id: asRef(connection.id),
+    ownerUserId: asRef(connection.ownerUserId),
+    calendarId: asRef(connection.calendarId),
+    provider: connection.provider === "yandex" ? "yandex" : "ical",
+    enabled: connection.enabled !== false,
+    syncIntervalMinutes: Math.max(5, Number(connection.syncIntervalMinutes ?? 15)),
+  }));
   db.calendarEvents = db.calendarEvents.map((event) => ({
     ...event,
     id: asRef(event.id),
     projectId: asRef(event.projectId),
+    calendarId: asRef(event.calendarId),
+    ownerUserId: asRef(event.ownerUserId),
+    createdByUserId: asRef(event.createdByUserId),
     sourceId: asRef(event.sourceId),
     categoryId: asRef(event.categoryId),
     categoryLabel: event.categoryLabel ? String(event.categoryLabel) : "",
     participantUserIds: Array.isArray(event.participantUserIds) ? event.participantUserIds.map(String) : [],
     type: normalizeCalendarEventType(event.type),
-    visibility: event.visibility === "selected" ? "selected" : "project",
+    visibility: event.visibility === "selected" ? "selected" : event.visibility === "private" ? "private" : "project",
+    notification: normalizeStoredCalendarNotification(event.notification, event.startsAt),
   }));
+  repaired += ensureCalendarRecords(db);
   return repaired;
 }
 
@@ -3715,6 +5058,517 @@ function hydrateTask(db, task) {
   };
 }
 
+function resolveAiWorkspaceSelection(nodes, options = {}) {
+  const mode = normalizeAiConnectorWorkspaceAccessMode(options.workspaceAccessMode);
+  const requestedNodeIds = normalizeAiConnectorWorkspaceNodeIds(options.workspaceNodeIds);
+  const activeNodes = nodes.filter((node) => !node.isDeleted);
+  const nodesById = new Map(activeNodes.map((node) => [String(node.id), node]));
+  const childrenByParentId = new Map();
+  for (const node of activeNodes) {
+    const parentId = node.parentId == null ? null : String(node.parentId);
+    const children = childrenByParentId.get(parentId) ?? [];
+    children.push(String(node.id));
+    childrenByParentId.set(parentId, children);
+  }
+
+  const expandDescendants = (seedIds) => {
+    const expanded = new Set(seedIds.filter((id) => nodesById.has(id)));
+    const queue = [...expanded];
+    while (queue.length) {
+      const currentId = queue.shift();
+      for (const childId of childrenByParentId.get(currentId) ?? []) {
+        if (expanded.has(childId)) continue;
+        expanded.add(childId);
+        queue.push(childId);
+      }
+    }
+    return expanded;
+  };
+
+  const allNodeIds = new Set(nodesById.keys());
+  if (mode === "all") {
+    return { mode, requestedNodeIds: [], contentNodeIds: allNodeIds, visibleNodeIds: allNodeIds };
+  }
+
+  if (mode === "exclude") {
+    const excludedNodeIds = expandDescendants(requestedNodeIds);
+    const contentNodeIds = new Set([...allNodeIds].filter((id) => !excludedNodeIds.has(id)));
+    return { mode, requestedNodeIds, contentNodeIds, visibleNodeIds: contentNodeIds };
+  }
+
+  const contentNodeIds = expandDescendants(requestedNodeIds);
+  const visibleNodeIds = new Set(contentNodeIds);
+  for (const nodeId of contentNodeIds) {
+    let parentId = nodesById.get(nodeId)?.parentId;
+    while (parentId != null && nodesById.has(String(parentId))) {
+      visibleNodeIds.add(String(parentId));
+      parentId = nodesById.get(String(parentId))?.parentId;
+    }
+  }
+  return { mode, requestedNodeIds, contentNodeIds, visibleNodeIds };
+}
+
+function buildProjectAiContext(db, project, options = {}) {
+  const scope = options.scope === "full" ? "full" : "summary";
+  const includeTasks = options.includeTasks !== false;
+  const includeWorkspace = options.includeWorkspace !== false;
+  const includeCalendar = options.includeCalendar !== false;
+  const includeReminders = options.includeReminders !== false;
+  const includeInbox = options.includeInbox !== false;
+  const includeResponsibility = options.includeResponsibility !== false;
+  const includeActivity = options.includeActivity !== false;
+  const includeArchived = Boolean(options.includeArchived);
+  const includeBlocks = includeWorkspace && Boolean(options.includeBlocks);
+  const maxTasks = Math.max(1, Math.min(2000, Number(options.maxTasks) || (scope === "full" ? 1000 : 300)));
+  const maxBlocks = Math.max(1, Math.min(2000, Number(options.maxBlocks) || (scope === "full" ? 1000 : 300)));
+  const projectId = String(project.id);
+  const nowMs = Date.now();
+  const space = db.spaces?.[project.id] ?? db.spaces?.[projectId];
+  const rawNodes = space?.nodes ?? project.pages ?? [];
+  const workspaceSelection = resolveAiWorkspaceSelection(rawNodes, options);
+  const restrictToWorkspaceSelection = workspaceSelection.mode !== "all";
+  const isPageAllowed = (pageId) => !restrictToWorkspaceSelection
+    || (pageId != null && workspaceSelection.contentNodeIds.has(String(pageId)));
+  const columns = includeTasks ? (db.columns ?? [])
+    .filter((column) => String(column.projectId) === projectId)
+    .filter((column) => isPageAllowed(column.pageId))
+    .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))
+    .map((column) => ({
+      id: column.id,
+      pageId: column.pageId,
+      title: column.title,
+      position: column.position,
+      isArchive: Boolean(column.isArchive),
+      isHidden: Boolean(column.isHidden),
+    })) : [];
+  const projectTasks = includeTasks ? (db.tasks ?? [])
+    .filter((task) => String(task.projectId) === projectId)
+    .filter((task) => isPageAllowed(task.pageId))
+    .filter((task) => includeArchived || !task.isArchived)
+    .sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime()) : [];
+  const taskSummary = projectTasks.reduce((summary, task) => {
+    const status = getTaskAiStatus(db, task, nowMs);
+    if (status.state === "completed") summary.completedTasks += 1;
+    if (status.state === "deferred") summary.deferredTasks += 1;
+    if (status.state === "active") summary.activeTasks += 1;
+    if (status.isOverdue) summary.overdueTasks += 1;
+    return summary;
+  }, {
+    activeTasks: 0,
+    completedTasks: 0,
+    deferredTasks: 0,
+    overdueTasks: 0,
+  });
+  const tasks = projectTasks.slice(0, maxTasks).map((task) => compactTaskForAiContext(db, task, nowMs));
+  const allowedTaskIds = new Set(projectTasks.map((task) => String(task.id)));
+  const nodes = includeWorkspace ? rawNodes
+    .filter((node) => !node.isDeleted)
+    .filter((node) => workspaceSelection.visibleNodeIds.has(String(node.id)))
+    .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))
+    .map((node) => ({
+      id: node.id,
+      parentId: node.parentId ?? null,
+      type: node.type,
+      title: node.title,
+      icon: node.icon,
+      position: node.position,
+      createdAt: node.createdAt,
+      updatedAt: node.updatedAt,
+    })) : [];
+  const projectBlocks = (db.blocks ?? [])
+    .filter((block) => String(block.projectId) === projectId)
+    .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0));
+  const allBlocks = projectBlocks.filter((block) => isPageAllowed(block.pageId));
+  const blocks = includeBlocks ? allBlocks.slice(0, maxBlocks).map(compactBlockForAiContext) : [];
+  const fileReferences = new Map();
+  for (const block of allBlocks) {
+    if (block.type !== "file" || !block.content?.fileId) continue;
+    fileReferences.set(String(block.content.fileId), {
+      pageId: block.pageId,
+      blockId: block.id,
+      caption: clipAiText(block.content.caption, 500),
+    });
+  }
+  const files = includeWorkspace ? (db.projectFiles ?? [])
+    .filter((file) => String(file.projectId) === projectId && fileReferences.has(String(file.id)))
+    .map((file) => ({
+      ...projectFileForClient(file),
+      ...fileReferences.get(String(file.id)),
+    })) : [];
+  const calendarEvents = includeCalendar ? (db.calendarEvents ?? [])
+    .filter((event) => String(event.projectId) === projectId)
+    .sort((a, b) => new Date(a.startsAt ?? 0).getTime() - new Date(b.startsAt ?? 0).getTime())
+    .map(compactCalendarEventForAiContext) : [];
+  const reminders = includeReminders ? (db.reminders ?? [])
+    .filter((reminder) => String(reminder.projectId) === projectId)
+    .sort((a, b) => new Date(a.remindAt ?? a.createdAt ?? 0).getTime() - new Date(b.remindAt ?? b.createdAt ?? 0).getTime())
+    .slice(0, scope === "full" ? 500 : 100)
+    .map(compactReminderForAiContext) : [];
+  const inboxRootIds = new Set(rawNodes
+    .filter((node) => !node.isDeleted && node.type === "folder" && String(node.title).trim().toLowerCase() === "inbox")
+    .map((node) => String(node.id)));
+  const inboxItems = includeInbox ? rawNodes
+    .filter((node) => !node.isDeleted && inboxRootIds.has(String(node.parentId)))
+    .sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime())
+    .slice(0, scope === "full" ? 500 : 100)
+    .map((node) => compactInboxItemForAiContext(node, projectBlocks, scope)) : [];
+  const activity = includeActivity ? (db.activity ?? [])
+    .filter((event) => String(event.projectId) === projectId)
+    .filter((event) => {
+      if (!restrictToWorkspaceSelection) return true;
+      const taskId = event.taskId ?? (event.entityType === "task" ? event.entityId : undefined);
+      const pageId = event.pageId ?? (["page", "kanban", "table", "file"].includes(event.entityType) ? event.entityId : undefined);
+      if (!taskId && !pageId) return true;
+      return (pageId && isPageAllowed(pageId)) || (taskId && allowedTaskIds.has(String(taskId)));
+    })
+    .sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime())
+    .slice(0, scope === "full" ? 300 : 80)
+    .map(compactActivityForAiContext) : [];
+  const responsibilityAreas = includeResponsibility
+    ? normalizeResponsibilityAreas(project.responsibilityAreas, project.id).map((area) => ({
+      id: area.id,
+      title: area.title,
+      description: area.description ?? "",
+      notes: clipAiText(area.notes ?? "", scope === "full" ? 10000 : 2500),
+      planItems: (area.planItems ?? []).slice(0, scope === "full" ? 300 : 60),
+      ownerUserIds: area.ownerUserIds ?? [],
+      linkedPageIds: (area.linkedPageIds ?? []).filter(isPageAllowed),
+      linkedKanbanBoardIds: (area.linkedKanbanBoardIds ?? []).filter(isPageAllowed),
+      linkedTaskIds: (area.linkedTaskIds ?? []).filter((taskId) => !restrictToWorkspaceSelection || allowedTaskIds.has(String(taskId))),
+      createdAt: area.createdAt,
+      updatedAt: area.updatedAt,
+    }))
+    : [];
+
+  return {
+    kind: "noto_project_ai_context",
+    version: 3,
+    generatedAt: now(),
+    scope,
+    limits: {
+      tasksReturned: tasks.length,
+      tasksTotal: projectTasks.length,
+      blocksReturned: blocks.length,
+      blocksTotal: allBlocks.length,
+      blocksIncluded: includeBlocks,
+      archivedTasksIncluded: includeArchived,
+      workspaceAccess: {
+        mode: workspaceSelection.mode,
+        selectedNodeIds: workspaceSelection.requestedNodeIds,
+        visibleNodes: nodes.length,
+      },
+      sectionsIncluded: {
+        tasks: includeTasks,
+        workspace: includeWorkspace,
+        calendar: includeCalendar,
+        reminders: includeReminders,
+        inbox: includeInbox,
+        responsibility: includeResponsibility,
+        activity: includeActivity,
+      },
+    },
+    project: {
+      id: project.id,
+      title: project.title,
+      description: project.description ?? "",
+      ownerId: project.ownerId,
+      aiToneStyle: project.aiToneStyle,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    },
+    members: (project.members ?? []).map((member) => ({
+      id: member.id,
+      userId: member.userId,
+      role: projectRoleName(project, member.userId),
+      user: compactUserForAiContext(db.users.find((user) => String(user.id) === String(member.userId))),
+    })),
+    summary: {
+      activeTasks: taskSummary.activeTasks,
+      completedTasks: taskSummary.completedTasks,
+      deferredTasks: taskSummary.deferredTasks,
+      overdueTasks: taskSummary.overdueTasks,
+      calendarEvents: calendarEvents.length,
+      reminders: reminders.length,
+      inboxItems: inboxItems.length,
+      pages: nodes.filter((node) => node.type === "page").length,
+      folders: nodes.filter((node) => node.type === "folder").length,
+      kanbanBoards: nodes.filter((node) => node.type === "kanban").length,
+    },
+    columns,
+    tasks,
+    calendarEvents,
+    reminders,
+    inboxItems,
+    responsibilityAreas,
+    workspace: {
+      nodes,
+      blocks,
+      files,
+    },
+    activity,
+  };
+}
+
+function buildProjectAiChanges(db, project, options = {}, sinceValue) {
+  const sinceMs = new Date(sinceValue).getTime();
+  if (!Number.isFinite(sinceMs)) throw new RequestBodyError(400, "Valid since date is required");
+  const generatedAt = now();
+  const context = buildProjectAiContext(db, project, options);
+  const changedAtOrAfter = (value) => {
+    const timestamp = value ? new Date(value).getTime() : Number.NaN;
+    return Number.isFinite(timestamp) && timestamp >= sinceMs;
+  };
+  const tasks = context.tasks ?? [];
+  const nodes = context.workspace?.nodes ?? [];
+  const blocks = context.workspace?.blocks ?? [];
+  const files = context.workspace?.files ?? [];
+  const calendarEvents = context.calendarEvents ?? [];
+  const reminders = context.reminders ?? [];
+  const inboxItems = context.inboxItems ?? [];
+  const responsibilityAreas = context.responsibilityAreas ?? [];
+  const completedTasks = tasks.filter((task) => task.state === "completed"
+    && changedAtOrAfter(task.completedAt ?? task.archivedAt ?? task.updatedAt));
+  const completedTaskIds = new Set(completedTasks.map((task) => String(task.id)));
+  const newTasks = tasks.filter((task) => changedAtOrAfter(task.createdAt));
+  const newTaskIds = new Set(newTasks.map((task) => String(task.id)));
+  const changedTasks = tasks.filter((task) => changedAtOrAfter(task.updatedAt)
+    && !newTaskIds.has(String(task.id))
+    && !completedTaskIds.has(String(task.id)));
+  const newPages = nodes.filter((node) => changedAtOrAfter(node.createdAt));
+  const newPageIds = new Set(newPages.map((node) => String(node.id)));
+  const changedPages = nodes.filter((node) => changedAtOrAfter(node.updatedAt) && !newPageIds.has(String(node.id)));
+  const changedBlocks = blocks.filter((block) => changedAtOrAfter(block.updatedAt ?? block.createdAt));
+  const newFiles = files.filter((file) => changedAtOrAfter(file.createdAt));
+  const newCalendarEvents = calendarEvents.filter((event) => changedAtOrAfter(event.createdAt));
+  const newCalendarEventIds = new Set(newCalendarEvents.map((event) => String(event.id)));
+  const changedCalendarEvents = calendarEvents.filter((event) => changedAtOrAfter(event.updatedAt)
+    && !newCalendarEventIds.has(String(event.id)));
+  const newReminders = reminders.filter((reminder) => changedAtOrAfter(reminder.createdAt));
+  const newReminderIds = new Set(newReminders.map((reminder) => String(reminder.id)));
+  const changedReminders = reminders.filter((reminder) => changedAtOrAfter(reminder.updatedAt ?? reminder.sentAt)
+    && !newReminderIds.has(String(reminder.id)));
+  const newInboxItems = inboxItems.filter((item) => changedAtOrAfter(item.createdAt));
+  const newInboxItemIds = new Set(newInboxItems.map((item) => String(item.id)));
+  const changedInboxItems = inboxItems.filter((item) => changedAtOrAfter(item.updatedAt)
+    && !newInboxItemIds.has(String(item.id)));
+  const changedResponsibilityAreas = responsibilityAreas.filter((area) => changedAtOrAfter(area.updatedAt ?? area.createdAt));
+  const recentActivity = (context.activity ?? []).filter((event) => changedAtOrAfter(event.createdAt));
+
+  return {
+    kind: "noto_project_ai_changes",
+    version: 2,
+    projectId: project.id,
+    since: new Date(sinceMs).toISOString(),
+    generatedAt,
+    access: context.limits?.workspaceAccess,
+    summaryDiff: {
+      newTasks: newTasks.length,
+      changedTasks: changedTasks.length,
+      completedTasks: completedTasks.length,
+      newPages: newPages.length,
+      changedPages: changedPages.length,
+      changedBlocks: changedBlocks.length,
+      newFiles: newFiles.length,
+      newCalendarEvents: newCalendarEvents.length,
+      changedCalendarEvents: changedCalendarEvents.length,
+      newReminders: newReminders.length,
+      changedReminders: changedReminders.length,
+      newInboxItems: newInboxItems.length,
+      changedInboxItems: changedInboxItems.length,
+      changedResponsibilityAreas: changedResponsibilityAreas.length,
+      recentActivity: recentActivity.length,
+    },
+    newTasks,
+    changedTasks,
+    completedTasks,
+    newPages,
+    changedPages,
+    changedBlocks,
+    changedResponsibilityAreas,
+    newFiles,
+    newCalendarEvents,
+    changedCalendarEvents,
+    newReminders,
+    changedReminders,
+    newInboxItems,
+    changedInboxItems,
+    recentActivity,
+    limits: {
+      ...context.limits,
+      tasksReturned: newTasks.length + changedTasks.length + completedTasks.length,
+      blocksReturned: changedBlocks.length,
+    },
+  };
+}
+
+function compactUserForAiContext(user) {
+  const profile = publicUserProfile(user);
+  if (!profile) return null;
+  return {
+    id: profile.id,
+    username: profile.username,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    avatarUrl: profile.avatarUrl,
+  };
+}
+
+function getTaskAiStatus(db, task, nowMs) {
+  const completed = Boolean(task.isArchived || task.completedAt || isTaskInFinalColumn(db, task));
+  const deferredUntil = task.scheduledAt ? new Date(task.scheduledAt).getTime() : 0;
+  const deferred = !completed && Number.isFinite(deferredUntil) && deferredUntil > nowMs;
+  const deadlineMs = task.deadlineAt ? new Date(task.deadlineAt).getTime() : 0;
+  const isOverdue = !completed && Number.isFinite(deadlineMs) && deadlineMs > 0 && deadlineMs < nowMs;
+  return {
+    state: completed ? "completed" : deferred ? "deferred" : "active",
+    isOverdue,
+  };
+}
+
+function compactTaskForAiContext(db, task, nowMs) {
+  const status = getTaskAiStatus(db, task, nowMs);
+  return {
+    id: task.id,
+    pageId: task.pageId,
+    columnId: task.columnId,
+    title: task.title,
+    description: clipAiText(task.description, 1200),
+    priority: task.priority,
+    deadlineAt: task.deadlineAt,
+    scheduledAt: task.scheduledAt,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    completedAt: task.completedAt,
+    archivedAt: task.archivedAt,
+    state: status.state,
+    isOverdue: status.isOverdue,
+    importanceScore: task.importanceScore,
+    isBlocking: Boolean(task.isBlocking),
+    assigneeId: task.assigneeId,
+    assignee: task.assigneeId ? compactUserForAiContext(db.users.find((user) => String(user.id) === String(task.assigneeId))) : null,
+    tags: normalizeAiTags(task.tags),
+    linkedPageIds: task.linkedPageIds ?? [],
+    subtasks: (db.subtasks ?? [])
+      .filter((subtask) => String(subtask.taskId) === String(task.id))
+      .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))
+      .slice(0, 25)
+      .map((subtask) => ({
+        id: subtask.id,
+        title: subtask.title,
+        isCompleted: Boolean(subtask.isCompleted),
+        position: subtask.position,
+      })),
+  };
+}
+
+function compactBlockForAiContext(block) {
+  return {
+    id: block.id,
+    projectId: block.projectId,
+    pageId: block.pageId,
+    type: block.type,
+    content: clipAiText(block.content, 2000),
+    props: compactAiJson(block.props, 3000),
+    position: block.position,
+    createdAt: block.createdAt,
+    updatedAt: block.updatedAt,
+  };
+}
+
+function compactCalendarEventForAiContext(event) {
+  return {
+    id: event.id,
+    title: event.title,
+    description: clipAiText(event.description, 1200),
+    startsAt: event.startsAt,
+    endsAt: event.endsAt,
+    allDay: Boolean(event.allDay),
+    type: event.type,
+    categoryId: event.categoryId,
+    categoryLabel: event.categoryLabel,
+    participantUserIds: event.participantUserIds ?? [],
+    location: event.location,
+    link: event.link,
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt,
+  };
+}
+
+function compactReminderForAiContext(reminder) {
+  return {
+    id: reminder.id,
+    title: reminder.title,
+    text: clipAiText(reminder.text ?? reminder.description, 1000),
+    remindAt: reminder.remindAt,
+    targetUserId: reminder.targetUserId,
+    status: reminder.status,
+    createdAt: reminder.createdAt,
+    updatedAt: reminder.updatedAt,
+    sentAt: reminder.sentAt,
+  };
+}
+
+function compactInboxItemForAiContext(node, projectBlocks, scope) {
+  const blocks = projectBlocks
+    .filter((block) => String(block.pageId) === String(node.id))
+    .slice(0, scope === "full" ? 100 : 25)
+    .map(compactBlockForAiContext);
+  const latestTimestamp = [node.updatedAt, node.createdAt, ...blocks.map((block) => block.updatedAt ?? block.createdAt)]
+    .map((value) => value ? new Date(value).getTime() : Number.NaN)
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0];
+  return {
+    id: node.id,
+    title: node.title,
+    icon: node.icon,
+    type: node.type,
+    authorUserId: node.properties?.author,
+    blocks,
+    createdAt: node.createdAt,
+    updatedAt: Number.isFinite(latestTimestamp) ? new Date(latestTimestamp).toISOString() : node.updatedAt ?? node.createdAt,
+  };
+}
+
+function compactActivityForAiContext(event) {
+  return {
+    id: event.id,
+    type: event.type,
+    entityType: event.entityType,
+    entityId: event.entityId,
+    actorUserId: event.actorUserId,
+    targetUserId: event.targetUserId,
+    taskId: event.taskId,
+    pageId: event.pageId,
+    createdAt: event.createdAt,
+    summary: clipAiText(event.summary ?? event.title ?? event.text, 700),
+  };
+}
+
+function normalizeAiTags(tags) {
+  if (!Array.isArray(tags)) return [];
+  return tags
+    .map((tag) => typeof tag === "string" ? tag : tag?.name ?? tag?.title ?? tag?.label)
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function clipAiText(value, maxLength) {
+  if (value === undefined || value === null) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function compactAiJson(value, maxLength) {
+  if (value === undefined || value === null) return undefined;
+  const text = clipAiText(value, maxLength);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 function canManageProjectAccess(project, userId) {
   return hasProjectPermission(project, userId, "manageMembers");
 }
@@ -3746,6 +5600,172 @@ function projectRolePermissions(roleName) {
 function hasProjectPermission(project, userId, permission) {
   const permissions = projectRolePermissions(projectRoleName(project, userId));
   return Boolean(permissions[permission]);
+}
+
+function calendarEventMutationPermissionError(auth, method, pathname, db) {
+  if (auth.kind !== "user" || (method !== "PATCH" && method !== "DELETE")) return undefined;
+  const match = pathname.match(/^\/calendar-events\/([^/]+)$/);
+  if (!match) return undefined;
+  const event = db.calendarEvents.find((item) => String(item.id) === String(match[1]));
+  if (!event) return undefined;
+  const calendar = db.calendars.find((item) => String(item.id) === String(event.calendarId));
+  const userId = String(auth.user.id);
+
+  if (event.readOnly || calendar?.readOnly || calendar?.sourceType === "external") {
+    return { status: 409, error: "External calendar events are read-only" };
+  }
+
+  if (calendar?.type === "PERSONAL" || (!event.projectId && event.visibility === "private")) {
+    const ownerUserId = String(calendar?.ownerUserId ?? event.ownerUserId ?? "");
+    return ownerUserId === userId ? undefined : { status: 403, error: "Access denied" };
+  }
+
+  const project = findProjectById(db, event.projectId ?? calendar?.projectId);
+  if (!project || !isProjectMemberRecord(project, userId)) return { status: 403, error: "Access denied" };
+  const isOwn = [event.ownerUserId, event.createdByUserId].some((value) => String(value ?? "") === userId);
+  const ownPermission = method === "PATCH" ? "editOwnCalendarEvents" : "deleteOwnCalendarEvents";
+  const allPermission = method === "PATCH" ? "editAllCalendarEvents" : "deleteAllCalendarEvents";
+  if (hasProjectPermission(project, userId, allPermission)) return undefined;
+  if (isOwn && hasProjectPermission(project, userId, ownPermission)) return undefined;
+  return { status: 403, error: `Permission denied: ${isOwn ? ownPermission : allPermission}` };
+}
+
+function projectCalendarFor(db, projectId) {
+  return db.calendars.find(
+    (calendar) => calendar.type === "PROJECT" && String(calendar.projectId) === String(projectId),
+  );
+}
+
+function accessibleCalendarsForUser(db, userId) {
+  const uid = String(userId);
+  return db.calendars.filter((calendar) => {
+    if (calendar.type === "PERSONAL") return String(calendar.ownerUserId) === uid;
+    const project = findProjectById(db, calendar.projectId);
+    return Boolean(project && !project.isDeleted && isProjectMemberRecord(project, uid) && hasProjectPermission(project, uid, "viewCalendar"));
+  });
+}
+
+function calendarWithUserPermissions(db, userId, calendar) {
+  if (calendar.sourceType === "external" || calendar.readOnly) {
+    const project = calendar.projectId ? findProjectById(db, calendar.projectId) : undefined;
+    return {
+      ...calendar,
+      categories: [],
+      permissions: {
+        create: false,
+        editOwn: false,
+        editAll: false,
+        deleteOwn: false,
+        deleteAll: false,
+        manage: calendar.type === "PERSONAL"
+          ? String(calendar.ownerUserId) === String(userId)
+          : Boolean(project && hasProjectPermission(project, userId, "manageCalendar")),
+      },
+    };
+  }
+  if (calendar.type === "PERSONAL") {
+    return {
+      ...calendar,
+      categories: calendarCategoriesFor(db, calendar),
+      permissions: {
+        create: true,
+        editOwn: true,
+        editAll: true,
+        deleteOwn: true,
+        deleteAll: true,
+        manage: true,
+      },
+    };
+  }
+  const project = findProjectById(db, calendar.projectId);
+  return {
+    ...calendar,
+    categories: calendarCategoriesFor(db, calendar),
+    permissions: {
+      create: Boolean(project && hasProjectPermission(project, userId, "createCalendarEvents")),
+      editOwn: Boolean(project && hasProjectPermission(project, userId, "editOwnCalendarEvents")),
+      editAll: Boolean(project && hasProjectPermission(project, userId, "editAllCalendarEvents")),
+      deleteOwn: Boolean(project && hasProjectPermission(project, userId, "deleteOwnCalendarEvents")),
+      deleteAll: Boolean(project && hasProjectPermission(project, userId, "deleteAllCalendarEvents")),
+      manage: Boolean(project && hasProjectPermission(project, userId, "manageCalendar")),
+    },
+  };
+}
+
+function calendarCategoriesFor(db, calendar) {
+  if (!calendar) return [];
+  if (calendar.type === "PERSONAL") return normalizeCalendarCategories(calendar.categories);
+  const project = findProjectById(db, calendar.projectId);
+  return normalizeCalendarCategories(project?.calendarCategories);
+}
+
+function setCalendarCategories(db, calendar, categories) {
+  const normalized = normalizeCalendarCategories(categories);
+  if (calendar.type === "PERSONAL") {
+    calendar.categories = normalized;
+    calendar.updatedAt = now();
+    return;
+  }
+  const project = findProjectById(db, calendar.projectId);
+  if (!project) return;
+  project.calendarCategories = normalized;
+  project.updatedAt = now();
+}
+
+function calendarCategoryById(db, calendar, categoryId) {
+  const id = asRef(categoryId);
+  if (!id) return undefined;
+  return calendarCategoriesFor(db, calendar).find((category) => String(category.id) === id)
+    ?? BASE_CALENDAR_CATEGORIES[id];
+}
+
+function calendarCategoryManagePermissionError(db, userId, calendar) {
+  const uid = String(userId);
+  if (!calendar) return { status: 404, error: "Calendar not found" };
+  if (calendar.sourceType === "external" || calendar.readOnly) return { status: 409, error: "External calendars are read-only" };
+  if (calendar.type === "PERSONAL") {
+    return String(calendar.ownerUserId) === uid ? undefined : { status: 403, error: "Access denied" };
+  }
+  const project = findProjectById(db, calendar.projectId);
+  if (!project || project.isDeleted) return { status: 404, error: "Project not found" };
+  if (!isProjectMemberRecord(project, uid)) return { status: 403, error: "Access denied" };
+  if (!hasProjectPermission(project, uid, "editAllCalendarEvents")) {
+    return { status: 403, error: "Permission denied: editAllCalendarEvents" };
+  }
+  return undefined;
+}
+
+function canUserReadCalendarEvent(db, userId, event) {
+  const uid = String(userId);
+  const calendar = db.calendars.find((item) => String(item.id) === String(event.calendarId));
+  if (calendar?.type === "PERSONAL" || (!event.projectId && event.visibility === "private")) {
+    return String(calendar?.ownerUserId ?? event.ownerUserId) === uid;
+  }
+  const project = findProjectById(db, event.projectId ?? calendar?.projectId);
+  if (!project || project.isDeleted || !isProjectMemberRecord(project, uid) || !hasProjectPermission(project, uid, "viewCalendar")) return false;
+  if (event.visibility !== "selected") return true;
+  return (
+    String(event.ownerUserId ?? "") === uid ||
+    String(event.createdByUserId ?? "") === uid ||
+    (event.participantUserIds ?? []).some((id) => String(id) === uid) ||
+    hasProjectPermission(project, uid, "editAllCalendarEvents")
+  );
+}
+
+function calendarCreatePermissionError(db, userId, calendar) {
+  const uid = String(userId);
+  if (!calendar) return { status: 404, error: "Calendar not found" };
+  if (calendar.sourceType === "external" || calendar.readOnly) return { status: 409, error: "External calendars are read-only" };
+  if (calendar.type === "PERSONAL") {
+    return String(calendar.ownerUserId) === uid ? undefined : { status: 403, error: "Access denied" };
+  }
+  const project = findProjectById(db, calendar.projectId);
+  if (!project || project.isDeleted) return { status: 404, error: "Project not found" };
+  if (!isProjectMemberRecord(project, uid)) return { status: 403, error: "Access denied" };
+  if (!hasProjectPermission(project, uid, "createCalendarEvents")) {
+    return { status: 403, error: "Permission denied: createCalendarEvents" };
+  }
+  return undefined;
 }
 
 function isProjectMemberRecord(project, userId) {
@@ -4119,8 +6139,16 @@ function buildProjectSearchResults(db, project, query, limit) {
   return results;
 }
 
-// Владелец приложения определяется ТОЛЬКО по telegramId аутентифицированного пользователя.
+// В production владелец приложения определяется ТОЛЬКО по telegramId аутентифицированного пользователя.
+// Локальный обход требует двух явных dev-флагов и никогда не работает в production.
 function isSystemOwner(auth, db) {
+  const isLocalDevOwner =
+    !isProductionRuntime() &&
+    process.env.LOCAL_DEV_LOGIN === "1" &&
+    process.env.LOCAL_DEV_SYSTEM_OWNER === "1" &&
+    auth.kind === "user" &&
+    auth.user?.telegramId === "local-dev";
+  if (isLocalDevOwner) return true;
   if (!APP_OWNER_TELEGRAM_IDS.size) return false;
   const telegramId = auth.user?.telegramId;
   return Boolean(telegramId && APP_OWNER_TELEGRAM_IDS.has(String(telegramId)));
@@ -4159,6 +6187,9 @@ function resolveProjectIdFromPath(pathname, db) {
   m = pathname.match(/^\/calendar-events\/([^/]+)(?:\/|$)/);
   if (m) return db.calendarEvents.find((event) => event.id === m[1])?.projectId;
 
+  m = pathname.match(/^\/calendars\/([^/]+)(?:\/|$)/);
+  if (m) return db.calendars.find((calendar) => calendar.id === m[1])?.projectId;
+
   m = pathname.match(/^\/reminders\/([^/]+)(?:\/|$)/);
   if (m) {
     if (m[1] === "due") return null;
@@ -4174,6 +6205,11 @@ function authorizeRequest(auth, method, pathname, db) {
   if (auth.kind === "bot") {
     return isBotServiceRoute(method, pathname) ? undefined : { status: 403, error: "Bot route is not allowed" };
   }
+  if (auth.kind === "ai") {
+    const match = pathname.match(/^\/projects\/([^/]+)\/ai-context(?:\/changes)?$/);
+    if (method === "GET" && match && String(match[1]) === String(auth.token.projectId)) return undefined;
+    return { status: 403, error: "AI connector token is read-only" };
+  }
   const userId = String(auth.user.id);
 
   if (isBotOnlyRoute(method, pathname)) return { status: 403, error: "Bot access required" };
@@ -4181,12 +6217,15 @@ function authorizeRequest(auth, method, pathname, db) {
   // Личные маршруты — только про себя (сравниваем строки чтобы избежать number vs string)
   // Пользовательские маршруты /users/:id/(projects|assigned-tasks|bot-preferences)
   // сами подставляют id из токена (см. эндпоинты), поэтому подмена id безопасна.
-  const selfScoped = pathname.match(/^\/users\/([^/]+)\/(projects|assigned-tasks|bot-preferences)$/);
+  const selfScoped = pathname.match(/^\/users\/([^/]+)\/(projects|assigned-tasks|task-progress|bot-preferences)$/);
   if (selfScoped) return undefined;
 
   // Список всех проектов и outbox — только для бота
   if (method === "GET" && pathname === "/projects") return { status: 403, error: "Access denied" };
   if (pathname.startsWith("/outbox")) return { status: 403, error: "Access denied" };
+
+  const calendarMutationDenied = calendarEventMutationPermissionError(auth, method, pathname, db);
+  if (calendarMutationDenied) return calendarMutationDenied;
 
   // Системная админка — только владелец приложения
   if (pathname.startsWith("/system/")) {
@@ -4197,7 +6236,16 @@ function authorizeRequest(auth, method, pathname, db) {
   // Проектно-ограниченные маршруты — нужно быть участником проекта
   const projectId = resolveProjectIdFromPath(pathname, db);
   if (projectId && !isProjectMember(db, projectId, userId)) {
-    return { status: 403, error: "Access denied" };
+    return {
+      status: 403,
+      error: "Access denied",
+      audit: {
+        type: "project_access_denied",
+        outcome: "rejected",
+        projectId,
+        details: { reason: "not_project_member" },
+      },
+    };
   }
 
   if (projectId) {
@@ -4214,18 +6262,29 @@ function requiredProjectPermissionForRequest(method, pathname) {
   if (method === "GET") {
     if (/^\/projects\/[^/]+\/admin-summary$/.test(pathname)) return "viewAnalytics";
     if (/^\/projects\/[^/]+\/activity$/.test(pathname)) return "viewAnalytics";
+    if (/^\/projects\/[^/]+\/ai-context(?:\/changes)?$/.test(pathname)) return "exportProject";
+    if (/^\/projects\/[^/]+\/ai-tokens$/.test(pathname)) return "manageProject";
+    if (/^\/projects\/[^/]+\/ai-access-events$/.test(pathname)) return "manageProject";
     if (/^\/projects\/[^/]+\/export$/.test(pathname)) return "exportProject";
     if (/^\/projects\/[^/]+\/bot-settings$/.test(pathname)) return "manageBot";
+    if (/^\/projects\/[^/]+\/external-calendar-connections$/.test(pathname)) return "viewCalendar";
+    if (/^\/projects\/[^/]+\/(?:calendar|calendar-events)$/.test(pathname)) return "viewCalendar";
     return undefined;
   }
 
   if (method === "PATCH" && /^\/projects\/[^/]+$/.test(pathname)) return "manageProject";
+  if (/^\/projects\/[^/]+\/ai-tokens(?:\/[^/]+)?$/.test(pathname)) return "manageProject";
+  if (/^\/projects\/[^/]+\/external-calendar-connections(?:\/yandex|\/[^/]+(?:\/sync)?)?$/.test(pathname)) return "manageCalendar";
   if (/^\/projects\/[^/]+\/export\/telegram$/.test(pathname)) return "exportProject";
   if (/^\/projects\/[^/]+\/invite-code(?:\/rotate)?$/.test(pathname)) return "manageMembers";
   if (/^\/projects\/[^/]+\/join-requests(?:\/[^/]+\/(?:approve|reject))?$/.test(pathname)) return "manageMembers";
   if (/^\/projects\/[^/]+\/members(?:\/[^/]+(?:\/(?:admin|admin-notes|role))?)?$/.test(pathname)) return "manageMembers";
   if (/^\/projects\/[^/]+\/transfer-ownership$/.test(pathname)) return "manageProject";
-  if (/^\/projects\/[^/]+\/responsibility-areas(?:\/[^/]+)?$/.test(pathname)) return "manageProject";
+  if (/^\/projects\/[^/]+\/responsibility-areas(?:\/[^/]+)?$/.test(pathname)) {
+    return method === "PATCH" ? undefined : "manageProject";
+  }
+  if (method === "POST" && /^\/projects\/[^/]+\/files$/.test(pathname)) return undefined;
+  if (method === "DELETE" && /^\/projects\/[^/]+\/files\/[^/]+$/.test(pathname)) return "updatePage";
 
   if (/^\/projects\/[^/]+\/columns(?:\/reorder)?$/.test(pathname)) return "manageColumns";
   if (/^\/columns\/[^/]+$/.test(pathname)) return "manageColumns";
@@ -4247,8 +6306,8 @@ function requiredProjectPermissionForRequest(method, pathname) {
   if (/^\/projects\/[^/]+\/space\/blocks\/[^/]+(?:\/move)?$/.test(pathname)) return "updatePage";
 
   if (/^\/projects\/[^/]+\/templates(?:\/reorder|\/[^/]+)?$/.test(pathname)) return "manageTemplates";
-  if (/^\/projects\/[^/]+\/calendar-events$/.test(pathname)) return "manageCalendar";
-  if (/^\/calendar-events\/[^/]+$/.test(pathname)) return "manageCalendar";
+  if (method === "POST" && /^\/projects\/[^/]+\/calendar-events$/.test(pathname)) return "createCalendarEvents";
+  if (method === "POST" && /^\/calendars\/[^/]+\/events$/.test(pathname)) return "createCalendarEvents";
   if (/^\/projects\/[^/]+\/reminders$/.test(pathname)) return "manageReminders";
   if (/^\/reminders\/[^/]+(?:\/sent)?$/.test(pathname)) return "manageReminders";
   if (/^\/projects\/[^/]+\/bot-settings$/.test(pathname)) return "manageBot";
@@ -4265,9 +6324,22 @@ function createSystemStats(db) {
   const activeUsers = db.users.filter((user) => new Date(user.updatedAt ?? user.createdAt ?? 0).getTime() >= activeUsersSince);
   const database = getDatabaseVolume(db);
   const projectDataBytes = getAllProjectsDataBytes(db);
+  const currentTime = Date.now();
+  const ownerUsers = db.users.filter((user) => user.telegramId && APP_OWNER_TELEGRAM_IDS.has(String(user.telegramId)));
 
   return {
     generatedAt: now(),
+    owner: {
+      configured: APP_OWNER_TELEGRAM_IDS.size > 0,
+      telegramIds: [...APP_OWNER_TELEGRAM_IDS],
+      users: ownerUsers.map((user) => ({
+        id: user.id,
+        telegramId: String(user.telegramId),
+        username: user.username ?? "",
+        firstName: user.firstName ?? "",
+        lastName: user.lastName ?? "",
+      })),
+    },
     totals: {
       users: db.users.length,
       blockedUsers: db.users.filter((user) => user.isBlocked).length,
@@ -4297,12 +6369,357 @@ function createSystemStats(db) {
       projectDataMb: Number((projectDataBytes / 1024 / 1024).toFixed(2)),
     },
     database,
+    services: createSystemServices(db, currentTime),
+    performance: createPerformanceStats(currentTime),
+    storage: createStorageStats(db, database),
+    server: createServerStats(),
+    bot: createBotStats(db, currentTime),
     users: createSystemUserExport(db).slice(0, 200),
     recentUsers: [...db.users]
       .sort((a, b) => new Date(b.createdAt ?? b.updatedAt ?? 0).getTime() - new Date(a.createdAt ?? a.updatedAt ?? 0).getTime())
       .slice(0, 20)
       .map((user) => publicSystemUser(user, db)),
   };
+}
+
+function publicSystemSecurityEvent(event) {
+  return {
+    id: event.id,
+    type: event.type,
+    actorUserId: event.actorUserId,
+    projectReference: event.projectId ? createSystemProjectReference(event.projectId) : undefined,
+    targetUserId: event.targetUserId,
+    outcome: event.outcome,
+    details: sanitizeSecurityDetails(event.details),
+    createdAt: event.createdAt,
+  };
+}
+
+function isFailedLoginEvent(event) {
+  if (event.type === "auth_code_request") return event.outcome === "not_delivered";
+  return event.type === "auth_code_verify" && event.outcome !== "success";
+}
+
+function securityCountsForWindow(events, since) {
+  const recent = events.filter((event) => new Date(event.createdAt ?? 0).getTime() >= since);
+  return {
+    failedLogins: recent.filter(isFailedLoginEvent).length,
+    rateLimitHits: recent.filter((event) => event.type === "rate_limit").length,
+    foreignProjectAccessAttempts: recent.filter((event) => event.type === "project_access_denied").length,
+    ipBlocks: recent.filter((event) => event.type === "auth_ip_block").length,
+  };
+}
+
+function activeSecurityIpBlocks(events, currentTime) {
+  const seen = new Set();
+  const active = [];
+  for (const event of events) {
+    if (event.type !== "auth_ip_block") continue;
+    const reference = String(event.details?.ipRef ?? "");
+    if (!reference || seen.has(reference)) continue;
+    seen.add(reference);
+    const blockedUntil = String(event.details?.blockedUntil ?? "");
+    if (new Date(blockedUntil).getTime() <= currentTime) continue;
+    active.push({
+      reference,
+      blockedUntil,
+      reason: String(event.details?.reason ?? "auth_rate_limit"),
+      createdAt: event.createdAt,
+    });
+  }
+  return active;
+}
+
+function createSystemSecuritySummary(db) {
+  const currentTime = Date.now();
+  const events = db.securityEvents ?? [];
+  return {
+    generatedAt: now(),
+    windows: {
+      "24h": securityCountsForWindow(events, currentTime - 24 * 3600000),
+      "7d": securityCountsForWindow(events, currentTime - 7 * 24 * 3600000),
+    },
+    blocked: {
+      ips: activeSecurityIpBlocks(events, currentTime),
+      users: db.users
+        .filter((user) => user.isBlocked)
+        .map((user) => ({
+          id: user.id,
+          username: user.username ?? "",
+          firstName: user.firstName ?? "",
+          lastName: user.lastName ?? "",
+          blockedAt: user.blockedAt ?? "",
+        })),
+    },
+  };
+}
+
+function normalizeMetricRoute(pathname) {
+  return String(pathname ?? "/")
+    .replace(/\/(projects|tasks|columns|users|reminders|notifications|outbox|calendars|calendar-events|templates|blocks)\/[^/]+/g, "/$1/:id")
+    .replace(/\/nodes\/[^/]+/g, "/nodes/:id")
+    .replace(/\/pages\/[^/]+/g, "/pages/:id")
+    .replace(/\/files\/[^/]+/g, "/files/:id")
+    .replace(/\/tokens\/[^/]+/g, "/tokens/:id");
+}
+
+function recordRequestMetric(metric) {
+  requestMetrics.push({
+    ...metric,
+    route: normalizeMetricRoute(metric.pathname),
+    createdAt: Date.now(),
+  });
+  if (requestMetrics.length > REQUEST_METRIC_LIMIT) {
+    requestMetrics.splice(0, requestMetrics.length - REQUEST_METRIC_LIMIT);
+  }
+  if (metric.authKind === "bot") botRuntime.lastStatus = metric.statusCode;
+}
+
+function percentile(values, fraction) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))];
+}
+
+function summarizeRequestMetrics(metrics, windowMs) {
+  const durations = metrics.map((item) => item.durationMs);
+  const totalResponseBytes = metrics.reduce((sum, item) => sum + item.responseBytes, 0);
+  const routeGroups = new Map();
+  for (const item of metrics) {
+    const key = `${item.method} ${item.route}`;
+    const group = routeGroups.get(key) ?? { route: key, durations: [], requests: 0, errors: 0 };
+    group.durations.push(item.durationMs);
+    group.requests += 1;
+    if (item.statusCode >= 500) group.errors += 1;
+    routeGroups.set(key, group);
+  }
+  const slowRoutes = [...routeGroups.values()]
+    .map((group) => ({
+      route: group.route,
+      requests: group.requests,
+      errors: group.errors,
+      averageMs: Number((group.durations.reduce((sum, value) => sum + value, 0) / group.durations.length).toFixed(1)),
+      p95Ms: Number(percentile(group.durations, 0.95).toFixed(1)),
+      maxMs: Number(Math.max(...group.durations).toFixed(1)),
+    }))
+    .sort((left, right) => right.p95Ms - left.p95Ms)
+    .slice(0, 10);
+  return {
+    requests: metrics.length,
+    errors: metrics.filter((item) => item.statusCode >= 500).length,
+    rejected: metrics.filter((item) => item.statusCode >= 400 && item.statusCode < 500).length,
+    requestsPerMinute: Number((metrics.length / Math.max(1, windowMs / 60000)).toFixed(2)),
+    averageMs: durations.length ? Number((durations.reduce((sum, value) => sum + value, 0) / durations.length).toFixed(1)) : 0,
+    p50Ms: Number(percentile(durations, 0.5).toFixed(1)),
+    p95Ms: Number(percentile(durations, 0.95).toFixed(1)),
+    p99Ms: Number(percentile(durations, 0.99).toFixed(1)),
+    responseBytes: totalResponseBytes,
+    slowRoutes,
+  };
+}
+
+function createPerformanceStats(currentTime) {
+  const windows = [
+    ["15m", 15 * 60_000],
+    ["1h", 60 * 60_000],
+    ["24h", 24 * 60 * 60_000],
+  ];
+  return {
+    since: new Date(PROCESS_STARTED_AT).toISOString(),
+    retainedRequests: requestMetrics.length,
+    windows: Object.fromEntries(windows.map(([key, windowMs]) => {
+      const observedWindowMs = Math.min(windowMs, Math.max(60_000, currentTime - PROCESS_STARTED_AT));
+      return [
+        key,
+        summarizeRequestMetrics(requestMetrics.filter((item) => currentTime - item.createdAt <= windowMs), observedWindowMs),
+      ];
+    })),
+  };
+}
+
+function createSystemServices(db, currentTime) {
+  const botAgeMs = botRuntime.lastSeenAt ? currentTime - new Date(botRuntime.lastSeenAt).getTime() : undefined;
+  const activeMcpTokens = (db.aiConnectorTokens ?? []).filter((token) => !token.revokedAt && (!token.expiresAt || new Date(token.expiresAt).getTime() > currentTime));
+  return [
+    { id: "api", label: "Workspace API", status: "online", detail: `uptime ${formatDurationCompact(process.uptime() * 1000)}` },
+    { id: "database", label: "База данных", status: "online", detail: String(process.env.WORKSPACE_STORAGE ?? "sqlite") },
+    { id: "files", label: "Файловое хранилище", status: "online", detail: fileStorage.kind },
+    {
+      id: "bot",
+      label: "Telegram-бот",
+      status: !INTERNAL_API_TOKEN || !TELEGRAM_BOT_TOKEN ? "not_configured" : botAgeMs === undefined ? "unknown" : botAgeMs <= 120_000 ? "online" : botAgeMs <= 600_000 ? "stale" : "offline",
+      detail: botRuntime.lastSeenAt ? `последний запрос ${botRuntime.lastSeenAt}` : "запросов после запуска API не было",
+    },
+    { id: "mcp", label: "AI Connector", status: activeMcpTokens.length ? "online" : "idle", detail: `активных токенов: ${activeMcpTokens.length}` },
+  ];
+}
+
+function createServerStats() {
+  const memory = process.memoryUsage();
+  const cpu = os.cpus();
+  const appDataDir = resolveAppDataDir();
+  let disk;
+  try {
+    const stat = fs.statfsSync(appDataDir);
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+    disk = {
+      label: "Том данных приложения",
+      totalBytes,
+      freeBytes,
+      usedBytes: Math.max(0, totalBytes - freeBytes),
+      usagePercent: totalBytes ? Number((((totalBytes - freeBytes) / totalBytes) * 100).toFixed(1)) : 0,
+    };
+  } catch {
+    disk = undefined;
+  }
+  const cpuUsage = process.cpuUsage();
+  return {
+    startedAt: new Date(PROCESS_STARTED_AT).toISOString(),
+    uptimeSeconds: Math.floor(process.uptime()),
+    environment: process.env.NODE_ENV ?? "development",
+    nodeVersion: process.version,
+    platform: process.platform,
+    architecture: process.arch,
+    pid: process.pid,
+    eventLoopLagMs,
+    memory: {
+      rssBytes: memory.rss,
+      heapUsedBytes: memory.heapUsed,
+      heapTotalBytes: memory.heapTotal,
+      externalBytes: memory.external,
+      hostTotalBytes: os.totalmem(),
+      hostFreeBytes: os.freemem(),
+    },
+    cpu: {
+      cores: cpu.length,
+      model: cpu[0]?.model ?? "unknown",
+      loadAverage: os.loadavg(),
+      processUserMs: Number((cpuUsage.user / 1000).toFixed(1)),
+      processSystemMs: Number((cpuUsage.system / 1000).toFixed(1)),
+    },
+    disk,
+    databaseWrite: {
+      dirty: dbDirty,
+      flushPending: Boolean(dbFlushPromise || dbFlushTimer),
+    },
+  };
+}
+
+function getProjectDataBytes(db, project) {
+  const projectId = String(project.id);
+  const space = db.spaces?.[project.id] ?? db.spaces?.[projectId];
+  const payload = {
+    project,
+    space,
+    columns: db.columns.filter((item) => String(item.projectId) === projectId),
+    tasks: db.tasks.filter((item) => String(item.projectId) === projectId),
+    subtasks: db.subtasks.filter((item) => String(item.projectId) === projectId),
+    reminders: db.reminders.filter((item) => String(item.projectId) === projectId),
+    calendars: db.calendars.filter((item) => String(item.projectId) === projectId),
+    calendarEvents: db.calendarEvents.filter((item) => String(item.projectId) === projectId),
+  };
+  return Buffer.byteLength(JSON.stringify(payload), "utf8");
+}
+
+function createStorageStats(db, database) {
+  const fileBytes = (db.projectFiles ?? []).reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+  const collectionNames = ["users", "projects", "columns", "tasks", "subtasks", "blocks", "templates", "reminders", "calendars", "calendarEvents", "activity", "securityEvents", "notifications", "joinRequests", "projectFiles", "outbox", "sessions", "aiConnectorTokens", "aiConnectorAccessEvents"];
+  const topProjects = db.projects
+    .map((project) => {
+      const projectId = String(project.id);
+      const projectFileBytes = (db.projectFiles ?? []).filter((file) => String(file.projectId) === projectId).reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+      const dataBytes = getProjectDataBytes(db, project);
+      return {
+        reference: createSystemProjectReference(projectId),
+        dataBytes,
+        fileBytes: projectFileBytes,
+        totalBytes: dataBytes + projectFileBytes,
+        tasks: db.tasks.filter((task) => String(task.projectId) === projectId).length,
+        files: (db.projectFiles ?? []).filter((file) => String(file.projectId) === projectId).length,
+      };
+    })
+    .sort((left, right) => right.totalBytes - left.totalBytes)
+    .slice(0, 10);
+  return {
+    provider: fileStorage.kind,
+    databaseBytes: database.jsonStateBytes,
+    databaseFilesBytes: database.files.reduce((sum, file) => sum + file.bytes, 0),
+    projectFileBytes: fileBytes,
+    projectFiles: (db.projectFiles ?? []).length,
+    collections: collectionNames.map((name) => ({ name, count: Array.isArray(db[name]) ? db[name].length : Object.keys(db[name] ?? {}).length })),
+    topProjects,
+  };
+}
+
+function createSystemProjectReference(projectId) {
+  const digest = crypto
+    .createHmac("sha256", SYSTEM_STATS_PSEUDONYM_SECRET)
+    .update(`system-project:${String(projectId)}`)
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase();
+  return `P-${digest}`;
+}
+
+function createBotStats(db, currentTime) {
+  const lastSeenTime = botRuntime.lastSeenAt ? new Date(botRuntime.lastSeenAt).getTime() : 0;
+  const status = !INTERNAL_API_TOKEN || !TELEGRAM_BOT_TOKEN
+    ? "not_configured"
+    : !lastSeenTime
+      ? "unknown"
+      : currentTime - lastSeenTime <= 120_000
+        ? "online"
+        : currentTime - lastSeenTime <= 600_000
+          ? "stale"
+          : "offline";
+  const dueNotifications = (db.notifications ?? []).filter((item) => item.status === "pending" && new Date(item.sendAt ?? 0).getTime() <= currentTime);
+  const dueReminders = (db.reminders ?? []).filter((item) => item.status === "active" && item.nextRunAt && new Date(item.nextRunAt).getTime() <= currentTime);
+  return {
+    status,
+    configured: Boolean(INTERNAL_API_TOKEN && TELEGRAM_BOT_TOKEN),
+    tokenConfigured: Boolean(TELEGRAM_BOT_TOKEN),
+    internalApiTokenConfigured: Boolean(INTERNAL_API_TOKEN),
+    lastSeenAt: botRuntime.lastSeenAt,
+    lastPath: botRuntime.lastPath,
+    lastStatus: botRuntime.lastStatus,
+    requestsSinceApiStart: botRuntime.requestCount,
+    apiRequests1h: requestMetrics.filter((item) => item.authKind === "bot" && currentTime - item.createdAt <= 3_600_000).length,
+    outbox: {
+      pending: (db.outbox ?? []).filter((item) => item.status === "pending").length,
+      total: (db.outbox ?? []).length,
+    },
+    notifications: {
+      total: (db.notifications ?? []).length,
+      pending: (db.notifications ?? []).filter((item) => item.status === "pending").length,
+      due: dueNotifications.length,
+      sent: (db.notifications ?? []).filter((item) => item.status === "sent").length,
+      failed: (db.notifications ?? []).filter((item) => item.status === "failed").length,
+    },
+    reminders: {
+      total: (db.reminders ?? []).length,
+      active: (db.reminders ?? []).filter((item) => item.status === "active").length,
+      due: dueReminders.length,
+      telegramEnabled: (db.reminders ?? []).filter((item) => item.status === "active" && item.channels?.telegramBot !== false).length,
+      sent24h: (db.reminders ?? []).filter((item) => item.lastSentAt && currentTime - new Date(item.lastSentAt).getTime() <= 86_400_000).length,
+    },
+    projects: {
+      total: db.projects.length,
+      deadlineNotificationsEnabled: db.projects.filter((project) => mergeSettings(project.botSettings ?? defaultBotSettings, {}).taskDeadlineNotificationsEnabled).length,
+      mentionNotificationsEnabled: db.projects.filter((project) => mergeSettings(project.botSettings ?? defaultBotSettings, {}).mentionNotificationsEnabled).length,
+      dutyNotificationsEnabled: db.projects.filter((project) => mergeSettings(project.botSettings ?? defaultBotSettings, {}).dutyNotificationsEnabled).length,
+    },
+  };
+}
+
+function formatDurationCompact(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 60) return `${seconds} сек`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} ч`;
+  return `${Math.floor(hours / 24)} дн`;
 }
 
 function createSystemUserExport(db) {
@@ -4353,6 +6770,7 @@ function getAllProjectsDataBytes(db) {
     blocks: db.blocks,
     templates: db.templates,
     reminders: db.reminders,
+    calendars: db.calendars,
     calendarEvents: db.calendarEvents,
     joinRequests: db.joinRequests,
   }), "utf8");
@@ -4389,7 +6807,7 @@ function getDatabaseVolume(db) {
   for (const file of [dataRepository.paths?.dbFile, dataRepository.paths?.jsonDbFile].filter(Boolean)) {
     try {
       const stat = fs.statSync(file);
-      files.push({ path: file, bytes: stat.size });
+      files.push({ path: path.basename(file), bytes: stat.size });
     } catch {
       // The active storage may not use both files.
     }
@@ -4802,6 +7220,39 @@ function isTaskActiveForUserList(db, task) {
   return true;
 }
 
+function buildUserTaskProgress(db, userId, days) {
+  const nowTime = Date.now();
+  const since = nowTime - days * 24 * 60 * 60 * 1000;
+  const assigned = db.tasks.filter((task) => String(task.assigneeId) === String(userId));
+  const active = assigned.filter((task) => isTaskActiveForUserList(db, task));
+  const completed = assigned.filter((task) => {
+    if (!task.isArchived && !task.completedAt && !isTaskInFinalColumn(db, task)) return false;
+    const completedTime = parseTime(task.completedAt ?? task.archivedAt);
+    return Boolean(completedTime && completedTime >= since && completedTime <= nowTime);
+  });
+  const created = assigned.filter((task) => {
+    const createdTime = parseTime(task.createdAt);
+    return Boolean(createdTime && createdTime >= since && createdTime <= nowTime);
+  });
+  const overdue = active.filter((task) => {
+    const deadlineTime = parseTime(task.deadlineAt);
+    return Boolean(deadlineTime && deadlineTime < nowTime);
+  });
+  const total = completed.length + active.length;
+
+  return {
+    days,
+    since: new Date(since).toISOString(),
+    until: new Date(nowTime).toISOString(),
+    completed: completed.length,
+    total,
+    percent: total > 0 ? Math.round((completed.length / total) * 100) : 0,
+    created: created.length,
+    active: active.length,
+    overdue: overdue.length,
+  };
+}
+
 function updateTaskCompletionState(db, task, previousColumnId, previousArchived) {
   const wasCompleted = Boolean(task.completedAt);
   const isCompleted = Boolean(task.isArchived) || isTaskInFinalColumn(db, task);
@@ -4821,6 +7272,24 @@ function isTaskInFinalColumn(db, task) {
     .sort((a, b) => a.position - b.position)
     .at(-1);
   return Boolean(finalColumn && finalColumn.id === task.columnId);
+}
+
+function syncBoardTaskCompletionStates(db, projectId, pageId) {
+  const finalColumn = db.columns
+    .filter((column) => column.projectId === projectId && sameBoard(column.pageId, pageId) && !column.isArchive && !column.isHidden)
+    .sort((a, b) => a.position - b.position)
+    .at(-1);
+  if (!finalColumn) return;
+
+  const completedAt = now();
+  for (const task of db.tasks) {
+    if (task.projectId !== projectId || !sameBoard(task.pageId, pageId) || task.isArchived) continue;
+    if (task.columnId === finalColumn.id) {
+      task.completedAt ??= completedAt;
+    } else {
+      task.completedAt = undefined;
+    }
+  }
 }
 
 function sameBoard(itemPageId, pageId) {
@@ -4860,8 +7329,540 @@ function normalizeReminderSourceType(value) {
 }
 
 function normalizeCalendarEventType(value) {
-  const allowed = new Set(["meeting", "service", "deadline", "duty", "event", "custom"]);
+  const allowed = new Set(["meeting", "service", "deadline", "duty", "event", "birthday", "custom"]);
   return allowed.has(value) ? value : "event";
+}
+
+const BASE_CALENDAR_CATEGORIES = {
+  "base:meeting": { id: "base:meeting", label: "Встреча", color: "#3B82F6", type: "meeting" },
+  "base:deadline": { id: "base:deadline", label: "Дедлайн", color: "#EF4444", type: "deadline" },
+  "base:birthday": { id: "base:birthday", label: "День рождения", color: "#EC4899", type: "birthday" },
+};
+
+const CALENDAR_COLORS = ["#3B82F6", "#22C55E", "#F59E0B", "#8B5CF6", "#EC4899", "#14B8A6", "#EF4444", "#6366F1"];
+
+function projectCalendarId(projectId) {
+  return `calendar_project_${asRef(projectId)}`;
+}
+
+function personalCalendarId(userId) {
+  return `calendar_personal_${asRef(userId)}`;
+}
+
+function stableCalendarColor(value) {
+  const text = String(value ?? "");
+  const hash = [...text].reduce((total, character) => total + character.charCodeAt(0), 0);
+  return CALENDAR_COLORS[hash % CALENDAR_COLORS.length];
+}
+
+function ensureCalendarRecords(db) {
+  db.calendars ??= [];
+  let changed = 0;
+  const timestamp = now();
+
+  for (const user of db.users ?? []) {
+    const ownerUserId = asRef(user.id);
+    if (!ownerUserId) continue;
+    let calendar = db.calendars.find(
+      (item) => item.type === "PERSONAL" && item.sourceType !== "external" && String(item.ownerUserId) === ownerUserId,
+    );
+    if (!calendar) {
+      calendar = {
+        id: personalCalendarId(ownerUserId),
+        type: "PERSONAL",
+        name: "Личный",
+        color: stableCalendarColor(`personal:${ownerUserId}`),
+        ownerUserId,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      db.calendars.push(calendar);
+      changed += 1;
+    }
+  }
+
+  for (const project of db.projects ?? []) {
+    const projectId = asRef(project.id);
+    if (!projectId) continue;
+    let calendar = db.calendars.find(
+      (item) => item.type === "PROJECT" && String(item.projectId) === projectId,
+    );
+    if (!calendar) {
+      calendar = {
+        id: projectCalendarId(projectId),
+        type: "PROJECT",
+        name: String(project.title || "Проект"),
+        color: stableCalendarColor(`project:${projectId}`),
+        projectId,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      db.calendars.push(calendar);
+      changed += 1;
+    } else if (calendar.name !== String(project.title || "Проект")) {
+      calendar.name = String(project.title || "Проект");
+      calendar.updatedAt = timestamp;
+      changed += 1;
+    }
+  }
+
+  for (const event of db.calendarEvents ?? []) {
+    const project = event.projectId ? findProjectById(db, event.projectId) : undefined;
+    const calendar = event.calendarId
+      ? db.calendars.find((item) => String(item.id) === String(event.calendarId))
+      : project
+        ? db.calendars.find((item) => item.type === "PROJECT" && String(item.projectId) === String(project.id))
+        : db.calendars.find(
+            (item) => item.type === "PERSONAL"
+              && item.sourceType !== "external"
+              && String(item.ownerUserId) === String(event.ownerUserId),
+          );
+    if (calendar && String(event.calendarId ?? "") !== String(calendar.id)) {
+      event.calendarId = calendar.id;
+      changed += 1;
+    }
+    const fallbackOwnerId = asRef(event.createdByUserId ?? event.ownerUserId ?? calendar?.ownerUserId ?? project?.ownerId);
+    if (fallbackOwnerId && !event.createdByUserId) {
+      event.createdByUserId = fallbackOwnerId;
+      changed += 1;
+    }
+    if (fallbackOwnerId && !event.ownerUserId) {
+      event.ownerUserId = fallbackOwnerId;
+      changed += 1;
+    }
+    const expectedVisibility = calendar?.type === "PERSONAL"
+      ? "private"
+      : event.visibility === "selected" ? "selected" : "project";
+    if (event.visibility !== expectedVisibility) {
+      event.visibility = expectedVisibility;
+      changed += 1;
+    }
+  }
+
+  return changed;
+}
+
+function externalCalendarCredentialsKey() {
+  const secret = EXTERNAL_CALENDAR_CREDENTIALS_SECRET
+    || (!isProductionRuntime() ? INTERNAL_API_TOKEN || `local-calendar:${resolveAppDataDir()}:${os.hostname()}` : "");
+  return secret ? crypto.createHash("sha256").update(secret).digest() : undefined;
+}
+
+function encryptExternalCalendarValue(value) {
+  const key = externalCalendarCredentialsKey();
+  if (!key) throw new Error("EXTERNAL_CALENDAR_CREDENTIALS_SECRET is not configured");
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+  return `v1.${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`;
+}
+
+function decryptExternalCalendarValue(value) {
+  const key = externalCalendarCredentialsKey();
+  if (!key) throw new Error("EXTERNAL_CALENDAR_CREDENTIALS_SECRET is not configured");
+  const [version, ivValue, tagValue, encryptedValue] = String(value ?? "").split(".");
+  if (version !== "v1" || !ivValue || !tagValue || !encryptedValue) throw new Error("Invalid encrypted calendar credential");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivValue, "base64url"));
+  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encryptedValue, "base64url")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+function publicExternalCalendarConnection(connection) {
+  return {
+    id: connection.id,
+    provider: connection.provider,
+    projectId: connection.projectId,
+    name: connection.name,
+    color: connection.color,
+    calendarId: connection.calendarId,
+    enabled: connection.enabled !== false,
+    syncIntervalMinutes: connection.syncIntervalMinutes,
+    lastSyncAt: connection.lastSyncAt,
+    lastSyncStatus: connection.lastSyncStatus ?? "pending",
+    lastSyncError: connection.lastSyncError,
+    importedEvents: Number(connection.importedEvents ?? 0),
+    createdAt: connection.createdAt,
+    updatedAt: connection.updatedAt,
+  };
+}
+
+async function normalizeYandexCalendarUrl(value) {
+  const rawValue = String(value ?? "").trim();
+  if (/^<iframe\b/i.test(rawValue)) throw new Error(YANDEX_ICAL_LINK_HINT);
+  let parsed;
+  try {
+    parsed = new URL(rawValue);
+  } catch {
+    throw new Error("Некорректная iCal-ссылка");
+  }
+  if (parsed.protocol !== "https:") throw new Error("Ссылка календаря должна использовать HTTPS");
+  if (parsed.username || parsed.password) throw new Error("Логин и пароль нельзя передавать внутри ссылки");
+  const hostname = normalizePreviewHostname(parsed.hostname);
+  if (!YANDEX_CALENDAR_HOSTS.has(hostname)) throw new Error("Разрешены только ссылки экспорта Яндекс Календаря");
+  const pathname = parsed.pathname.toLowerCase();
+  const isEmbedLink = pathname.includes("/embed/") || parsed.searchParams.has("layer_ids");
+  if (isEmbedLink) throw new Error(YANDEX_ICAL_LINK_HINT);
+  const isIcalExport = pathname.endsWith(".ics") || pathname.includes("/export/ics");
+  if (!isIcalExport) throw new Error(YANDEX_ICAL_LINK_HINT);
+  const addresses = await resolvePreviewAddresses(hostname);
+  if (!addresses.length || addresses.some((address) => isBlockedPreviewAddress(address.address))) {
+    throw new Error("Адрес календаря недоступен");
+  }
+  return parsed;
+}
+
+async function fetchYandexCalendarText(targetUrl, redirects = 0) {
+  const parsed = await normalizeYandexCalendarUrl(targetUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EXTERNAL_CALENDAR_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(parsed, {
+      redirect: "manual",
+      signal: controller.signal,
+      headers: {
+        Accept: "text/calendar, text/plain;q=0.9, */*;q=0.1",
+        "User-Agent": "NotoTimeCalendarSync/1.0",
+      },
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      if (redirects >= 3) throw new Error("Слишком много перенаправлений календаря");
+      const location = response.headers.get("location");
+      if (!location) throw new Error("Некорректное перенаправление календаря");
+      return fetchYandexCalendarText(new URL(location, parsed).toString(), redirects + 1);
+    }
+    if (!response.ok) throw new Error(`Яндекс Календарь ответил кодом ${response.status}`);
+    const contentType = String(response.headers.get("content-type") ?? "").toLowerCase();
+    if (contentType.includes("text/html")) throw new Error(YANDEX_ICAL_LINK_HINT);
+    return readLimitedResponseText(response, EXTERNAL_CALENDAR_MAX_BYTES);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readLimitedResponseText(response, maxBytes) {
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("Файл календаря слишком большой");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error("Файл календаря слишком большой");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+async function parseExternalCalendarEvents(icsText) {
+  if (!String(icsText).includes("BEGIN:VCALENDAR")) throw new Error(YANDEX_ICAL_LINK_HINT);
+  const parsed = await ical.async.parseICS(icsText);
+  const windowStart = new Date(Date.now() - 366 * 24 * 3600000);
+  const windowEnd = new Date(Date.now() + 2 * 366 * 24 * 3600000);
+  const results = [];
+  for (const item of Object.values(parsed)) {
+    if (item?.type !== "VEVENT" || !(item.start instanceof Date)) continue;
+    if (item.rrule?.between) {
+      const occurrences = item.rrule.between(windowStart, windowEnd, true).slice(0, 1000);
+      const duration = item.end instanceof Date ? Math.max(0, item.end.getTime() - item.start.getTime()) : 3600000;
+      for (const occurrence of occurrences) {
+        results.push(externalCalendarOccurrence(item, occurrence, new Date(occurrence.getTime() + duration)));
+      }
+    } else {
+      results.push(externalCalendarOccurrence(item, item.start, item.end instanceof Date ? item.end : undefined));
+    }
+    if (results.length >= 5000) break;
+  }
+  return results;
+}
+
+function externalCalendarOccurrence(item, start, end) {
+  const uid = String(item.uid ?? crypto.createHash("sha256").update(`${item.summary}:${start.toISOString()}`).digest("hex"));
+  const recurrenceKey = item.rrule ? `:${start.toISOString()}` : "";
+  const allDay = Boolean(item.datetype === "date" || item.start?.dateOnly);
+  return {
+    externalUid: `${uid}${recurrenceKey}`,
+    title: String(item.summary ?? "Событие").trim() || "Событие",
+    description: String(item.description ?? ""),
+    location: String(item.location ?? ""),
+    startsAt: start.toISOString(),
+    endsAt: end?.toISOString(),
+    allDay,
+    link: typeof item.url === "string" ? item.url : item.url?.toString?.() ?? "",
+  };
+}
+
+async function syncExternalCalendarConnection(db, connection) {
+  if (connection.enabled === false) return publicExternalCalendarConnection(connection);
+  const syncStartedAt = now();
+  try {
+    const feedUrl = decryptExternalCalendarValue(connection.encryptedFeedUrl);
+    const icsText = await fetchYandexCalendarText(feedUrl);
+    const imported = await parseExternalCalendarEvents(icsText);
+    const calendar = db.calendars.find((item) => String(item.id) === String(connection.calendarId));
+    if (!calendar) throw new Error("Связанный календарь не найден");
+    const sourcePrefix = `${connection.id}:`;
+    const importedSourceIds = new Set();
+    for (const item of imported) {
+      const sourceId = `${sourcePrefix}${item.externalUid}`;
+      importedSourceIds.add(sourceId);
+      const existing = db.calendarEvents.find((event) => event.sourceType === "external" && event.sourceId === sourceId);
+      const values = {
+        calendarId: calendar.id,
+        projectId: connection.projectId,
+        ownerUserId: connection.ownerUserId,
+        createdByUserId: connection.ownerUserId,
+        title: item.title,
+        description: item.description,
+        startsAt: item.startsAt,
+        endsAt: item.endsAt,
+        allDay: item.allDay,
+        type: "event",
+        color: calendar.color,
+        categoryLabel: connection.name,
+        visibility: connection.projectId ? "project" : "private",
+        participantUserIds: [],
+        location: item.location,
+        link: item.link,
+        sourceType: "external",
+        sourceId,
+        readOnly: true,
+        notification: { enabled: false },
+        updatedAt: syncStartedAt,
+      };
+      if (existing) Object.assign(existing, values);
+      else db.calendarEvents.push({ id: `external_event_${crypto.randomUUID()}`, ...values, createdAt: syncStartedAt });
+    }
+    db.calendarEvents = db.calendarEvents.filter((event) => (
+      event.sourceType !== "external" || !String(event.sourceId ?? "").startsWith(sourcePrefix) || importedSourceIds.has(event.sourceId)
+    ));
+    Object.assign(connection, {
+      lastSyncAt: syncStartedAt,
+      lastSyncStatus: "success",
+      lastSyncError: undefined,
+      importedEvents: imported.length,
+      updatedAt: syncStartedAt,
+    });
+  } catch (error) {
+    Object.assign(connection, {
+      lastSyncAt: syncStartedAt,
+      lastSyncStatus: "error",
+      lastSyncError: String(error instanceof Error ? error.message : error).slice(0, 300),
+      updatedAt: syncStartedAt,
+    });
+    throw error;
+  }
+  return publicExternalCalendarConnection(connection);
+}
+
+async function runExternalCalendarSyncTick() {
+  if (externalCalendarSyncRunning) return;
+  externalCalendarSyncRunning = true;
+  try {
+    const db = await readJson();
+    const currentTime = Date.now();
+    const due = (db.externalCalendarConnections ?? []).filter((connection) => {
+      if (connection.enabled === false) return false;
+      const lastSync = new Date(connection.lastSyncAt ?? 0).getTime();
+      return !Number.isFinite(lastSync) || currentTime - lastSync >= Number(connection.syncIntervalMinutes ?? 15) * 60_000;
+    });
+    for (const connection of due.slice(0, 20)) {
+      try {
+        await syncExternalCalendarConnection(db, connection);
+      } catch (error) {
+        console.error(`External calendar sync failed (${connection.id})`, error instanceof Error ? error.message : error);
+      }
+    }
+    if (due.length) await writeJson(db);
+  } finally {
+    externalCalendarSyncRunning = false;
+  }
+}
+
+function validCalendarDate(value) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+function normalizeCalendarEventNotification(value, startsAt) {
+  const enabled = Boolean(value?.enabled);
+  if (!enabled) return { notification: { enabled: false } };
+  const remindAt = validCalendarDate(value?.remindAt);
+  if (!remindAt) return { error: "Notification time is required" };
+  if (new Date(remindAt).getTime() > new Date(startsAt).getTime()) {
+    return { error: "Notification time must not be after event start" };
+  }
+  return { notification: { enabled: true, remindAt } };
+}
+
+function resetCalendarNotificationDelivery(notification) {
+  if (!notification?.enabled) return { enabled: false };
+  return {
+    enabled: true,
+    remindAt: notification.remindAt,
+    deliveryStatus: "pending",
+    deliveryAttempts: 0,
+  };
+}
+
+function normalizeStoredCalendarNotification(value, startsAt) {
+  const normalized = normalizeCalendarEventNotification(value, startsAt).notification;
+  if (!normalized?.enabled) return { enabled: false };
+  const status = ["pending", "retry", "sent", "failed", "disabled", "missed"].includes(value?.deliveryStatus)
+    ? value.deliveryStatus
+    : "pending";
+  return {
+    ...normalized,
+    deliveryStatus: status,
+    deliveryAttempts: Math.max(0, Number(value?.deliveryAttempts ?? 0)),
+    ...(validCalendarDate(value?.sentAt) ? { sentAt: validCalendarDate(value.sentAt) } : {}),
+    ...(validCalendarDate(value?.nextAttemptAt) ? { nextAttemptAt: validCalendarDate(value.nextAttemptAt) } : {}),
+    ...(validCalendarDate(value?.deliveryCompletedAt) ? { deliveryCompletedAt: validCalendarDate(value.deliveryCompletedAt) } : {}),
+    ...(value?.deliveryError ? { deliveryError: String(value.deliveryError).slice(0, 300) } : {}),
+  };
+}
+
+function normalizeCalendarParticipantIds(project, values) {
+  if (!project || !Array.isArray(values)) return [];
+  const memberIds = new Set([
+    String(project.ownerId),
+    ...(project.members ?? []).map((member) => String(member.userId)),
+  ]);
+  return [...new Set(values.map(String).filter((id) => memberIds.has(id)))];
+}
+
+function createCalendarEventRecord(db, calendar, body, creatorUserId) {
+  const parsedStart = body.startsAt ? validCalendarDate(body.startsAt) : undefined;
+  if (body.startsAt && !parsedStart) return { error: "Invalid event start date" };
+  const startsAt = parsedStart ?? now();
+  const endsAt = body.endsAt ? validCalendarDate(body.endsAt) : undefined;
+  if (body.endsAt && !endsAt) return { error: "Invalid event end date" };
+  if (endsAt && new Date(endsAt).getTime() < new Date(startsAt).getTime()) {
+    return { error: "Event end must not be before start" };
+  }
+  const normalizedNotification = normalizeCalendarEventNotification(body.notification, startsAt);
+  if (normalizedNotification.error) return normalizedNotification;
+  const project = calendar.type === "PROJECT" ? findProjectById(db, calendar.projectId) : undefined;
+  const createdAt = now();
+  const creatorId = asRef(creatorUserId);
+  const visibility = calendar.type === "PERSONAL" ? "private" : body.visibility === "selected" ? "selected" : "project";
+  const categoryId = body.categoryId ? String(body.categoryId) : undefined;
+  const category = calendarCategoryById(db, calendar, categoryId);
+  return {
+    event: {
+      id: `event_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      calendarId: calendar.id,
+      projectId: project?.id,
+      ownerUserId: creatorId,
+      createdByUserId: creatorId,
+      title: String(body.title || "Новое событие").trim() || "Новое событие",
+      description: body.description ? String(body.description) : "",
+      startsAt,
+      endsAt,
+      allDay: Boolean(body.allDay),
+      type: category?.type ?? normalizeCalendarEventType(body.type),
+      color: category?.color ?? normalizeHexColor(body.color, calendar.color),
+      categoryId,
+      categoryLabel: category?.label ?? (body.categoryLabel ? String(body.categoryLabel) : ""),
+      visibility,
+      participantUserIds: calendar.type === "PROJECT"
+        ? normalizeCalendarParticipantIds(project, body.participantUserIds)
+        : [],
+      location: body.location ? String(body.location) : "",
+      link: body.link ? String(body.link) : "",
+      sourceType: body.sourceType ? String(body.sourceType) : "manual",
+      sourceId: body.sourceId ? String(body.sourceId) : undefined,
+      notification: resetCalendarNotificationDelivery(normalizedNotification.notification),
+      createdAt,
+      updatedAt: createdAt,
+    },
+  };
+}
+
+function applyCalendarEventPatch(db, event, body) {
+  const calendar = db.calendars.find((item) => String(item.id) === String(event.calendarId));
+  const project = event.projectId ? findProjectById(db, event.projectId) : undefined;
+  const startsAt = body.startsAt !== undefined ? validCalendarDate(body.startsAt) : event.startsAt;
+  const endsAt = body.endsAt !== undefined ? (body.endsAt ? validCalendarDate(body.endsAt) : undefined) : event.endsAt;
+  if (!startsAt || (body.endsAt && !endsAt)) return { error: "Invalid event date" };
+  if (endsAt && new Date(endsAt).getTime() < new Date(startsAt).getTime()) {
+    return { error: "Event end must not be before start" };
+  }
+  const normalizedNotification = normalizeCalendarEventNotification(
+    body.notification !== undefined ? body.notification : event.notification,
+    startsAt,
+  );
+  if (normalizedNotification.error) return normalizedNotification;
+  const deliveryMustReset = body.notification !== undefined
+    || body.startsAt !== undefined
+    || body.title !== undefined
+    || body.location !== undefined
+    || body.description !== undefined;
+  const notification = deliveryMustReset
+    ? resetCalendarNotificationDelivery(normalizedNotification.notification)
+    : event.notification;
+  const categoryId = body.categoryId !== undefined ? (body.categoryId ? String(body.categoryId) : undefined) : event.categoryId;
+  const category = calendarCategoryById(db, calendar, categoryId);
+  Object.assign(event, {
+    title: body.title !== undefined ? String(body.title).trim() || event.title : event.title,
+    description: body.description !== undefined ? String(body.description) : event.description,
+    startsAt,
+    endsAt,
+    allDay: body.allDay !== undefined ? Boolean(body.allDay) : event.allDay,
+    type: category?.type ?? (body.type !== undefined ? normalizeCalendarEventType(body.type) : event.type),
+    color: category?.color ?? (body.color !== undefined ? normalizeHexColor(body.color, event.color) : event.color),
+    categoryId,
+    categoryLabel: category?.label ?? (body.categoryLabel !== undefined ? String(body.categoryLabel) : event.categoryLabel),
+    visibility: calendar?.type === "PERSONAL"
+      ? "private"
+      : body.visibility === "selected" ? "selected" : body.visibility === "project" ? "project" : event.visibility,
+    participantUserIds: body.participantUserIds !== undefined
+      ? normalizeCalendarParticipantIds(project, body.participantUserIds)
+      : event.participantUserIds,
+    location: body.location !== undefined ? String(body.location) : event.location,
+    link: body.link !== undefined ? String(body.link) : event.link,
+    notification,
+    updatedAt: now(),
+  });
+  return { event };
+}
+
+function calendarRangeFromUrl(url) {
+  const from = validCalendarDate(url.searchParams.get("from"));
+  const to = validCalendarDate(url.searchParams.get("to"));
+  if (!from || !to) return { error: "Valid from and to parameters are required" };
+  const fromTime = new Date(from).getTime();
+  const toTime = new Date(to).getTime();
+  if (toTime <= fromTime) return { error: "Calendar range end must be after start" };
+  if (toTime - fromTime > 370 * 24 * 3600000) return { error: "Calendar range must not exceed 370 days" };
+  return { from: fromTime, to: toTime };
+}
+
+function calendarEventOverlapsRange(event, range) {
+  const start = new Date(event.startsAt).getTime();
+  const end = event.endsAt ? new Date(event.endsAt).getTime() : start;
+  return Number.isFinite(start) && start < range.to && end >= range.from;
+}
+
+function requestedCalendarIds(url) {
+  return new Set(
+    url.searchParams.getAll("calendarIds")
+      .flatMap((value) => value.split(","))
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
 }
 
 function normalizeCalendarCategories(categories) {
@@ -4870,10 +7871,11 @@ function normalizeCalendarCategories(categories) {
     .filter((category) => category && category.label)
     .map((category) => ({
       id: asRef(category.id) || `category_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      label: String(category.label).trim(),
-      color: String(category.color || "#64748B"),
+      label: String(category.label).trim().slice(0, 80),
+      color: normalizeHexColor(category.color, "#64748B"),
       type: normalizeCalendarEventType(category.type),
       createdAt: category.createdAt ? String(category.createdAt) : now(),
+      updatedAt: category.updatedAt ? String(category.updatedAt) : undefined,
     }));
 }
 
@@ -4901,9 +7903,38 @@ function normalizeResponsibilityArea(input = {}, projectId, existing = {}) {
     linkedPageIds: normalizeStringList(input.linkedPageIds ?? existing.linkedPageIds, 500),
     linkedKanbanBoardIds: normalizeStringList(input.linkedKanbanBoardIds ?? existing.linkedKanbanBoardIds, 200),
     linkedTaskIds: normalizeStringList(input.linkedTaskIds ?? existing.linkedTaskIds, 1000),
+    notes: String(input.notes ?? existing.notes ?? "").slice(0, 30000),
+    planItems: normalizeResponsibilityPlanItems(input.planItems ?? existing.planItems),
     createdAt,
-    updatedAt: now(),
+    updatedAt: input === existing && existing.updatedAt ? String(existing.updatedAt) : now(),
   };
+}
+
+function normalizeResponsibilityPlanItems(items) {
+  if (!Array.isArray(items)) return [];
+  const timestamp = now();
+  return items
+    .filter((item) => item && String(item.title ?? "").trim())
+    .slice(0, 300)
+    .map((item) => {
+      const dueDate = String(item.dueDate ?? "").trim();
+      return {
+        id: asRef(item.id) || `plan_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        title: String(item.title).trim().slice(0, 500),
+        completed: Boolean(item.completed),
+        dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : "",
+        createdAt: item.createdAt ? String(item.createdAt) : timestamp,
+        updatedAt: timestamp,
+      };
+    });
+}
+
+function pickResponsibilityWorkspacePatch(input = {}) {
+  const patch = {};
+  for (const key of ["description", "notes", "planItems", "linkedPageIds", "linkedKanbanBoardIds", "linkedTaskIds"]) {
+    if (Object.prototype.hasOwnProperty.call(input, key)) patch[key] = input[key];
+  }
+  return patch;
 }
 
 function normalizeResponsibilityAreas(areas, projectId) {
@@ -5285,6 +8316,138 @@ function syncBlocksFromSpaces(spaces) {
   }).filter((block) => block.projectId);
 }
 
+async function runCalendarNotificationTick() {
+  if (!TELEGRAM_BOT_TOKEN || calendarNotificationTickRunning) return;
+  calendarNotificationTickRunning = true;
+  try {
+    const db = await readJson();
+    const currentTime = Date.now();
+    const dueEvents = (db.calendarEvents ?? [])
+      .filter((event) => {
+        const notification = event.notification;
+        if (!notification?.enabled || !notification.remindAt) return false;
+        if (["sent", "disabled", "failed", "missed"].includes(notification.deliveryStatus)) return false;
+        const remindAt = new Date(notification.remindAt).getTime();
+        const nextAttemptAt = notification.nextAttemptAt ? new Date(notification.nextAttemptAt).getTime() : 0;
+        return Number.isFinite(remindAt) && remindAt <= currentTime && nextAttemptAt <= currentTime;
+      })
+      .sort((left, right) => new Date(left.notification.remindAt).getTime() - new Date(right.notification.remindAt).getTime())
+      .slice(0, CALENDAR_NOTIFICATION_BATCH_SIZE);
+
+    let changed = false;
+    for (const event of dueEvents) {
+      const notification = event.notification;
+      const startsAt = new Date(event.startsAt).getTime();
+      if (Number.isFinite(startsAt) && currentTime > startsAt + CALENDAR_NOTIFICATION_STALE_AFTER_MS) {
+        Object.assign(notification, {
+          deliveryStatus: "missed",
+          deliveryError: "Notification expired before delivery",
+          deliveryCompletedAt: now(),
+        });
+        changed = true;
+        continue;
+      }
+      const owner = db.users.find((user) => String(user.id) === String(event.ownerUserId));
+      if (!owner || owner.isBlocked || !isDeliverableTelegramId(owner.telegramId)) {
+        Object.assign(notification, {
+          deliveryStatus: "failed",
+          deliveryError: "Telegram account is unavailable",
+          deliveryCompletedAt: now(),
+        });
+        changed = true;
+        continue;
+      }
+      if (owner.botPreferences?.calendarNotificationsEnabled === false) {
+        Object.assign(notification, {
+          deliveryStatus: "disabled",
+          deliveryCompletedAt: now(),
+        });
+        changed = true;
+        continue;
+      }
+
+      try {
+        await telegramBotApi("sendMessage", calendarTelegramMessage(db, event, owner));
+        Object.assign(notification, {
+          deliveryStatus: "sent",
+          sentAt: now(),
+          deliveryCompletedAt: now(),
+          deliveryError: undefined,
+          nextAttemptAt: undefined,
+        });
+      } catch (error) {
+        const attempts = Number(notification.deliveryAttempts ?? 0) + 1;
+        const terminal = attempts >= CALENDAR_NOTIFICATION_MAX_ATTEMPTS;
+        Object.assign(notification, {
+          deliveryStatus: terminal ? "failed" : "retry",
+          deliveryAttempts: attempts,
+          deliveryError: String(error instanceof Error ? error.message : error).slice(0, 300),
+          nextAttemptAt: terminal
+            ? undefined
+            : new Date(currentTime + CALENDAR_NOTIFICATION_RETRY_MS * Math.min(attempts, 10)).toISOString(),
+          deliveryCompletedAt: terminal ? now() : undefined,
+        });
+      }
+      changed = true;
+    }
+    if (changed) {
+      await writeJson(db);
+      await flushDbNow();
+    }
+  } catch (error) {
+    console.error("Calendar notification tick failed", error instanceof Error ? error.message : error);
+  } finally {
+    calendarNotificationTickRunning = false;
+  }
+}
+
+function isDeliverableTelegramId(value) {
+  const telegramId = String(value ?? "").trim();
+  return /^\d+$/.test(telegramId) && !telegramId.startsWith("0");
+}
+
+function calendarTelegramMessage(db, event, owner) {
+  const calendar = db.calendars.find((item) => String(item.id) === String(event.calendarId));
+  const project = event.projectId ? findProjectById(db, event.projectId) : undefined;
+  const parts = [
+    "🔔 <b>Напоминание о событии</b>",
+    `<b>${escapeTelegramHtml(event.title)}</b>`,
+    `🕒 ${escapeTelegramHtml(formatCalendarTelegramRange(event))}`,
+  ];
+  if (calendar?.type === "PROJECT" && project?.title) parts.push(`📁 ${escapeTelegramHtml(project.title)}`);
+  if (event.location) parts.push(`📍 ${escapeTelegramHtml(event.location)}`);
+  if (event.description) parts.push(`\n${escapeTelegramHtml(String(event.description).slice(0, 700))}`);
+  const body = {
+    chat_id: Number(owner.telegramId),
+    text: parts.join("\n"),
+    parse_mode: "HTML",
+  };
+  const targetPath = event.projectId ? `/project/${event.projectId}/calendar` : "/my-calendar";
+  if (/^https:\/\//i.test(TELEGRAM_WEB_APP_URL)) {
+    body.reply_markup = {
+      inline_keyboard: [[{ text: "Открыть календарь", web_app: { url: `${TELEGRAM_WEB_APP_URL}${targetPath}` } }]],
+    };
+  }
+  return body;
+}
+
+function formatCalendarTelegramRange(event) {
+  const start = new Date(event.startsAt);
+  const end = event.endsAt ? new Date(event.endsAt) : undefined;
+  const formatter = new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "Europe/Moscow",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    ...(event.allDay ? {} : { hour: "2-digit", minute: "2-digit" }),
+  });
+  return end ? `${formatter.format(start)} - ${formatter.format(end)}` : formatter.format(start);
+}
+
+function escapeTelegramHtml(value) {
+  return String(value ?? "").replace(/[&<>]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[character]);
+}
+
 // ===== Автоматические резервные копии базы (двойная защита поверх постоянного тома) =====
 async function makeBackup() {
   try {
@@ -5312,6 +8475,18 @@ async function makeBackup() {
 
 validateProductionSecurityConfig();
 await readJson();
+
+const calendarNotificationTimer = setInterval(() => {
+  void runCalendarNotificationTick();
+}, CALENDAR_NOTIFICATION_INTERVAL_MS);
+calendarNotificationTimer.unref?.();
+setTimeout(() => void runCalendarNotificationTick(), 2_000).unref?.();
+
+const externalCalendarSyncTimer = setInterval(() => {
+  void runExternalCalendarSyncTick();
+}, EXTERNAL_CALENDAR_SYNC_INTERVAL_MS);
+externalCalendarSyncTimer.unref?.();
+setTimeout(() => void runExternalCalendarSyncTick(), 30_000).unref?.();
 
 http.createServer(handle).listen(PORT, "0.0.0.0", () => {
   console.log(`Telegram Workspace API listening on http://127.0.0.1:${PORT}`);

@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { useAuthStore } from '../store/authStore';
+import { getStoredSessionToken } from '../api/httpClient';
 
 export default function LoginPage() {
   const requestCode = useAuthStore((state) => state.requestCode);
   const verifyCode = useAuthStore((state) => state.verifyCode);
+  const loginLocalDev = useAuthStore((state) => state.loginLocalDev);
+  const showLocalDevLogin = import.meta.env.DEV;
 
   const [step, setStep] = useState<'username' | 'code'>('username');
   const [username, setUsername] = useState('');
@@ -33,17 +36,31 @@ export default function LoginPage() {
   }
 
   async function handleVerify() {
-    if (code.trim().length !== 6) {
-      setError('Код состоит из 6 цифр');
+    const normalizedCode = code.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(normalizedCode)) {
+      setError('Введите 6 символов: латинские буквы и цифры');
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await verifyCode(cleanUsername, code.trim());
-      // при успехе authStore переключит на основное приложение
+      await verifyCode(cleanUsername, normalizedCode);
+      if (getStoredSessionToken()) window.location.replace('/');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Неверный код');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleLocalDevLogin() {
+    setBusy(true);
+    setError(null);
+    try {
+      await loginLocalDev();
+      if (getStoredSessionToken()) window.location.replace('/');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Local login failed');
     } finally {
       setBusy(false);
     }
@@ -56,7 +73,7 @@ export default function LoginPage() {
         <p className="mt-2 text-sm text-[var(--tg-theme-hint-color)]">
           {step === 'username'
             ? 'Введите ваш Telegram-ник. Бот пришлёт одноразовый код для входа.'
-            : `Введите код из 6 цифр, который бот отправил в Telegram${cleanUsername ? ` для @${cleanUsername}` : ''}.`}
+            : `Введите код из 6 латинских букв и цифр, который бот отправил в Telegram${cleanUsername ? ` для @${cleanUsername}` : ''}.`}
         </p>
 
         {step === 'username' ? (
@@ -88,12 +105,15 @@ export default function LoginPage() {
             <input
               autoFocus
               value={code}
-              inputMode="numeric"
+              inputMode="text"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
               maxLength={6}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+              onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
               onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
-              placeholder="000000"
-              className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-center text-2xl tracking-[0.4em] outline-none"
+              placeholder="A7K9Q2"
+              className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-3 py-3 text-center text-2xl outline-none"
             />
             <button
               disabled={busy}
@@ -120,6 +140,15 @@ export default function LoginPage() {
           <p className="mt-4 text-xs text-[var(--tg-theme-hint-color)]">{info}</p>
         )}
         {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
+        {showLocalDevLogin && (
+          <button
+            disabled={busy}
+            onClick={handleLocalDevLogin}
+            className="mt-4 w-full rounded-[12px] bg-[var(--tg-theme-bg-color)] px-5 py-3 text-sm font-semibold text-[var(--tg-theme-text-color)] disabled:opacity-60"
+          >
+            Local User
+          </button>
+        )}
       </div>
     </div>
   );

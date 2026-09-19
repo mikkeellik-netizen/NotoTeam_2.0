@@ -1,12 +1,18 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BotConfig } from "../config.js";
 import type { WorkspaceRepository } from "../ports.js";
 import { escapeMarkdown, formatMskDate, formatMyTasksMessage } from "../services/formatters.js";
 import { buildWeeklyReportText } from "../services/reportService.js";
 import { NotificationService } from "../services/notificationService.js";
 import { TaskParser } from "../services/taskParser.js";
+import { createSpeechToTextProvider } from "../services/speechToText.js";
+import { VoiceIntentParser, voiceIntentLabel } from "../services/voiceIntentParser.js";
 import { parseDateTime, stripDateTimePhrases } from "../services/dateParser.js";
 import type { PageNode, Project, User } from "../types.js";
+import { buildWebAppUrl } from "../webAppLinks.js";
 
 type TaskTarget = {
   projectId?: string;
@@ -68,6 +74,11 @@ const BOT_ROLE_PERMISSIONS: Record<BotProjectRoleName, Record<BotProjectPermissi
 export class TelegramWorkspaceBot {
   private bot: Bot;
   private parser = new TaskParser();
+  private speechToText = createSpeechToTextProvider();
+  private voiceIntentParser = new VoiceIntentParser();
+  private voiceLimits = readVoiceLimits();
+  private voiceAttempts = new Map<number, number[]>();
+  private voiceInFlight = 0;
   private sessions = new Map<number, Session>();
   private defaultTargets = new Map<number, Required<TaskTarget>>();
 
@@ -117,6 +128,7 @@ export class TelegramWorkspaceBot {
   // поэтому не подходит для бесплатных PaaS, которые усыпляют процесс без входящих HTTP-запросов.
   async start() {
     await this.prepare();
+    await this.bot.api.deleteWebhook({ drop_pending_updates: false });
     await this.bot.start({
       onStart: () => {
         console.log("Telegram Workspace Bot started (polling)");
@@ -173,6 +185,7 @@ export class TelegramWorkspaceBot {
     this.bot.callbackQuery(/^reminder_assignee:(.+)$/, (ctx) => this.handleReminderAssignee(ctx));
     this.bot.callbackQuery("cancel_session", (ctx) => this.cancelSession(ctx));
 
+    this.bot.on("message:voice", (ctx) => this.handleVoice(ctx));
     this.bot.on("message:text", (ctx) => this.handleText(ctx));
   }
 
@@ -577,10 +590,167 @@ export class TelegramWorkspaceBot {
     await this.replyOrEdit(ctx, "⏰ О чём напомнить? Можно сразу с датой: «позвонить отцу 01.01.2026 18:00».", this.cancelKeyboard());
   }
 
+  private async handleVoice(ctx: Context) {
+    if (!ctx.from || !ctx.message || !("voice" in ctx.message)) return;
+    const voice = ctx.message.voice;
+    if (!voice) return;
+
+    if (voice.duration > this.voiceLimits.maxDurationSeconds) {
+      await ctx.reply(`Голосовое слишком длинное. Максимум: ${this.voiceLimits.maxDurationSeconds} сек.`);
+      return;
+    }
+    if (voice.file_size && voice.file_size > this.voiceLimits.maxFileBytes) {
+      await ctx.reply(`Голосовой файл слишком большой. Максимум: ${Math.floor(this.voiceLimits.maxFileBytes / 1024 / 1024)} МБ.`);
+      return;
+    }
+    if (!this.takeVoiceAttempt(ctx.from.id)) {
+      await ctx.reply("Слишком много голосовых подряд. Подождите несколько минут и попробуйте снова.");
+      return;
+    }
+    if (this.voiceInFlight >= this.voiceLimits.maxConcurrent) {
+      await ctx.reply("Распознаватель сейчас занят. Попробуйте отправить голосовое чуть позже.");
+      return;
+    }
+
+    this.voiceInFlight += 1;
+    let tempDirectory: string | undefined;
+    try {
+      await ctx.reply("Распознаю голосовое локально...");
+      const telegramFile = await this.bot.api.getFile(voice.file_id);
+      if (!telegramFile.file_path) throw new Error("Telegram did not return a voice file path.");
+
+      const response = await fetch(`https://api.telegram.org/file/bot${this.config.botToken}/${telegramFile.file_path}`);
+      if (!response.ok) throw new Error(`Telegram file download failed with status ${response.status}.`);
+      const contentLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(contentLength) && contentLength > this.voiceLimits.maxFileBytes) {
+        throw new Error("Voice file is larger than the configured limit.");
+      }
+
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > this.voiceLimits.maxFileBytes) {
+        throw new Error("Voice file is larger than the configured limit.");
+      }
+
+      tempDirectory = await mkdtemp(join(tmpdir(), "nototime-voice-"));
+      const voicePath = join(tempDirectory, "voice.ogg");
+      await writeFile(voicePath, bytes);
+      const transcript = await this.speechToText.transcribe(voicePath);
+
+      await ctx.reply(`Распознано: ${transcript}`);
+      await this.handleRecognizedVoice(ctx, transcript);
+    } catch (error) {
+      console.error("Voice recognition failed", error instanceof Error ? error.message : error);
+      await ctx.reply("Не удалось распознать голосовое. Проверьте сервис распознавания или попробуйте ещё раз позже.");
+    } finally {
+      this.voiceInFlight = Math.max(0, this.voiceInFlight - 1);
+      if (tempDirectory) await rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async handleRecognizedVoice(ctx: Context, transcript: string) {
+    if (!ctx.from) return;
+    if (this.sessions.has(ctx.from.id)) {
+      await this.handleTextValue(ctx, transcript);
+      return;
+    }
+
+    const intent = this.voiceIntentParser.parse(transcript);
+    const user = await this.getOrCreateUser(ctx);
+    const projects = await this.repo.getUserProjects(user.id);
+    const permission: BotProjectPermission =
+      intent.kind === "task"
+        ? "createTask"
+        : intent.kind === "note"
+          ? "createPage"
+          : "manageReminders";
+    const allowedProjects = this.filterProjectsByPermission(projects, user.id, permission);
+    const savedTarget = await this.ensureDefaultTarget(ctx.from.id, user.id, allowedProjects);
+    const projectId = savedTarget?.projectId ?? (allowedProjects.length === 1 ? allowedProjects[0].id : undefined);
+
+    if (!projectId) {
+      await ctx.reply(
+        `Распознал тип: ${voiceIntentLabel(intent)}. Сначала выберите проект${intent.kind === "task" ? " и доску" : ""} командой /switch, затем отправьте голосовое ещё раз.`,
+      );
+      return;
+    }
+
+    if (intent.kind === "task") {
+      if (!savedTarget?.boardPageId) {
+        await ctx.reply("Сначала выберите канбан-доску командой /switch, затем отправьте голосовое ещё раз.");
+        return;
+      }
+      await this.prepareTaskDraft(ctx, projectId, savedTarget.boardPageId, intent.originalText);
+      return;
+    }
+
+    if (intent.kind === "note") {
+      await this.createInboxNote(ctx, projectId, intent.text);
+      return;
+    }
+
+    if (intent.kind === "reminder") {
+      await this.prepareReminder(ctx, projectId, intent.originalText);
+      return;
+    }
+
+    await this.createVoiceNotification(ctx, projectId, intent.title, intent.description ?? intent.originalText, intent.assigneeUsername);
+  }
+
+  private async createVoiceNotification(
+    ctx: Context,
+    projectId: string,
+    title: string,
+    text: string,
+    assigneeUsername?: string,
+  ) {
+    const access = await this.requireProjectPermission(ctx, projectId, "manageReminders");
+    if (!access) return;
+    const members = await this.repo.getProjectMembers(projectId);
+    let recipient = access.user;
+
+    if (assigneeUsername) {
+      const candidate = await this.repo.getUserByUsername(assigneeUsername);
+      const member = candidate && members.find((item) => String(item.id) === String(candidate.id));
+      if (!member) {
+        await ctx.reply(`Не нашёл участника @${assigneeUsername} в выбранном проекте.`);
+        return;
+      }
+      recipient = member;
+    }
+
+    await this.repo.createNotification({
+      projectId,
+      userId: recipient.id,
+      type: "voice_note",
+      entityType: "project",
+      entityId: `voice-${ctx.from?.id ?? "unknown"}-${Date.now()}`,
+      sendAt: new Date().toISOString(),
+      payload: { title, text },
+    });
+    await ctx.reply(`Уведомление поставлено в очередь${recipient.username ? ` для @${recipient.username}` : ""}.`);
+  }
+
+  private takeVoiceAttempt(telegramUserId: number) {
+    const threshold = Date.now() - this.voiceLimits.rateWindowMs;
+    const recent = (this.voiceAttempts.get(telegramUserId) ?? []).filter((timestamp) => timestamp >= threshold);
+    if (recent.length >= this.voiceLimits.rateMax) {
+      this.voiceAttempts.set(telegramUserId, recent);
+      return false;
+    }
+    recent.push(Date.now());
+    this.voiceAttempts.set(telegramUserId, recent);
+    return true;
+  }
+
   private async handleText(ctx: Context) {
     if (!ctx.from || !ctx.message || !("text" in ctx.message)) return;
     const text = ctx.message.text;
     if (!text) return;
+    await this.handleTextValue(ctx, text);
+  }
+
+  private async handleTextValue(ctx: Context, text: string) {
+    if (!ctx.from) return;
     const session = this.sessions.get(ctx.from.id);
     if (!session) {
       const user = await this.getOrCreateUser(ctx);
@@ -661,7 +831,7 @@ export class TelegramWorkspaceBot {
     const target = await this.ensureDefaultTarget(ctx.from.id, user.id, [project]);
     this.sessions.delete(ctx.from.id);
 
-    const keyboard = this.addWebAppButton(new InlineKeyboard(), "Открыть проект", `${this.config.webAppUrl}/project/${project.id}/workspace`)
+    const keyboard = this.addWebAppButton(new InlineKeyboard(), "Открыть проект", this.webAppLink(`/project/${project.id}/workspace`))
       .text(target ? "Создать задачу" : "Выбрать доску", "new_task")
       .text("Меню", "menu")
       .row()
@@ -717,7 +887,7 @@ export class TelegramWorkspaceBot {
     });
     this.sessions.delete(ctx.from.id);
     await ctx.reply(["📥 ЗАМЕТКА СОХРАНЕНА", "", "Добавил в Inbox проекта."].join("\n"), {
-      reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Inbox", `${this.config.webAppUrl}/project/${projectId}/inbox`)
+      reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Inbox", this.webAppLink(`/project/${projectId}/inbox`))
         .text("Еще заметку", "new_inbox_note")
         .text("Меню", "menu"),
     });
@@ -882,7 +1052,7 @@ export class TelegramWorkspaceBot {
       const message = error instanceof Error ? error.message : "";
       if (/already a member|уже/i.test(message)) {
         await ctx.reply("✅ Вы уже участник этого проекта — он есть в приложении.", {
-          reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Mini App", this.config.webAppUrl),
+          reply_markup: this.addWebAppButton(new InlineKeyboard(), "Открыть Mini App", this.webAppLink()),
         });
         return;
       }
@@ -1040,7 +1210,9 @@ export class TelegramWorkspaceBot {
         reply_markup: this.addWebAppButton(
           new InlineKeyboard(),
           "Открыть Kanban",
-          `${this.config.webAppUrl}/project/${projectId}/workspace/page/${boardPageId ?? ""}`,
+          this.webAppLink(boardPageId
+            ? `/project/${projectId}/workspace/page/${boardPageId}`
+            : `/project/${projectId}/workspace`),
         )
           .text("Еще задачу", "new_task")
           .text("Меню", "menu")
@@ -1229,8 +1401,12 @@ export class TelegramWorkspaceBot {
       .row()
       .text("Ввести код проекта", "join_project"),
       "Открыть Mini App",
-      this.config.webAppUrl,
+      this.webAppLink(),
     );
+  }
+
+  private webAppLink(target?: string) {
+    return buildWebAppUrl(this.config.webAppUrl, target);
   }
 
   private addWebAppButton(keyboard: InlineKeyboard, label: string, url: string) {
@@ -1272,6 +1448,21 @@ export class TelegramWorkspaceBot {
     }
     await ctx.reply(text, { reply_markup: replyMarkup });
   }
+}
+
+function readVoiceLimits(env = process.env) {
+  return {
+    maxDurationSeconds: positiveInteger(env.VOICE_MAX_DURATION_SECONDS, 120),
+    maxFileBytes: positiveInteger(env.VOICE_MAX_FILE_BYTES, 20 * 1024 * 1024),
+    rateWindowMs: positiveInteger(env.VOICE_RATE_WINDOW_MS, 10 * 60 * 1000),
+    rateMax: positiveInteger(env.VOICE_RATE_MAX, 5),
+    maxConcurrent: positiveInteger(env.VOICE_MAX_CONCURRENT, 2),
+  };
+}
+
+function positiveInteger(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseReminderDate(text: string) {

@@ -987,6 +987,7 @@ function defaultBlockContent(type: BlockType) {
   if (type === 'kanban_embed') return { projectId: '', pageId: '' };
   if (type === 'web_embed') return { url: '', mode: 'auto', provider: 'generic', height: 280 };
   if (type === 'smart_summary') return {};
+  if (type === 'responsibility_map') return { view: 'cards' };
   if (type === 'collapsible') return { title: 'Новый раздел', text: '', collapsed: false };
   if (type === 'page_properties') return {};
   return { text: '' };

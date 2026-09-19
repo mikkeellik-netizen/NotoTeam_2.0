@@ -744,7 +744,7 @@ function createNormalizedRows(db) {
 }
 
 function createNormalizedRecords(db) {
-  const collections = ["users", "columns", "subtasks", "templates", "joinRequests", "sessions", "authCodes", "outbox"];
+  const collections = ["users", "columns", "subtasks", "templates", "joinRequests", "sessions", "authCodes", "outbox", "aiConnectorTokens", "aiConnectorAccessEvents", "projectFiles", "calendars", "externalCalendarConnections"];
   const records = [];
 
   for (const collection of collections) {

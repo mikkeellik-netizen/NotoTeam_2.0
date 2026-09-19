@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { activityApi } from '../api/activity';
 import { adminSummaryApi, type AdminChangeSummary } from '../api/adminSummary';
+import { aiConnectorApi, type AiConnectorAccessEvent, type AiConnectorToken, type AiContextExportOptions } from '../api/aiConnector';
 import { avatarApi } from '../api/avatar';
 import { botSettingsApi, defaultProjectBotSettings } from '../api/botSettings';
+import { workspaceApiUrl } from '../api/httpClient';
 import { projectsApi } from '../api/projects';
 import { tasksApi } from '../api/tasks';
+import { workspaceApi } from '../api/workspace';
 import { LANGUAGE_OPTIONS } from '../localization/languages';
 import UserAvatarImage from '../components/UserAvatarImage';
 import {
@@ -20,6 +23,7 @@ import {
   type ExportScope,
 } from '../services/exportService';
 import { useAuthStore } from '../store/authStore';
+import { usePageStore } from '../store/pageStore';
 import { useProjectStore } from '../store/projectStore';
 import { type LanguageCode, useSettingsStore } from '../store/settingsStore';
 import { calculateTaskSignificanceScore, getTaskSignificanceLabel, normalizeTaskSignificanceSettings } from '../types';
@@ -41,8 +45,165 @@ import type {
 import { copyPlainText } from '../utils/clipboard';
 import { getProjectPermissions } from '../utils/projectPermissions';
 
+type AdminTab = 'overview' | 'people' | 'responsibility' | 'risks' | 'meeting' | 'reports' | 'bot' | 'ai';
+type AdminReturnSection = 'action-plan';
+
+type AdminReturnState = {
+  adminReturn?: {
+    projectId: number | string;
+    tab: AdminTab;
+    section?: AdminReturnSection;
+    label: string;
+  };
+};
+
+const createDefaultAiContextOptions = (): AiContextExportOptions => ({
+  scope: 'summary',
+  includeTasks: true,
+  includeWorkspace: true,
+  includeCalendar: true,
+  includeReminders: true,
+  includeInbox: true,
+  includeResponsibility: true,
+  includeActivity: true,
+  includeBlocks: false,
+  includeArchived: false,
+  maxTasks: 300,
+  maxBlocks: 300,
+  workspaceAccessMode: 'all',
+  workspaceNodeIds: [],
+});
+
+type AiConnectorAccessPreset = {
+  id: string;
+  title: string;
+  description: string;
+  policy: AiContextExportOptions;
+};
+
+type AiMcpClient = 'claude' | 'codex';
+type AiMcpPlatform = 'windows' | 'linux';
+
+const AI_MCP_SERVER_PATHS: Record<AiMcpPlatform, string> = {
+  windows: 'C:\\noto\\ai-connector-mcp\\src\\server.js',
+  linux: '/opt/noto/ai-connector-mcp/src/server.js',
+};
+
+const detectAiMcpPlatform = (): AiMcpPlatform => (
+  typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('windows') ? 'windows' : 'linux'
+);
+
+const AI_CONNECTOR_ACCESS_PRESETS: AiConnectorAccessPreset[] = [
+  {
+    id: 'overview',
+    title: 'Только обзор',
+    description: 'Краткая сводка, задачи, календарь и ответственность.',
+    policy: {
+      scope: 'summary',
+      includeTasks: true,
+      includeWorkspace: false,
+      includeCalendar: true,
+      includeReminders: false,
+      includeInbox: true,
+      includeResponsibility: true,
+      includeActivity: false,
+      includeBlocks: false,
+      includeArchived: false,
+      maxTasks: 100,
+      maxBlocks: 1,
+    },
+  },
+  {
+    id: 'tasks-calendar',
+    title: 'Задачи и календарь',
+    description: 'Рабочий режим для планирования без текста страниц.',
+    policy: {
+      scope: 'summary',
+      includeTasks: true,
+      includeWorkspace: false,
+      includeCalendar: true,
+      includeReminders: true,
+      includeInbox: true,
+      includeResponsibility: true,
+      includeActivity: false,
+      includeBlocks: false,
+      includeArchived: false,
+      maxTasks: 300,
+      maxBlocks: 1,
+    },
+  },
+  {
+    id: 'project-no-archive',
+    title: 'Проект без архива',
+    description: 'Страницы, задачи и события без архивных данных.',
+    policy: {
+      scope: 'full',
+      includeTasks: true,
+      includeWorkspace: true,
+      includeCalendar: true,
+      includeReminders: true,
+      includeInbox: true,
+      includeResponsibility: true,
+      includeActivity: true,
+      includeBlocks: true,
+      includeArchived: false,
+      maxTasks: 1000,
+      maxBlocks: 1000,
+    },
+  },
+  {
+    id: 'full-export',
+    title: 'Полный экспорт',
+    description: 'Максимальный доступ, включая блоки страниц и архив.',
+    policy: {
+      scope: 'full',
+      includeTasks: true,
+      includeWorkspace: true,
+      includeCalendar: true,
+      includeReminders: true,
+      includeInbox: true,
+      includeResponsibility: true,
+      includeActivity: true,
+      includeBlocks: true,
+      includeArchived: true,
+      maxTasks: 2000,
+      maxBlocks: 2000,
+    },
+  },
+];
+
+const AI_CONTEXT_POLICY_KEYS: Array<keyof AiContextExportOptions> = [
+  'scope',
+  'includeTasks',
+  'includeWorkspace',
+  'includeCalendar',
+  'includeReminders',
+  'includeInbox',
+  'includeResponsibility',
+  'includeActivity',
+  'includeBlocks',
+  'includeArchived',
+  'maxTasks',
+  'maxBlocks',
+  'workspaceAccessMode',
+  'workspaceNodeIds',
+];
+
+function sameAiContextOptions(left: AiContextExportOptions, right: AiContextExportOptions) {
+  return AI_CONTEXT_POLICY_KEYS.every((key) => {
+    if (key === 'workspaceAccessMode') return (left[key] ?? 'all') === (right[key] ?? 'all');
+    if (key === 'workspaceNodeIds') {
+      const leftIds = [...(left[key] ?? [])].sort();
+      const rightIds = [...(right[key] ?? [])].sort();
+      return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
+    }
+    return left[key] === right[key];
+  });
+}
+
 export default function SettingsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { projectId } = useParams<{ projectId?: string }>();
   const selectedProjectId = projectId ? Number(projectId) : undefined;
   const currentUser = useAuthStore((state) => state.user);
@@ -76,6 +237,8 @@ export default function SettingsPage() {
     project?: Project;
   } | null>(null);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [adminInitialTab, setAdminInitialTab] = useState<AdminTab>('overview');
+  const [adminInitialSection, setAdminInitialSection] = useState<AdminReturnSection | undefined>();
   const [adminTasks, setAdminTasks] = useState<Task[]>([]);
   const [adminColumns, setAdminColumns] = useState<Column[]>([]);
   const [adminEvents, setAdminEvents] = useState<ActivityEvent[]>([]);
@@ -484,6 +647,23 @@ export default function SettingsPage() {
     setActivityRetentionDays(activityApi.getRetentionDays(activeProject.id));
     setAdminEvents(await activityApi.load(activeProject.id));
   };
+
+  useEffect(() => {
+    const returnTarget = (location.state as AdminReturnState | null)?.adminReturn;
+    if (
+      !returnTarget ||
+      !activeProject ||
+      String(returnTarget.projectId) !== String(activeProject.id) ||
+      !canOpenAdminPanel
+    ) {
+      return;
+    }
+
+    setAdminInitialTab(returnTarget.tab);
+    setAdminInitialSection(returnTarget.section);
+    void openAdminPanel();
+    navigate(location.pathname, { replace: true, state: null });
+  }, [activeProject?.id, canOpenAdminPanel, location.pathname, location.state]);
 
   const exportActiveProject = async (delivery: 'download' | 'telegram') => {
     if (!activeProject || !canExportProject) return;
@@ -1083,6 +1263,8 @@ export default function SettingsPage() {
       {adminOpen && activeProject && (
         <AdminPanel
           project={activeProject}
+          initialTab={adminInitialTab}
+          initialSection={adminInitialSection}
           tasks={adminTasks}
           columns={adminColumns}
           events={adminEvents}
@@ -1296,6 +1478,8 @@ function SettingsMessageDialog({
 
 function AdminPanel({
   project,
+  initialTab,
+  initialSection,
   tasks,
   columns,
   events,
@@ -1304,6 +1488,8 @@ function AdminPanel({
   onClose,
 }: {
   project: Project;
+  initialTab: AdminTab;
+  initialSection?: AdminReturnSection;
   tasks: Task[];
   columns: Column[];
   events: ActivityEvent[];
@@ -1311,11 +1497,11 @@ function AdminPanel({
   onRetentionChange: (days: number) => void | Promise<void>;
   onClose: () => void;
 }) {
-  type AdminTab = 'overview' | 'people' | 'responsibility' | 'risks' | 'meeting' | 'reports' | 'bot';
   const navigate = useNavigate();
   const currentUserId = useAuthStore((state) => state.user?.id);
+  const { createNode, ensureInbox } = usePageStore();
   const [openUserIds, setOpenUserIds] = useState<Set<number>>(new Set());
-  const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>('overview');
+  const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>(initialTab);
   const [selectedMember, setSelectedMember] = useState<ProjectMember | null>(null);
   const [responsibilityAreas, setResponsibilityAreas] = useState<ResponsibilityArea[]>(project.responsibilityAreas ?? []);
   const [editingResponsibilityArea, setEditingResponsibilityArea] = useState<ResponsibilityArea | null>(null);
@@ -1330,14 +1516,114 @@ function AdminPanel({
   const [changeSummary, setChangeSummary] = useState<AdminChangeSummary>(() => createEmptyAdminChangeSummary());
   const [savingBotSettings, setSavingBotSettings] = useState(false);
   const [botSettingsSaved, setBotSettingsSaved] = useState(false);
+  const [aiContextOptions, setAiContextOptions] = useState<AiContextExportOptions>(() => createDefaultAiContextOptions());
+  const [aiContextText, setAiContextText] = useState('');
+  const [aiContextLoading, setAiContextLoading] = useState(false);
+  const [aiContextCopied, setAiContextCopied] = useState(false);
+  const [aiPromptCopied, setAiPromptCopied] = useState(false);
+  const [aiContextError, setAiContextError] = useState('');
+  const [aiTokens, setAiTokens] = useState<AiConnectorToken[]>([]);
+  const [aiTokensLoading, setAiTokensLoading] = useState(false);
+  const [aiTokenName, setAiTokenName] = useState('AI Connector');
+  const [aiTokenDays, setAiTokenDays] = useState(90);
+  const [aiTokenAccessPolicy, setAiTokenAccessPolicy] = useState<AiContextExportOptions>(() => createDefaultAiContextOptions());
+  const [aiTokenSecret, setAiTokenSecret] = useState('');
+  const [aiTokenCopied, setAiTokenCopied] = useState(false);
+  const [aiTokenError, setAiTokenError] = useState('');
+  const [aiMcpClient, setAiMcpClient] = useState<AiMcpClient>('claude');
+  const [aiMcpPlatform, setAiMcpPlatform] = useState<AiMcpPlatform>(() => detectAiMcpPlatform());
+  const [aiMcpApiUrl, setAiMcpApiUrl] = useState(workspaceApiUrl);
+  const [aiMcpServerPath, setAiMcpServerPath] = useState(() => AI_MCP_SERVER_PATHS[detectAiMcpPlatform()]);
+  const [aiMcpConfigCopied, setAiMcpConfigCopied] = useState(false);
+  const [aiTokenTesting, setAiTokenTesting] = useState(false);
+  const [aiTokenTestResult, setAiTokenTestResult] = useState('');
+  const [aiAccessEvents, setAiAccessEvents] = useState<AiConnectorAccessEvent[]>([]);
+  const [aiAccessEventsLoading, setAiAccessEventsLoading] = useState(false);
+  const [aiAccessEventsError, setAiAccessEventsError] = useState('');
+  const [aiWorkspaceNodes, setAiWorkspaceNodes] = useState<PageNode[]>([]);
+  const [aiWorkspaceNodesLoading, setAiWorkspaceNodesLoading] = useState(false);
+  const [aiWorkspaceNodesError, setAiWorkspaceNodesError] = useState('');
+  const [meetingStartDate, setMeetingStartDate] = useState(() => formatDateInput(new Date(Date.now() - 6 * 24 * 3600000)));
+  const [meetingEndDate, setMeetingEndDate] = useState(() => formatDateInput(new Date()));
+  const [meetingDecisionText, setMeetingDecisionText] = useState('');
+  const [meetingDecisionStatus, setMeetingDecisionStatus] = useState<'idle' | 'saved'>('idle');
+  const aiTokenAccessPresetId = useMemo(() => {
+    return AI_CONNECTOR_ACCESS_PRESETS.find((preset) => sameAiContextOptions(aiTokenAccessPolicy, preset.policy))?.id ?? 'custom';
+  }, [aiTokenAccessPolicy]);
+  const aiWorkspaceTree = useMemo(() => {
+    const activeNodes = aiWorkspaceNodes.filter((node) => !node.isDeleted);
+    const children = new Map<string | null, PageNode[]>();
+    for (const node of activeNodes) {
+      const parentId = node.parentId && activeNodes.some((item) => item.id === node.parentId) ? node.parentId : null;
+      children.set(parentId, [...(children.get(parentId) ?? []), node]);
+    }
+    for (const items of children.values()) items.sort((left, right) => left.order - right.order);
+    const flattened: Array<{ node: PageNode; depth: number }> = [];
+    const visit = (parentId: string | null, depth: number) => {
+      for (const node of children.get(parentId) ?? []) {
+        flattened.push({ node, depth });
+        visit(node.id, depth + 1);
+      }
+    };
+    visit(null, 0);
+    return flattened;
+  }, [aiWorkspaceNodes]);
 
-  const openTaskInKanban = (task: Task) => {
+  const openTaskInKanban = (task: Task, section?: AdminReturnSection) => {
     if (!task.pageId) {
       return;
     }
 
     onClose();
-    navigate(`/project/${project.id}/workspace/page/${task.pageId}?taskId=${task.id}`);
+    navigate(`/project/${project.id}/workspace/page/${task.pageId}?taskId=${encodeURIComponent(String(task.id))}`, {
+      state: {
+        adminReturn: {
+          projectId: project.id,
+          tab: activeAdminTab,
+          section,
+          label: section === 'action-plan' ? 'План действий' : activeAdminTab === 'risks' ? 'Риски' : 'Ответственность',
+        },
+      } satisfies AdminReturnState,
+    });
+  };
+
+  useEffect(() => {
+    if (initialSection !== 'action-plan' || activeAdminTab !== 'overview') return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById('admin-action-plan')?.scrollIntoView({ block: 'start' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeAdminTab, initialSection]);
+
+  const saveMeetingDecision = () => {
+    const text = meetingDecisionText.trim();
+    if (!text) return;
+    const inbox = ensureInbox(String(project.id));
+    createNode({
+      projectId: String(project.id),
+      parentId: inbox.id,
+      type: 'page',
+      title: `Решение планерки: ${text.slice(0, 48)}`,
+      icon: '📥',
+      initialBlocks: [{ type: 'paragraph', content: { text, source: 'meeting' }, order: 0 }],
+    });
+    setMeetingDecisionText('');
+    setMeetingDecisionStatus('saved');
+    window.setTimeout(() => setMeetingDecisionStatus('idle'), 1800);
+  };
+
+  const refreshAiAccessEvents = async () => {
+    setAiAccessEventsLoading(true);
+    setAiAccessEventsError('');
+    try {
+      const events = await aiConnectorApi.listAccessEvents(project.id, 50);
+      setAiAccessEvents(events);
+    } catch (error) {
+      setAiAccessEvents([]);
+      setAiAccessEventsError(error instanceof Error ? error.message : 'Не удалось загрузить журнал AI Connector');
+    } finally {
+      setAiAccessEventsLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -1345,6 +1631,75 @@ function AdminPanel({
     botSettingsApi.get(project.id).then((settings) => {
       if (!cancelled) setBotSettings(settings);
     });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAiWorkspaceNodesLoading(true);
+    setAiWorkspaceNodesError('');
+    workspaceApi.getNodes(project.id)
+      .then(({ nodes }) => {
+        if (!cancelled) setAiWorkspaceNodes(nodes);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAiWorkspaceNodes([]);
+          setAiWorkspaceNodesError(error instanceof Error ? error.message : 'Не удалось загрузить дерево проекта');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAiWorkspaceNodesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAiTokensLoading(true);
+    setAiTokenError('');
+    setAiTokenSecret('');
+    aiConnectorApi
+      .listTokens(project.id)
+      .then((tokens) => {
+        if (!cancelled) setAiTokens(tokens);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAiTokens([]);
+          setAiTokenError(error instanceof Error ? error.message : 'Не удалось загрузить AI-токены');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAiTokensLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAiAccessEventsLoading(true);
+    setAiAccessEventsError('');
+    aiConnectorApi
+      .listAccessEvents(project.id, 50)
+      .then((events) => {
+        if (!cancelled) setAiAccessEvents(events);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAiAccessEvents([]);
+          setAiAccessEventsError(error instanceof Error ? error.message : 'Не удалось загрузить журнал AI Connector');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAiAccessEventsLoading(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -1456,17 +1811,6 @@ function AdminPanel({
     .slice(0, 5);
   const attentionQueue = buildTaskAttentionQueue(activeTasks, now, significanceSettings);
   const reactionRules = buildAdminReactionRules(attentionQueue, significanceSettings);
-  const projectDiagnostics = buildProjectDiagnostics({
-    activeTasks,
-    overdue,
-    dueSoon,
-    unassigned,
-    noDeadline,
-    weakTasks,
-    inactiveMembers,
-    overloaded,
-    changeSummary,
-  });
   const assistantInsights = buildAssistantInsights({
     tasks: activeTasks,
     overdue,
@@ -1492,17 +1836,20 @@ function AdminPanel({
     .slice(0, 6);
   const qualityReport = buildTaskQualityReport(activeTasks, now);
   const meetingPlan = buildMeetingPlan({
-    tasks: activeTasks,
+    tasks,
+    columns,
     members: project.members ?? [],
     overdue,
     dueSoon,
     overloaded,
     events,
     now,
+    periodStart: meetingStartDate,
+    periodEnd: meetingEndDate,
   });
   const digest = digestText || buildAutoDigest({
     project,
-    tasks,
+    tasks: activeTasks,
     overdue,
     dueSoon,
     unassigned,
@@ -1519,7 +1866,7 @@ function AdminPanel({
     setDigestCopied(false);
     setDigestText(buildAutoDigest({
       project,
-      tasks,
+      tasks: activeTasks,
       overdue,
       dueSoon,
       unassigned,
@@ -1703,63 +2050,438 @@ function AdminPanel({
     await projectsApi.deleteResponsibilityArea(project.id, areaId, actorUserId);
     setResponsibilityAreas((current) => current.filter((area) => String(area.id) !== String(areaId)));
   };
+  const buildAiContextText = async () => {
+    setAiContextLoading(true);
+    setAiContextError('');
+    try {
+      const context = await aiConnectorApi.getProjectContext(project.id, aiContextOptions);
+      const text = JSON.stringify(context, null, 2);
+      setAiContextText(text);
+      return text;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось сформировать контекст';
+      setAiContextError(message);
+      return '';
+    } finally {
+      setAiContextLoading(false);
+    }
+  };
+  const copyAiContext = async () => {
+    const text = aiContextText || await buildAiContextText();
+    if (!text) return;
+    const copied = await copyPlainText(text);
+    if (!copied) return;
+    setAiContextCopied(true);
+    window.setTimeout(() => setAiContextCopied(false), 1600);
+  };
+  const buildAiPromptText = async () => {
+    const text = aiContextText || await buildAiContextText();
+    if (!text) return '';
+    return [
+      'Ты работаешь как проектный AI-ассистент Noto.',
+      'Ниже передан JSON-контекст проекта. Используй только данные из него, не выдумывай отсутствующие факты.',
+      '',
+      'Что нужно сделать:',
+      '1. Кратко оцени состояние проекта.',
+      '2. Найди риски по срокам, нагрузке, ответственности и незавершенным задачам.',
+      '3. Дай список практичных действий на ближайшую неделю.',
+      '4. Отдельно отметь, каких данных не хватает для точного вывода.',
+      '',
+      'Формат ответа:',
+      '- Сводка проекта.',
+      '- Главные риски.',
+      '- Рекомендации.',
+      '- Вопросы к владельцу проекта.',
+      '',
+      'JSON-контекст:',
+      '```json',
+      text,
+      '```',
+    ].join('\n');
+  };
+  const copyAiPrompt = async () => {
+    const prompt = await buildAiPromptText();
+    if (!prompt) return;
+    const copied = await copyPlainText(prompt);
+    if (!copied) return;
+    setAiPromptCopied(true);
+    window.setTimeout(() => setAiPromptCopied(false), 1600);
+  };
+  const downloadAiContext = async () => {
+    const text = aiContextText || await buildAiContextText();
+    if (!text) return;
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = `project-${project.id}-ai-context.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(href);
+  };
+  const updateAiContextOptions = (patch: Partial<AiContextExportOptions>) => {
+    setAiContextText('');
+    setAiContextCopied(false);
+    setAiPromptCopied(false);
+    setAiContextError('');
+    setAiContextOptions((current) => ({ ...current, ...patch }));
+  };
+  const updateAiTokenAccessPolicy = (patch: Partial<AiContextExportOptions>) => {
+    setAiTokenSecret('');
+    setAiTokenCopied(false);
+    setAiMcpConfigCopied(false);
+    setAiTokenTestResult('');
+    setAiTokenAccessPolicy((current) => ({ ...current, ...patch }));
+  };
+  const applyAiTokenAccessPreset = (preset: AiConnectorAccessPreset) => {
+    setAiTokenSecret('');
+    setAiTokenCopied(false);
+    setAiMcpConfigCopied(false);
+    setAiTokenTestResult('');
+    setAiTokenAccessPolicy({ ...preset.policy });
+  };
+  const updateAiWorkspaceAccessMode = (mode: NonNullable<AiContextExportOptions['workspaceAccessMode']>) => {
+    updateAiTokenAccessPolicy({
+      workspaceAccessMode: mode,
+      workspaceNodeIds: mode === 'all' ? [] : aiTokenAccessPolicy.workspaceNodeIds ?? [],
+    });
+  };
+  const toggleAiWorkspaceNode = (nodeId: string) => {
+    const selected = new Set(aiTokenAccessPolicy.workspaceNodeIds ?? []);
+    if (selected.has(nodeId)) selected.delete(nodeId);
+    else selected.add(nodeId);
+    updateAiTokenAccessPolicy({ workspaceNodeIds: [...selected] });
+  };
+  const formatAiAccessPolicy = (policy?: AiContextExportOptions) => {
+    const current = policy ?? createDefaultAiContextOptions();
+    const sections = [
+      current.includeTasks !== false ? 'задачи' : '',
+      current.includeWorkspace !== false ? 'страницы' : '',
+      current.includeCalendar !== false ? 'календарь проекта' : '',
+      current.includeReminders !== false ? 'напоминания проекта' : '',
+      current.includeInbox !== false ? 'входящие проекта' : '',
+      current.includeResponsibility !== false ? 'ответственность' : '',
+      current.includeActivity !== false ? 'активность' : '',
+      current.includeBlocks ? 'блоки' : '',
+      current.includeArchived ? 'архив' : '',
+    ].filter(Boolean);
+    const workspaceMode = current.workspaceAccessMode ?? 'all';
+    const workspaceAccess = workspaceMode === 'all'
+      ? 'весь проект'
+      : workspaceMode === 'include'
+        ? `только выбранное (${current.workspaceNodeIds?.length ?? 0})`
+        : `кроме выбранного (${current.workspaceNodeIds?.length ?? 0})`;
+    return `${current.scope === 'full' ? 'полный' : 'краткий'} · ${sections.join(', ') || 'без разделов'} · ${workspaceAccess} · до ${current.maxTasks ?? 300} задач / ${current.maxBlocks ?? 300} блоков`;
+  };
+  const formatAiTokenDate = (value?: string) => {
+    if (!value) return 'нет';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'нет';
+    return date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+  const createAiToken = async () => {
+    if ((aiTokenAccessPolicy.workspaceAccessMode ?? 'all') !== 'all' && !aiTokenAccessPolicy.workspaceNodeIds?.length) {
+      setAiTokenError('Выберите хотя бы одну папку, страницу или Kanban-доску.');
+      return;
+    }
+    setAiTokensLoading(true);
+    setAiTokenError('');
+    setAiTokenSecret('');
+    try {
+      const created = await aiConnectorApi.createToken(project.id, {
+        name: aiTokenName,
+        expiresInDays: aiTokenDays,
+        accessPolicy: aiTokenAccessPolicy,
+      });
+      setAiTokenSecret(created.token);
+      setAiTokenCopied(false);
+      setAiMcpConfigCopied(false);
+      setAiTokens((current) => [
+        created.tokenRecord,
+        ...current.filter((token) => String(token.id) !== String(created.tokenRecord.id)),
+      ]);
+    } catch (error) {
+      setAiTokenError(error instanceof Error ? error.message : 'Не удалось создать AI-токен');
+    } finally {
+      setAiTokensLoading(false);
+    }
+  };
+  const revokeAiToken = async (tokenId: string) => {
+    setAiTokensLoading(true);
+    setAiTokenError('');
+    try {
+      const revoked = await aiConnectorApi.revokeToken(project.id, tokenId);
+      setAiTokens((current) => current.map((token) => (String(token.id) === String(tokenId) ? revoked : token)));
+    } catch (error) {
+      setAiTokenError(error instanceof Error ? error.message : 'Не удалось отозвать AI-токен');
+    } finally {
+      setAiTokensLoading(false);
+    }
+  };
+  const copyAiTokenSecret = async () => {
+    if (!aiTokenSecret) return;
+    const copied = await copyPlainText(aiTokenSecret);
+    if (!copied) return;
+    setAiTokenCopied(true);
+    window.setTimeout(() => setAiTokenCopied(false), 1600);
+  };
+  const selectAiMcpPlatform = (platform: AiMcpPlatform) => {
+    setAiMcpPlatform(platform);
+    setAiMcpServerPath(AI_MCP_SERVER_PATHS[platform]);
+    setAiMcpConfigCopied(false);
+  };
+  const buildAiMcpConfig = () => {
+    const apiUrl = aiMcpApiUrl.trim() || 'https://api.example.com';
+    const serverPath = aiMcpServerPath.trim() || AI_MCP_SERVER_PATHS[aiMcpPlatform];
+    if (aiMcpClient === 'codex') {
+      return [
+        '[mcp_servers.noto_ai_connector]',
+        'command = "node"',
+        `args = [${JSON.stringify(serverPath)}]`,
+        'enabled = true',
+        'required = false',
+        'startup_timeout_sec = 15',
+        'tool_timeout_sec = 60',
+        'default_tools_approval_mode = "auto"',
+        `env = { AI_CONNECTOR_API_URL = ${JSON.stringify(apiUrl)}, AI_CONNECTOR_AUTH_TOKEN = ${JSON.stringify(aiTokenSecret)}, AI_CONNECTOR_PROJECT_ID = ${JSON.stringify(String(project.id))} }`,
+      ].join('\n');
+    }
+    return JSON.stringify({
+      mcpServers: {
+        'noto-ai-connector': {
+          command: 'node',
+          args: [serverPath],
+          env: {
+            AI_CONNECTOR_API_URL: apiUrl,
+            AI_CONNECTOR_AUTH_TOKEN: aiTokenSecret,
+            AI_CONNECTOR_PROJECT_ID: String(project.id),
+          },
+        },
+      },
+    }, null, 2);
+  };
+  const copyAiMcpConfig = async () => {
+    if (!aiTokenSecret) return;
+    const copied = await copyPlainText(buildAiMcpConfig());
+    if (!copied) return;
+    setAiMcpConfigCopied(true);
+    window.setTimeout(() => setAiMcpConfigCopied(false), 1600);
+  };
+  const testAiToken = async () => {
+    if (!aiTokenSecret) return;
+    setAiTokenTesting(true);
+    setAiTokenError('');
+    setAiTokenTestResult('');
+    try {
+      const tokenTestOptions = {
+        ...aiTokenAccessPolicy,
+        maxTasks: Math.min(aiTokenAccessPolicy.maxTasks ?? 300, 1),
+        maxBlocks: Math.min(aiTokenAccessPolicy.maxBlocks ?? 300, 1),
+      };
+      const connection = await aiConnectorApi.testConnection({
+        apiUrl: aiMcpApiUrl,
+        projectId: project.id,
+        token: aiTokenSecret,
+        options: tokenTestOptions,
+      });
+      const context = connection.context;
+      const summary = context.summary as { activeTasks?: number; completedTasks?: number } | undefined;
+      setAiTokenTestResult(`Подключение работает · ${connection.latencyMs} мс · активных задач ${summary?.activeTasks ?? 0}, завершенных ${summary?.completedTasks ?? 0}.`);
+      const [tokens] = await Promise.all([
+        aiConnectorApi.listTokens(project.id),
+        refreshAiAccessEvents(),
+      ]);
+      setAiTokens(tokens);
+    } catch (error) {
+      setAiTokenError(error instanceof Error ? error.message : 'Не удалось проверить AI-токен');
+    } finally {
+      setAiTokenTesting(false);
+    }
+  };
+  const adminNavigationGroups: Array<{
+    title: string;
+    items: Array<{ id: AdminTab; label: string; description: string }>;
+  }> = [
+    {
+      title: 'Контроль проекта',
+      items: [
+        { id: 'overview', label: 'Обзор', description: 'Состояние и ближайшие действия' },
+        { id: 'risks', label: 'Риски', description: 'Просрочки и качество задач' },
+        { id: 'people', label: 'Команда', description: 'Нагрузка и активность' },
+        { id: 'responsibility', label: 'Ответственность', description: 'Зоны и владельцы процессов' },
+      ],
+    },
+    {
+      title: 'Работа команды',
+      items: [
+        { id: 'meeting', label: 'Планерка', description: 'Повестка командной встречи' },
+        { id: 'reports', label: 'Отчеты', description: 'Сводки и расписание отправки' },
+      ],
+    },
+    {
+      title: 'Автоматизация',
+      items: [
+        { id: 'bot', label: 'Telegram-бот', description: 'Уведомления и напоминания' },
+        { id: 'ai', label: 'AI Connector', description: 'Доступ внешнего ИИ к проекту' },
+      ],
+    },
+  ];
+  const activeAdminItem = adminNavigationGroups
+    .flatMap((group) => group.items)
+    .find((item) => item.id === activeAdminTab) ?? adminNavigationGroups[0].items[0];
+  const adminHighlights: Array<{
+    tab: AdminTab;
+    title: string;
+    value: string | number;
+    detail: string;
+    tone?: 'danger' | 'warning' | 'success';
+  }> = [
+    {
+      tab: 'overview',
+      title: 'Активные задачи',
+      value: activeTasks.length,
+      detail: `${overdue.length} просрочено · ${dueSoon.length} скоро`,
+      tone: overdue.length ? 'danger' : dueSoon.length ? 'warning' : 'success',
+    },
+    {
+      tab: 'people',
+      title: 'Люди',
+      value: project.members?.length ?? 0,
+      detail: overloaded.length ? `${overloaded.length} перегружено` : 'нагрузка спокойная',
+      tone: overloaded.length ? 'warning' : 'success',
+    },
+    {
+      tab: 'risks',
+      title: 'Риски',
+      value: highSignificanceTasks.length,
+      detail: `вес просрочки ${overdueSignificanceWeight}`,
+      tone: overdueSignificanceWeight ? 'danger' : highSignificanceTasks.length ? 'warning' : 'success',
+    },
+    {
+      tab: 'bot',
+      title: 'Бот',
+      value: botSettings.taskDeadlineNotificationsEnabled ? 'вкл' : 'выкл',
+      detail: botSettings.mentionNotificationsEnabled ? 'упоминания включены' : 'упоминания выключены',
+      tone: botSettings.taskDeadlineNotificationsEnabled ? 'success' : 'warning',
+    },
+  ];
 
   return (
-    <div className="fixed inset-0 z-[120] bg-black/50 flex items-end" onClick={onClose}>
+    <div className="fixed inset-0 z-[120] flex items-end bg-black/55 sm:items-center sm:justify-center sm:p-4" onClick={onClose}>
       <div
-        className="w-full max-h-[86vh] overflow-y-auto rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5 animate-slide-up"
+        className="flex h-[94vh] w-full flex-col overflow-hidden rounded-t-[14px] bg-[var(--tg-theme-bg-color)] shadow-2xl animate-slide-up sm:max-w-6xl sm:rounded-[14px]"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div>
+        <header className="flex min-h-16 shrink-0 items-center justify-between gap-3 border-b border-[var(--tg-theme-secondary-bg-color)] px-4 py-3 sm:px-5">
+          <div className="min-w-0">
             <h2 className="text-lg font-bold text-[var(--tg-theme-text-color)]">Администратор</h2>
-            <p className="text-xs text-[var(--tg-theme-hint-color)]">{project.title}</p>
+            <p className="truncate text-xs text-[var(--tg-theme-hint-color)]">{project.title} · {activeAdminItem.label}</p>
           </div>
-          <button onClick={onClose} className="h-9 w-9 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]">
-            ×
-          </button>
-        </div>
-
-        <div className="sticky top-0 z-10 -mx-1 mb-4 flex gap-2 overflow-x-auto bg-[var(--tg-theme-bg-color)] px-1 py-2">
-          {([
-            ['overview', 'Обзор'],
-            ['people', 'Люди'],
-            ['risks', 'Риски'],
-            ['meeting', 'Планерка'],
-            ['reports', 'Отчеты'],
-            ['bot', 'Бот'],
-          ] as const).map(([tab, label]) => (
-            <button
-              key={tab}
-              onClick={() => setActiveAdminTab(tab)}
-              className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition ${
-                activeAdminTab === tab
-                  ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
-                  : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
           <button
             type="button"
-            onClick={() => setActiveAdminTab('responsibility')}
-            className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition ${
-              activeAdminTab === 'responsibility'
-                ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
-                : 'bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-text-color)]'
-            }`}
+            onClick={onClose}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-lg text-[var(--tg-theme-text-color)]"
+            aria-label="Закрыть панель администратора"
           >
-            Ответственность
+            ×
           </button>
-        </div>
+        </header>
+
+        <nav
+          className="admin-tab-strip shrink-0 scroll-smooth overflow-x-auto overscroll-x-contain border-b border-[var(--tg-theme-secondary-bg-color)] px-3 py-2 md:hidden"
+          aria-label="Разделы панели администратора"
+        >
+          <div className="flex w-max gap-1">
+            {adminNavigationGroups.flatMap((group) => group.items).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={(event) => {
+                  const button = event.currentTarget;
+                  setActiveAdminTab(item.id);
+                  window.requestAnimationFrame(() => button.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' }));
+                }}
+                className={`whitespace-nowrap rounded-[8px] px-3 py-2 text-sm font-semibold transition ${
+                  activeAdminTab === item.id
+                    ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                    : 'text-[var(--tg-theme-hint-color)]'
+                }`}
+                aria-current={activeAdminTab === item.id ? 'page' : undefined}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        <div className="flex min-h-0 flex-1">
+          <aside className="hidden w-60 shrink-0 overflow-y-auto border-r border-[var(--tg-theme-secondary-bg-color)] p-3 md:block">
+            {adminNavigationGroups.map((group) => (
+              <div key={group.title} className="mb-5 last:mb-0">
+                <p className="mb-2 px-2 text-[11px] font-semibold uppercase text-[var(--tg-theme-hint-color)]">{group.title}</p>
+                <div className="space-y-1">
+                  {group.items.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setActiveAdminTab(item.id)}
+                      className={`w-full rounded-[8px] px-3 py-2 text-left transition ${
+                        activeAdminTab === item.id
+                          ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                          : 'text-[var(--tg-theme-text-color)] hover:bg-[var(--tg-theme-secondary-bg-color)]'
+                      }`}
+                    >
+                      <span className="block text-sm font-semibold">{item.label}</span>
+                      <span className={`mt-0.5 block text-[11px] ${activeAdminTab === item.id ? 'opacity-80' : 'text-[var(--tg-theme-hint-color)]'}`}>
+                        {item.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </aside>
+
+          <main className="min-w-0 flex-1 overflow-y-auto px-4 pb-8 sm:px-5 md:px-6">
+            <div className="mx-auto w-full max-w-4xl">
+              <div className="mb-4 mt-5">
+                <h3 className="text-base font-bold text-[var(--tg-theme-text-color)]">{activeAdminItem.label}</h3>
+                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">{activeAdminItem.description}</p>
+              </div>
+
+              {activeAdminTab === 'overview' && (
+                <section className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                  {adminHighlights.map((item) => {
+                    const toneClass =
+                      item.tone === 'danger'
+                        ? 'border-red-500/40 text-red-300'
+                        : item.tone === 'warning'
+                          ? 'border-yellow-500/40 text-yellow-200'
+                          : item.tone === 'success'
+                            ? 'border-emerald-500/40 text-emerald-200'
+                            : 'border-transparent text-[var(--tg-theme-text-color)]';
+                    return (
+              <button
+                key={item.title}
+                type="button"
+                onClick={() => setActiveAdminTab(item.tab)}
+                        className={`rounded-[8px] border bg-[var(--tg-theme-secondary-bg-color)] p-3 text-left transition active:scale-[0.99] ${toneClass}`}
+              >
+                <p className="text-xs font-semibold uppercase opacity-80">{item.title}</p>
+                <p className="mt-1 text-xl font-bold">{item.value}</p>
+                <p className="mt-1 truncate text-xs text-[var(--tg-theme-hint-color)]">{item.detail}</p>
+              </button>
+            );
+          })}
+                </section>
+              )}
 
         <div className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'}`}>
-          <ProjectDiagnosticsPanel diagnostics={projectDiagnostics} />
         </div>
 
         <div className={`${activeAdminTab === 'overview' ? 'grid' : 'hidden'} mt-4 grid-cols-2 gap-2`}>
-          <AdminMetric label="Задач" value={tasks.length} />
+          <AdminMetric label="Задач" value={activeTasks.length} />
           <AdminMetric label="Просрочено" value={overdue.length} tone="danger" />
           <AdminMetric label="Скоро дедлайн" value={dueSoon.length} tone="warning" />
           <AdminMetric label="Без исполнителя" value={unassigned.length} />
@@ -1774,8 +2496,7 @@ function AdminPanel({
           <DeadlineForecastPanel forecast={deadlineForecast} onOpenTask={openTaskInKanban} />
         )}
 
-        <section className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
-          <h3 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">Умный помощник</h3>
+        <AdminDetailsSection active={activeAdminTab === 'overview'} title="Умный помощник">
           <div className="space-y-2 text-sm text-[var(--tg-theme-text-color)]">
             {assistantInsights.map((insight) => (
               <div key={insight.title} className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
@@ -1786,10 +2507,9 @@ function AdminPanel({
               </div>
             ))}
           </div>
-        </section>
+        </AdminDetailsSection>
 
-        <section className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
-          <h3 className="mb-3 text-sm font-semibold text-[var(--tg-theme-text-color)]">Что изменилось с прошлого раза</h3>
+        <AdminDetailsSection active={activeAdminTab === 'overview'} title="Что изменилось за последние 7 дней">
           <div className="grid grid-cols-2 gap-2">
             <AdminMetric label="новые задачи" value={changeSummary.newTasks.length} />
             <AdminMetric label="закрытые задачи" value={changeSummary.closedTasks.length} />
@@ -1799,18 +2519,17 @@ function AdminPanel({
             <AdminMetric label="без движения" value={changeSummary.staleTasks.length} tone={changeSummary.staleTasks.length ? 'warning' : undefined} />
           </div>
           <div className="mt-3 space-y-2">
-            {changeSummary.highlights.map((item) => (
+            {[`${changeSummary.newTasks.length} новых задач за последние 7 дней.`, `${changeSummary.closedTasks.length} завершённых задач за последние 7 дней.`, `${changeSummary.updatedPages.length} обновлённых страниц.`, `${changeSummary.staleTasks.length} задач без движения больше недели.`].map((item) => (
               <p key={item} className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-hint-color)]">
                 {item}
               </p>
             ))}
           </div>
-        </section>
+        </AdminDetailsSection>
 
-        <section className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
+        <AdminDetailsSection active={activeAdminTab === 'overview'} title="Авто-дайджест">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Авто-дайджест</h3>
               <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Текст можно отправить в Telegram-чат команды.</p>
             </div>
             <button
@@ -1831,65 +2550,13 @@ function AdminPanel({
             value={digest}
             className="h-44 w-full resize-none rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-xs text-[var(--tg-theme-text-color)] outline-none"
           />
-        </section>
-
-        <section className={`${false && activeAdminTab === 'bot' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Настройки Telegram-бота</h3>
-              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Уведомления, напоминания и отчеты администраторам.</p>
-            </div>
-            <button
-              onClick={saveBotSettings}
-              disabled={savingBotSettings}
-              className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
-            >
-              {savingBotSettings ? '...' : botSettingsSaved ? 'OK' : 'Сохранить'}
-            </button>
-          </div>
-          {!botSettingsApi.enabled && (
-            <p className="mb-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-hint-color)]">
-              Для реальной отправки подключите backend API через VITE_WORKSPACE_API_URL.
-            </p>
-          )}
-          <div className="space-y-2">
-            <BotToggle label="Уведомления по задачам" checked={botSettings.taskDeadlineNotificationsEnabled} onChange={(checked) => setBotSettings((current) => ({ ...current, taskDeadlineNotificationsEnabled: checked }))} />
-            <BotToggle label="Упоминания @username" checked={botSettings.mentionNotificationsEnabled} onChange={(checked) => setBotSettings((current) => ({ ...current, mentionNotificationsEnabled: checked }))} />
-            <BotToggle label="Напоминания из дежурств" checked={botSettings.dutyNotificationsEnabled} onChange={(checked) => setBotSettings((current) => ({ ...current, dutyNotificationsEnabled: checked }))} />
-          </div>
-          <div className="mt-4 space-y-2">
-            <p className="text-xs font-semibold uppercase text-[var(--tg-theme-hint-color)]">Точки Kanban</p>
-            {botSettings.kanbanReminderPoints.map((point) => (
-              <div key={point.id} className="flex items-center gap-2 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
-                <label className="flex min-w-0 flex-1 items-center gap-2 text-sm text-[var(--tg-theme-text-color)]">
-                  <input type="checkbox" checked={point.enabled} onChange={() => toggleReminderPoint(point.id)} />
-                  <span className="truncate">{point.label}</span>
-                </label>
-                {point.kind === 'before_deadline' && (
-                  <input
-                    type="number"
-                    min={1}
-                    value={Math.round((point.offsetMinutes ?? 0) / 60)}
-                    onChange={(event) => updateReminderOffset(point.id, Math.max(1, Number(event.target.value)) * 60)}
-                    className="w-16 rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-1 text-right text-sm text-[var(--tg-theme-text-color)] outline-none"
-                    aria-label="Часов до дедлайна"
-                  />
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="hidden">
-            <BotReportRow title="Еженедельный отчет" report={botSettings.reports.weekly} onChange={(patch) => updateReport('weekly', patch)} />
-            <BotReportRow title="Просрочки раз в 2 недели" report={botSettings.reports.overdue} onChange={(patch) => updateReport('overdue', patch)} />
-          </div>
-        </section>
+        </AdminDetailsSection>
 
         <section className={`${activeAdminTab === 'bot' ? 'block' : 'hidden'} mt-4 space-y-4`}>
           <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
-                <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Telegram-бот</h3>
-                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                <p className="text-xs text-[var(--tg-theme-hint-color)]">
                   Управление уведомлениями, напоминаниями, отчетами и поведением бота в этом проекте.
                 </p>
               </div>
@@ -2009,13 +2676,27 @@ function AdminPanel({
               </select>
             </label>
           </section>
+        </section>
 
-          <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
-            <div className="mb-3">
-              <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Формула значимости</h3>
-              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
-                Настрой, как проект оценивает тяжелые задачи, просрочки и блокеры. Баллы остаются целыми и компактными.
-              </p>
+        {activeAdminTab === 'risks' && (
+          <details className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <summary className="cursor-pointer list-none text-sm font-semibold text-[var(--tg-theme-text-color)]">Формула значимости</summary>
+            <div className="mt-3">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Формула значимости</h3>
+                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
+                  Настрой, как проект оценивает тяжелые задачи, просрочки и блокеры.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={saveBotSettings}
+                disabled={savingBotSettings}
+                className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+              >
+                {savingBotSettings ? '...' : botSettingsSaved ? 'OK' : 'Сохранить'}
+              </button>
             </div>
 
             <div className="mb-3">
@@ -2050,6 +2731,638 @@ function AdminPanel({
                 ))}
               </div>
             </div>
+            </div>
+          </details>
+        )}
+
+        {activeAdminTab === 'ai' && (
+          <section className="mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <div className="mb-3">
+              <p className="text-xs text-[var(--tg-theme-hint-color)]">
+                Ручной read-only контекст проекта для внешнего ИИ-чата или MCP. Данные формируются только по кнопке.
+              </p>
+            </div>
+
+            <details className="mb-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+              <summary className="cursor-pointer text-xs font-semibold text-[var(--tg-theme-link-color)]">
+                Как подключить MCP
+              </summary>
+              <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-[var(--tg-theme-hint-color)]">
+                <li>Выберите карту доступа нового токена.</li>
+                <li>Нажмите «Создать» и сразу скопируйте секрет.</li>
+                <li>Скопируйте MCP config в Claude Desktop, Codex или другой MCP-клиент.</li>
+                <li>Запустите проверку токена кнопкой «Проверить».</li>
+                <li>После подключения обновите журнал: там будет видно имя токена, инструмент и объем выданных данных.</li>
+              </ol>
+              <p className="mt-2 rounded-[8px] bg-amber-500/10 px-2 py-2 text-[11px] text-amber-200">
+                Токен read-only и работает только с этим проектом. Для отключения нажмите «Отозвать».
+              </p>
+            </details>
+
+            <details className="mb-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+              <summary className="cursor-pointer text-xs font-semibold text-[var(--tg-theme-link-color)]">
+                Как AI получает обновления проекта
+              </summary>
+              <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-[var(--tg-theme-hint-color)]">
+                <li>Для первого анализа агент вызывает полный контекст проекта.</li>
+                <li>Ответ содержит время <code>generatedAt</code>, которое используется как точка следующей проверки.</li>
+                <li>При повторном анализе агент запрашивает только изменения после этой даты.</li>
+                <li>Глубоко перечитываются только изменённые страницы, задачи и зоны ответственности.</li>
+              </ol>
+              <p className="mt-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                Снимки проекта не создаются: delta-режим строится по датам сущностей и журналу активности.
+              </p>
+            </details>
+
+            <div className="mb-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-hint-color)]">
+              Для ручного режима нажмите «Промт для ИИ» и вставьте текст в Claude, Codex или другой чат. JSON можно скачать отдельно для архива или передачи разработчику.
+            </div>
+
+            <details className="mb-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-[var(--tg-theme-text-color)]">
+                Токены MCP
+                <span className="float-right ml-3 rounded-full bg-[var(--tg-theme-secondary-bg-color)] px-2 py-1 text-xs font-normal text-[var(--tg-theme-hint-color)]">
+                  {aiTokens.filter((token) => token.isActive).length} активных
+                </span>
+              </summary>
+              <p className="mt-2 text-xs text-[var(--tg-theme-hint-color)]">Read-only доступ только к AI-контексту этого проекта.</p>
+              <div className="mt-3 grid grid-cols-[1fr_84px_auto] gap-2">
+                <input
+                  value={aiTokenName}
+                  onChange={(event) => setAiTokenName(event.target.value)}
+                  placeholder="Название токена"
+                  className="min-w-0 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-text-color)] outline-none"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={aiTokenDays}
+                  onChange={(event) => setAiTokenDays(Math.max(1, Math.min(365, Number(event.target.value) || 90)))}
+                  className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-text-color)] outline-none"
+                  title="Срок, дней"
+                />
+                <button
+                  type="button"
+                  onClick={createAiToken}
+                  disabled={aiTokensLoading}
+                  className="rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+                >
+                  Создать
+                </button>
+              </div>
+
+              <details className="mt-3 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+                <summary className="cursor-pointer text-xs font-semibold text-[var(--tg-theme-link-color)]">
+                  Карта доступа нового токена
+                </summary>
+                <p className="mt-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                  Эти ограничения сохраняются на backend и принудительно применяются к каждому MCP-запросу.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {AI_CONNECTOR_ACCESS_PRESETS.map((preset) => {
+                    const active = aiTokenAccessPresetId === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => applyAiTokenAccessPreset(preset)}
+                        className={`rounded-[10px] px-3 py-2 text-left ${
+                          active
+                            ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                            : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-text-color)]'
+                        }`}
+                      >
+                        <span className="block text-xs font-semibold">{preset.title}</span>
+                        <span className={`mt-1 block text-[11px] ${active ? 'opacity-80' : 'text-[var(--tg-theme-hint-color)]'}`}>
+                          {preset.description}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {aiTokenAccessPresetId === 'custom' && (
+                  <p className="mt-2 rounded-[8px] bg-[var(--tg-theme-bg-color)] px-2 py-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                    Выбран ручной режим: настройки отличаются от готовых пресетов.
+                  </p>
+                )}
+                <div className="mt-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-[var(--tg-theme-text-color)]">Доступ к дереву проекта</p>
+                      <p className="mt-1 text-[11px] text-[var(--tg-theme-hint-color)]">Папка включает все вложенные страницы, таблицы, файлы и Kanban-доски.</p>
+                    </div>
+                    <select
+                      value={aiTokenAccessPolicy.workspaceAccessMode ?? 'all'}
+                      onChange={(event) => updateAiWorkspaceAccessMode(event.target.value as NonNullable<AiContextExportOptions['workspaceAccessMode']>)}
+                      className="max-w-[180px] rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-xs font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                    >
+                      <option value="all">Весь проект</option>
+                      <option value="include">Только выбранное</option>
+                      <option value="exclude">Кроме выбранного</option>
+                    </select>
+                  </div>
+
+                  {(aiTokenAccessPolicy.workspaceAccessMode ?? 'all') !== 'all' && (
+                    <div className="mt-3">
+                      <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                        <span>Выбрано: {aiTokenAccessPolicy.workspaceNodeIds?.length ?? 0}</span>
+                        <button
+                          type="button"
+                          onClick={() => updateAiTokenAccessPolicy({ workspaceNodeIds: [] })}
+                          className="font-semibold text-[var(--tg-theme-link-color)]"
+                        >
+                          Очистить
+                        </button>
+                      </div>
+                      <div className="max-h-64 space-y-1 overflow-y-auto rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] p-2">
+                        {aiWorkspaceNodesLoading ? (
+                          <p className="px-2 py-3 text-xs text-[var(--tg-theme-hint-color)]">Загружаю дерево проекта...</p>
+                        ) : aiWorkspaceNodesError ? (
+                          <p className="px-2 py-3 text-xs text-red-300">{aiWorkspaceNodesError}</p>
+                        ) : aiWorkspaceTree.length ? (
+                          aiWorkspaceTree.map(({ node, depth }) => (
+                            <label
+                              key={node.id}
+                              className="flex cursor-pointer items-center gap-2 rounded-[7px] px-2 py-2 hover:bg-[var(--tg-theme-bg-color)]"
+                              style={{ paddingLeft: `${8 + Math.min(depth, 6) * 16}px` }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={(aiTokenAccessPolicy.workspaceNodeIds ?? []).includes(node.id)}
+                                onChange={() => toggleAiWorkspaceNode(node.id)}
+                                className="h-4 w-4 shrink-0 accent-[var(--tg-theme-button-color)]"
+                              />
+                              <span className="shrink-0">{node.icon || (node.type === 'folder' ? '📁' : node.type === 'kanban' ? '▦' : '📄')}</span>
+                              <span className="min-w-0 flex-1 truncate text-xs text-[var(--tg-theme-text-color)]">{node.title}</span>
+                              <span className="shrink-0 text-[10px] text-[var(--tg-theme-hint-color)]">
+                                {node.type === 'folder' ? 'папка' : node.type === 'kanban' ? 'kanban' : 'страница'}
+                              </span>
+                            </label>
+                          ))
+                        ) : (
+                          <p className="px-2 py-3 text-xs text-[var(--tg-theme-hint-color)]">В проекте пока нет страниц.</p>
+                        )}
+                      </div>
+                      <p className="mt-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                        В режиме «Только выбранное» задачи с других Kanban-досок и содержимое других страниц также не выдаются.
+                      </p>
+                    </div>
+                  )}
+                </div>
+                <p className="mt-2 rounded-[8px] bg-[var(--tg-theme-bg-color)] px-2 py-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                  Для загруженных файлов AI получает название, тип, размер и связь со страницей. Содержимое PDF, Word, изображений и аудио пока не извлекается автоматически.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                    <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Объем</span>
+                    <select
+                      value={aiTokenAccessPolicy.scope ?? 'summary'}
+                      onChange={(event) => updateAiTokenAccessPolicy({ scope: event.target.value as AiContextExportOptions['scope'] })}
+                      className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                    >
+                      <option value="summary">Кратко</option>
+                      <option value="full">Полнее</option>
+                    </select>
+                  </label>
+                  <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                    <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Задач максимум</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={2000}
+                      value={aiTokenAccessPolicy.maxTasks ?? 300}
+                      onChange={(event) => updateAiTokenAccessPolicy({ maxTasks: Math.max(1, Math.min(2000, Number(event.target.value) || 300)) })}
+                      className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                    />
+                  </label>
+                  <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                    <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Блоков максимум</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={2000}
+                      value={aiTokenAccessPolicy.maxBlocks ?? 300}
+                      onChange={(event) => updateAiTokenAccessPolicy({ maxBlocks: Math.max(1, Math.min(2000, Number(event.target.value) || 300)) })}
+                      className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                    />
+                  </label>
+                  <div className="space-y-2 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-2">
+                    <BotToggle
+                      label="Блоки страниц"
+                      checked={Boolean(aiTokenAccessPolicy.includeBlocks)}
+                      onChange={(checked) => updateAiTokenAccessPolicy({ includeBlocks: checked })}
+                    />
+                    <BotToggle
+                      label="Архив задач"
+                      checked={Boolean(aiTokenAccessPolicy.includeArchived)}
+                      onChange={(checked) => updateAiTokenAccessPolicy({ includeArchived: checked })}
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <BotToggle
+                    label="Задачи"
+                    checked={aiTokenAccessPolicy.includeTasks !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeTasks: checked })}
+                  />
+                  <BotToggle
+                    label="Страницы"
+                    checked={aiTokenAccessPolicy.includeWorkspace !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeWorkspace: checked, includeBlocks: checked ? aiTokenAccessPolicy.includeBlocks : false })}
+                  />
+                  <BotToggle
+                    label="Календарь проекта"
+                    checked={aiTokenAccessPolicy.includeCalendar !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeCalendar: checked })}
+                  />
+                  <BotToggle
+                    label="Напоминания проекта"
+                    checked={aiTokenAccessPolicy.includeReminders !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeReminders: checked })}
+                  />
+                  <BotToggle
+                    label="Входящие проекта"
+                    checked={aiTokenAccessPolicy.includeInbox !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeInbox: checked })}
+                  />
+                  <BotToggle
+                    label="Ответственность"
+                    checked={aiTokenAccessPolicy.includeResponsibility !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeResponsibility: checked })}
+                  />
+                  <BotToggle
+                    label="Активность"
+                    checked={aiTokenAccessPolicy.includeActivity !== false}
+                    onChange={(checked) => updateAiTokenAccessPolicy({ includeActivity: checked })}
+                  />
+                </div>
+                <p className="mt-2 text-[11px] text-[var(--tg-theme-hint-color)]">{formatAiAccessPolicy(aiTokenAccessPolicy)}</p>
+              </details>
+
+              {aiTokenSecret && (
+                <div className="mt-3 rounded-[10px] bg-amber-500/10 p-3">
+                  <p className="mb-2 text-xs text-amber-200">Секрет показан один раз. Скопируйте его сейчас.</p>
+                  <div className="flex items-center gap-2">
+                    <code className="min-w-0 flex-1 break-all rounded-[8px] bg-black/20 px-2 py-2 text-[11px] text-[var(--tg-theme-text-color)]">
+                      {aiTokenSecret}
+                    </code>
+                    <div className="flex shrink-0 flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={copyAiTokenSecret}
+                        className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)]"
+                      >
+                        {aiTokenCopied ? 'OK' : 'Копировать'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={testAiToken}
+                        disabled={aiTokenTesting}
+                        className="rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+                      >
+                        {aiTokenTesting ? '...' : 'Проверить связь'}
+                      </button>
+                    </div>
+                  </div>
+                  {aiTokenTestResult && (
+                    <p className="mt-2 rounded-[8px] bg-emerald-500/10 px-2 py-2 text-xs text-emerald-300">
+                      {aiTokenTestResult}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {aiTokenSecret && (
+                <div className="mt-3 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <h4 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Подключение MCP</h4>
+                    <button
+                      type="button"
+                      onClick={copyAiMcpConfig}
+                      className="shrink-0 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)]"
+                    >
+                      {aiMcpConfigCopied ? 'OK' : 'Копировать'}
+                    </button>
+                  </div>
+                  <div className="mb-2 grid grid-cols-2 gap-2">
+                    <div className="flex rounded-[8px] bg-[var(--tg-theme-bg-color)] p-1">
+                      {(['claude', 'codex'] as AiMcpClient[]).map((client) => (
+                        <button
+                          key={client}
+                          type="button"
+                          onClick={() => {
+                            setAiMcpClient(client);
+                            setAiMcpConfigCopied(false);
+                          }}
+                          className={`min-w-0 flex-1 rounded-[6px] px-2 py-1.5 text-xs font-semibold ${
+                            aiMcpClient === client
+                              ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                              : 'text-[var(--tg-theme-hint-color)]'
+                          }`}
+                        >
+                          {client === 'claude' ? 'Claude' : 'Codex'}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex rounded-[8px] bg-[var(--tg-theme-bg-color)] p-1">
+                      {(['windows', 'linux'] as AiMcpPlatform[]).map((platform) => (
+                        <button
+                          key={platform}
+                          type="button"
+                          onClick={() => selectAiMcpPlatform(platform)}
+                          className={`min-w-0 flex-1 rounded-[6px] px-2 py-1.5 text-xs font-semibold ${
+                            aiMcpPlatform === platform
+                              ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]'
+                              : 'text-[var(--tg-theme-hint-color)]'
+                          }`}
+                        >
+                          {platform === 'windows' ? 'Windows' : 'Linux'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] text-[var(--tg-theme-hint-color)]">Публичный Backend API URL</span>
+                      <input
+                        value={aiMcpApiUrl}
+                        onChange={(event) => setAiMcpApiUrl(event.target.value)}
+                        placeholder="https://api.example.com"
+                        className="w-full rounded-[8px] bg-[var(--tg-theme-bg-color)] px-2 py-2 text-xs text-[var(--tg-theme-text-color)] outline-none"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] text-[var(--tg-theme-hint-color)]">Путь к MCP server.js</span>
+                      <input
+                        value={aiMcpServerPath}
+                        onChange={(event) => setAiMcpServerPath(event.target.value)}
+                        placeholder={AI_MCP_SERVER_PATHS[aiMcpPlatform]}
+                        className="w-full rounded-[8px] bg-[var(--tg-theme-bg-color)] px-2 py-2 text-xs text-[var(--tg-theme-text-color)] outline-none"
+                      />
+                    </label>
+                  </div>
+                  <p className="mt-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                    Вставьте в {aiMcpClient === 'codex'
+                      ? (aiMcpPlatform === 'windows' ? '%USERPROFILE%\\.codex\\config.toml' : '~/.codex/config.toml')
+                      : (aiMcpPlatform === 'windows' ? '%APPDATA%\\Claude\\claude_desktop_config.json' : '.mcp.json для Claude Code')} и перезапустите клиент.
+                  </p>
+                  <textarea
+                    readOnly
+                    value={buildAiMcpConfig()}
+                    className="mt-2 h-48 w-full resize-none rounded-[8px] bg-[var(--tg-theme-bg-color)] p-2 font-mono text-[11px] text-[var(--tg-theme-text-color)] outline-none"
+                  />
+                </div>
+              )}
+
+              {aiTokenError && (
+                <p className="mt-3 rounded-[10px] bg-red-500/10 px-3 py-2 text-xs text-red-300">{aiTokenError}</p>
+              )}
+
+              <div className="mt-3 space-y-2">
+                {aiTokensLoading && !aiTokens.length ? (
+                  <div className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-hint-color)]">
+                    Загружаю токены...
+                  </div>
+                ) : aiTokens.length ? (
+                  aiTokens.map((token) => (
+                    <div key={token.id} className="flex items-center justify-between gap-3 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">{token.name}</p>
+                        <p className="text-[11px] text-[var(--tg-theme-hint-color)]">
+                          до {formatAiTokenDate(token.expiresAt)} · использован {formatAiTokenDate(token.lastUsedAt)} · {token.useCount ?? 0} раз
+                        </p>
+                        <p className="mt-1 line-clamp-2 text-[11px] text-[var(--tg-theme-hint-color)]">
+                          {formatAiAccessPolicy(token.accessPolicy)}
+                        </p>
+                      </div>
+                      {token.isActive ? (
+                        <button
+                          type="button"
+                          onClick={() => revokeAiToken(String(token.id))}
+                          disabled={aiTokensLoading}
+                          className="shrink-0 rounded-[10px] bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-300 disabled:opacity-60"
+                        >
+                          Отозвать
+                        </button>
+                      ) : (
+                        <span className="shrink-0 rounded-full bg-black/10 px-2 py-1 text-[11px] text-[var(--tg-theme-hint-color)]">
+                          выключен
+                        </span>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] px-3 py-2 text-xs text-[var(--tg-theme-hint-color)]">
+                    Токенов пока нет.
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] p-3">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Журнал AI Connector</h4>
+                    <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Последние реальные обращения MCP к контексту проекта.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={refreshAiAccessEvents}
+                    disabled={aiAccessEventsLoading}
+                    className="shrink-0 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)] disabled:opacity-60"
+                  >
+                    {aiAccessEventsLoading ? '...' : 'Обновить'}
+                  </button>
+                </div>
+                {aiAccessEventsError && (
+                  <p className="mb-2 rounded-[8px] bg-red-500/10 px-2 py-2 text-xs text-red-300">{aiAccessEventsError}</p>
+                )}
+                {aiAccessEventsLoading && !aiAccessEvents.length ? (
+                  <p className="text-xs text-[var(--tg-theme-hint-color)]">Загружаю журнал...</p>
+                ) : aiAccessEvents.length ? (
+                  <div className="space-y-2">
+                    {aiAccessEvents.slice(0, 8).map((event) => (
+                      <div key={event.id} className="rounded-[9px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="min-w-0 truncate text-xs font-semibold text-[var(--tg-theme-text-color)]">
+                            {event.tokenName || 'AI Connector'} · {event.toolName || 'manual'} · {event.scope === 'full' ? 'full' : 'summary'}
+                          </p>
+                          <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold ${
+                            event.status === 'success' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'
+                          }`}>
+                            {event.status === 'success' ? 'OK' : 'Ошибка'}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[11px] text-[var(--tg-theme-hint-color)]">
+                          {formatAiTokenDate(event.createdAt)} · задач {event.tasksReturned ?? 0}/{event.tasksTotal ?? 0} · блоков {event.blocksReturned ?? 0}/{event.blocksTotal ?? 0}
+                        </p>
+                        {event.error && <p className="mt-1 text-[11px] text-red-300">{event.error}</p>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-[var(--tg-theme-hint-color)]">Обращений пока нет. Нажмите «Проверить» после создания токена.</p>
+                )}
+              </div>
+            </details>
+
+            <div className="grid grid-cols-2 gap-2">
+              <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Объем</span>
+                <select
+                  value={aiContextOptions.scope ?? 'summary'}
+                  onChange={(event) => updateAiContextOptions({ scope: event.target.value as AiContextExportOptions['scope'] })}
+                  className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                >
+                  <option value="summary">Кратко</option>
+                  <option value="full">Полнее</option>
+                </select>
+              </label>
+              <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Задач максимум</span>
+                <input
+                  type="number"
+                  min={50}
+                  max={2000}
+                  value={aiContextOptions.maxTasks ?? 300}
+                  onChange={(event) => updateAiContextOptions({ maxTasks: Math.max(50, Number(event.target.value) || 300) })}
+                  className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                />
+              </label>
+              <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
+                <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Блоков максимум</span>
+                <input
+                  type="number"
+                  min={50}
+                  max={2000}
+                  value={aiContextOptions.maxBlocks ?? 300}
+                  onChange={(event) => updateAiContextOptions({ maxBlocks: Math.max(50, Number(event.target.value) || 300) })}
+                  className="w-full bg-transparent text-sm font-semibold text-[var(--tg-theme-text-color)] outline-none"
+                />
+              </label>
+              <div className="space-y-2 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-2">
+                <BotToggle
+                  label="Блоки страниц"
+                  checked={Boolean(aiContextOptions.includeBlocks)}
+                  onChange={(checked) => updateAiContextOptions({ includeBlocks: checked })}
+                />
+                <BotToggle
+                  label="Архив задач"
+                  checked={Boolean(aiContextOptions.includeArchived)}
+                  onChange={(checked) => updateAiContextOptions({ includeArchived: checked })}
+                />
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-[10px] bg-[var(--tg-theme-bg-color)] p-3">
+              <p className="mb-2 text-xs font-semibold text-[var(--tg-theme-hint-color)]">Разделы контекста</p>
+              <div className="grid grid-cols-2 gap-2">
+                <BotToggle
+                  label="Задачи"
+                  checked={aiContextOptions.includeTasks !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeTasks: checked })}
+                />
+                <BotToggle
+                  label="Страницы"
+                  checked={aiContextOptions.includeWorkspace !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeWorkspace: checked })}
+                />
+                <BotToggle
+                  label="Календарь проекта"
+                  checked={aiContextOptions.includeCalendar !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeCalendar: checked })}
+                />
+                <BotToggle
+                  label="Напоминания проекта"
+                  checked={aiContextOptions.includeReminders !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeReminders: checked })}
+                />
+                <BotToggle
+                  label="Входящие проекта"
+                  checked={aiContextOptions.includeInbox !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeInbox: checked })}
+                />
+                <BotToggle
+                  label="Ответственность"
+                  checked={aiContextOptions.includeResponsibility !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeResponsibility: checked })}
+                />
+                <BotToggle
+                  label="Активность"
+                  checked={aiContextOptions.includeActivity !== false}
+                  onChange={(checked) => updateAiContextOptions({ includeActivity: checked })}
+                />
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={buildAiContextText}
+                disabled={aiContextLoading}
+                className="rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+              >
+                {aiContextLoading ? 'Готовлю...' : 'Сформировать'}
+              </button>
+              <button
+                type="button"
+                onClick={copyAiContext}
+                disabled={aiContextLoading}
+                className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)] disabled:opacity-60"
+              >
+                {aiContextCopied ? 'JSON скопирован' : 'Копировать JSON'}
+              </button>
+              <button
+                type="button"
+                onClick={copyAiPrompt}
+                disabled={aiContextLoading}
+                className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)] disabled:opacity-60"
+              >
+                {aiPromptCopied ? 'Промт скопирован' : 'Промт для ИИ'}
+              </button>
+              <button
+                type="button"
+                onClick={downloadAiContext}
+                disabled={aiContextLoading}
+                className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-link-color)] disabled:opacity-60"
+              >
+                Скачать JSON
+              </button>
+            </div>
+
+            {aiContextError && (
+              <p className="mt-3 rounded-[10px] bg-red-500/10 px-3 py-2 text-xs text-red-300">{aiContextError}</p>
+            )}
+
+            <textarea
+              readOnly
+              value={aiContextText || 'Нажмите «Сформировать», чтобы получить контекст проекта для внешнего ИИ.'}
+              className="mt-3 h-52 w-full resize-none rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3 text-xs text-[var(--tg-theme-text-color)] outline-none"
+            />
+          </section>
+        )}
+
+        <section className={`${activeAdminTab === 'reports' ? 'block' : 'hidden'} mt-4 space-y-4`}>
+          <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Сводка и расписание</h3>
+                <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Настройки всех автоматических отчетов проекта собраны здесь.</p>
+              </div>
+              <button
+                onClick={saveBotSettings}
+                disabled={savingBotSettings}
+                className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
+              >
+                {savingBotSettings ? '...' : botSettingsSaved ? 'OK' : 'Сохранить'}
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+              <AdminMetric label="задач всего" value={activeTasks.length} />
+              <AdminMetric label="просрочено" value={overdue.length} tone="danger" />
+              <AdminMetric label="скоро дедлайн" value={dueSoon.length} tone="warning" />
+              <AdminMetric label="событий активности" value={events.length} />
+            </div>
           </section>
 
           <BotReportCard
@@ -2065,7 +3378,7 @@ function AdminPanel({
 
           <BotReportCard
             title="Системные просрочки"
-            description="Раз в выбранные дни показывает участников с повторяющимися просрочками."
+            description="В выбранные дни показывает участников с повторяющимися просрочками."
             report={botSettings.reports.overdue}
             members={project.members ?? []}
             onChange={(patch) => updateReport('overdue', patch)}
@@ -2075,43 +3388,32 @@ function AdminPanel({
           />
         </section>
 
-        <section className={`${activeAdminTab === 'reports' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">Отчеты</h3>
-              <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Автоотчеты администратору и краткая сводка проекта.</p>
-            </div>
-            <button
-              onClick={saveBotSettings}
-              disabled={savingBotSettings}
-              className="shrink-0 rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-60"
-            >
-              {savingBotSettings ? '...' : botSettingsSaved ? 'OK' : 'Сохранить'}
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <AdminMetric label="задач всего" value={tasks.length} />
-            <AdminMetric label="просрочено" value={overdue.length} tone="danger" />
-            <AdminMetric label="скоро дедлайн" value={dueSoon.length} tone="warning" />
-            <AdminMetric label="активность" value={events.length} />
-          </div>
-          <div className="mt-4 grid grid-cols-1 gap-2">
-            <BotReportRow title="Еженедельный отчет" report={botSettings.reports.weekly} onChange={(patch) => updateReport('weekly', patch)} />
-            <BotReportRow title="Просрочки раз в 2 недели" report={botSettings.reports.overdue} onChange={(patch) => updateReport('overdue', patch)} />
-          </div>
-        </section>
-
-        <section className={`${activeAdminTab === 'overview' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
-          <h3 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">План действий</h3>
+        <AdminDetailsSection
+          active={activeAdminTab === 'overview'}
+          title="План действий"
+          id="admin-action-plan"
+          initiallyOpen={initialSection === 'action-plan'}
+        >
           <div className="space-y-2">
             {actionPlan.map((action, index) => (
-              <div key={action} className="flex gap-2 rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-text-color)]">
-                <span className="text-[var(--tg-theme-hint-color)]">{index + 1}.</span>
-                <span>{action}</span>
+              <div key={action.text} className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-sm text-[var(--tg-theme-text-color)]">
+                <div className="flex gap-2">
+                  <span className="text-[var(--tg-theme-hint-color)]">{index + 1}.</span>
+                  <span>{action.text}</span>
+                </div>
+                {action.tasks.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 pl-5">
+                    {action.tasks.slice(0, 4).map((task) => (
+                      <button key={task.id} type="button" onClick={() => openTaskInKanban(task, 'action-plan')} disabled={!task.pageId} className="max-w-full truncate rounded-full bg-[var(--tg-theme-secondary-bg-color)] px-2 py-1 text-xs font-semibold text-[var(--tg-theme-link-color)] disabled:opacity-50">
+                        {task.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
-        </section>
+        </AdminDetailsSection>
 
         {activeAdminTab === 'risks' && (
           <section className="mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
@@ -2126,7 +3428,6 @@ function AdminPanel({
             </div>
 
             <TaskAttentionQueuePanel queue={attentionQueue} onOpenTask={openTaskInKanban} />
-            <AdminReactionRulesPanel rules={reactionRules} onOpenTask={openTaskInKanban} />
 
             <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
               <div className="mb-2 flex items-center justify-between gap-3">
@@ -2182,6 +3483,14 @@ function AdminPanel({
               <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">Короткий экран для командной встречи: что закрыли, что в работе, где риски и какие решения зафиксировать.</p>
             </div>
             <div className="grid grid-cols-2 gap-2">
+              <label className="text-xs text-[var(--tg-theme-hint-color)]">
+                <span className="mb-1 block">С</span>
+                <input type="date" value={meetingStartDate} onChange={(event) => setMeetingStartDate(event.target.value)} className="w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-2 py-2 text-sm text-[var(--tg-theme-text-color)] outline-none" />
+              </label>
+              <label className="text-xs text-[var(--tg-theme-hint-color)]">
+                <span className="mb-1 block">По</span>
+                <input type="date" value={meetingEndDate} onChange={(event) => setMeetingEndDate(event.target.value)} className="w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-2 py-2 text-sm text-[var(--tg-theme-text-color)] outline-none" />
+              </label>
               <AdminMetric label="завершили" value={meetingPlan.completed.length} />
               <AdminMetric label="в работе" value={meetingPlan.inProgress.length} />
               <AdminMetric label="заблокировано" value={meetingPlan.blocked.length} tone={meetingPlan.blocked.length ? 'danger' : undefined} />
@@ -2195,9 +3504,17 @@ function AdminPanel({
             <div className="mt-3 rounded-[12px] bg-[var(--tg-theme-bg-color)] p-3">
               <h4 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">Решения после встречи</h4>
               <textarea
+                value={meetingDecisionText}
+                onChange={(event) => setMeetingDecisionText(event.target.value)}
                 placeholder="Например: перенести дедлайн, назначить ответственного, создать новую задачу..."
                 className="h-28 w-full resize-none rounded-[10px] bg-[var(--tg-theme-secondary-bg-color)] p-3 text-sm text-[var(--tg-theme-text-color)] placeholder:text-[var(--tg-theme-hint-color)] outline-none"
               />
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="text-xs text-emerald-300">{meetingDecisionStatus === 'saved' ? 'Сохранено во Входящие' : ''}</span>
+                <button type="button" onClick={saveMeetingDecision} disabled={!meetingDecisionText.trim()} className="rounded-[10px] bg-[var(--tg-theme-button-color)] px-3 py-2 text-xs font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-50">
+                  Сохранить во Входящие
+                </button>
+              </div>
             </div>
           </section>
         )}
@@ -2297,6 +3614,10 @@ function AdminPanel({
             </p>
           )}
         </section>
+            </div>
+          </main>
+        </div>
+
         {responsibilityFormOpen && (
           <ResponsibilityAreaModal
             area={editingResponsibilityArea}
@@ -2690,6 +4011,33 @@ function AdminMetric({ label, value, suffix = '', tone }: { label: string; value
       <p className={`text-2xl font-bold ${color}`}>{value}{suffix}</p>
       <p className="text-xs text-[var(--tg-theme-hint-color)]">{label}</p>
     </div>
+  );
+}
+
+function AdminDetailsSection({
+  active,
+  title,
+  children,
+  id,
+  initiallyOpen = false,
+}: {
+  active: boolean;
+  title: string;
+  children: ReactNode;
+  id?: string;
+  initiallyOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
+  return (
+    <details id={id} open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className={`${active ? 'block' : 'hidden'} mt-4 scroll-mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold text-[var(--tg-theme-text-color)]">
+        <span>{title}</span>
+        <span className="rounded-full bg-[var(--tg-theme-bg-color)] px-2 py-1 text-[11px] font-medium text-[var(--tg-theme-hint-color)]">
+          {open ? 'закрыть' : 'открыть'}
+        </span>
+      </summary>
+      <div className="mt-3">{children}</div>
+    </details>
   );
 }
 
@@ -3324,16 +4672,24 @@ function BotReportCard({
   ] as const;
 
   return (
-    <section className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
-      <div className="mb-3 flex items-start justify-between gap-3">
+    <details className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-[var(--tg-theme-text-color)]">{title}</h3>
           <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">{description}</p>
         </div>
-        <input type="checkbox" checked={report.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} />
+        <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold ${
+          report.enabled ? 'bg-emerald-500/15 text-emerald-300' : 'bg-[var(--tg-theme-bg-color)] text-[var(--tg-theme-hint-color)]'
+        }`}>
+          {report.enabled ? 'включен' : 'выключен'}
+        </span>
+      </summary>
+
+      <div className="mt-4">
+        <BotToggle label="Автоматическая отправка" checked={report.enabled} onChange={(checked) => onChange({ enabled: checked })} />
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="mt-3 grid grid-cols-2 gap-2">
         <label className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2">
           <span className="mb-1 block text-xs text-[var(--tg-theme-hint-color)]">Время МСК</span>
           <input
@@ -3403,58 +4759,12 @@ function BotReportCard({
           ))}
         </div>
       </div>
-    </section>
-  );
-}
-
-function BotReportRow({
-  title,
-  report,
-  onChange,
-}: {
-  title: string;
-  report: ProjectBotSettings['reports']['weekly'];
-  onChange: (patch: Partial<ProjectBotSettings['reports']['weekly']>) => void;
-}) {
-  const weekdayText = report.weekdays.join(', ');
-  return (
-    <div className="rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-[var(--tg-theme-text-color)]">{title}</p>
-          <p className="text-xs text-[var(--tg-theme-hint-color)]">дни: {weekdayText || '-'} · {report.time}</p>
-        </div>
-        <input type="checkbox" checked={report.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} />
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <input
-          value={report.weekdays.join(',')}
-          onChange={(event) => onChange({ weekdays: parseWeekdays(event.target.value) })}
-          className="rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-sm text-[var(--tg-theme-text-color)] outline-none"
-          placeholder="2,4"
-          aria-label="Дни недели"
-        />
-        <input
-          type="time"
-          value={report.time}
-          onChange={(event) => onChange({ time: event.target.value })}
-          className="rounded-[8px] bg-[var(--tg-theme-secondary-bg-color)] px-2 py-2 text-sm text-[var(--tg-theme-text-color)] outline-none"
-          aria-label="Время отчета"
-        />
-      </div>
-    </div>
+    </details>
   );
 }
 
 function cloneBotSettings(settings: ProjectBotSettings): ProjectBotSettings {
   return JSON.parse(JSON.stringify(settings));
-}
-
-function parseWeekdays(value: string) {
-  return value
-    .split(',')
-    .map((item) => Number(item.trim()))
-    .filter((day) => Number.isInteger(day) && day >= 1 && day <= 7);
 }
 
 function buildProjectDiagnostics({
@@ -3932,15 +5242,15 @@ function buildActionPlan({
   highPriority: Task[];
   overloaded: Array<{ member: ProjectMember; total: number }>;
 }) {
-  const actions: string[] = [];
-  if (overdue.length > 0) actions.push(`Разобрать ${overdue.length} просроченных задач и обновить сроки.`);
-  if (dueSoon.length > 0) actions.push(`Поставить в фокус ${dueSoon.length} задач с ближайшим дедлайном.`);
-  if (unassigned.length > 0) actions.push(`Назначить ответственных для ${unassigned.length} задач.`);
-  if (noDeadline.length > 0) actions.push(`Добавить дедлайны для ${noDeadline.length} задач.`);
-  if (overloaded.length > 0) actions.push(`Снять перегруз с: ${overloaded.map((item) => memberName(item.member)).join(', ')}.`);
-  if (highPriority.length > 0) actions.push('Проверить критичные и важные задачи отдельно.');
-  if (weakTasks.length > 0) actions.push('Уточнить формулировки задач без описания или структуры.');
-  return actions.slice(0, 5).length > 0 ? actions.slice(0, 5) : ['Поддерживать текущий ритм и обновлять статусы задач в конце дня.'];
+  const actions: Array<{ text: string; tasks: Task[] }> = [];
+  if (overdue.length > 0) actions.push({ text: `Разобрать ${overdue.length} просроченных задач и обновить сроки.`, tasks: overdue });
+  if (dueSoon.length > 0) actions.push({ text: `Поставить в фокус ${dueSoon.length} задач с ближайшим дедлайном.`, tasks: dueSoon });
+  if (unassigned.length > 0) actions.push({ text: `Назначить ответственных для ${unassigned.length} задач.`, tasks: unassigned });
+  if (noDeadline.length > 0) actions.push({ text: `Добавить дедлайны для ${noDeadline.length} задач.`, tasks: noDeadline });
+  if (overloaded.length > 0) actions.push({ text: `Снять перегруз с: ${overloaded.map((item) => memberName(item.member)).join(', ')}.`, tasks: [] });
+  if (highPriority.length > 0) actions.push({ text: 'Проверить критичные и важные задачи отдельно.', tasks: highPriority });
+  if (weakTasks.length > 0) actions.push({ text: 'Уточнить формулировки задач без описания или структуры.', tasks: weakTasks });
+  return actions.slice(0, 5).length > 0 ? actions.slice(0, 5) : [{ text: 'Поддерживать текущий ритм и обновлять статусы задач в конце дня.', tasks: [] }];
 }
 
 function buildChangeSummary({
@@ -4038,32 +5348,60 @@ function buildTaskQualityReport(tasks: Task[], now: number) {
   };
 }
 
+function formatDateInput(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateInput(value?: string, endOfDay = false) {
+  if (!value) return undefined;
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return undefined;
+  return new Date(year, month - 1, day, endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0).getTime();
+}
+
 function buildMeetingPlan({
   tasks,
+  columns,
   members,
   overdue,
   dueSoon,
   overloaded,
   events,
   now,
+  periodStart,
+  periodEnd,
 }: {
   tasks: Task[];
+  columns: Column[];
   members: ProjectMember[];
   overdue: Task[];
   dueSoon: Task[];
   overloaded: Array<{ member: ProjectMember; total: number }>;
   events: ActivityEvent[];
   now: number;
+  periodStart?: string;
+  periodEnd?: string;
 }) {
-  const since = now - 7 * 24 * 3600000;
-  const completedIds = new Set(
-    events
-      .filter((event) => new Date(event.createdAt).getTime() >= since)
-      .filter((event) => event.type === 'task_complete')
-      .map((event) => Number(event.entityId)),
-  );
-  const completed = tasks.filter((task) => task.isArchived || completedIds.has(task.id)).slice(0, 12);
-  const inProgress = tasks.filter((task) => !task.isArchived).slice(0, 12);
+  const since = parseDateInput(periodStart) ?? now - 7 * 24 * 3600000;
+  const until = parseDateInput(periodEnd, true) ?? now;
+  const lower = Math.min(since, until);
+  const upper = Math.max(since, until);
+  const inPeriod = (value: number) => Number.isFinite(value) && value >= lower && value <= upper;
+  const completed = tasks.filter((task) => {
+    const completedColumn = isTaskCompletedForAdmin(task, columns);
+    if (!completedColumn && !task.isArchived) return false;
+    const hasCompletionEvent = events.some((event) => {
+      if (!inPeriod(new Date(event.createdAt).getTime())) return false;
+      if (String(event.entityId) !== String(task.id)) return false;
+      return event.type === 'task_complete' || (event.type === 'task_move' && completedColumn);
+    });
+    const completedAt = task.isArchived ? task.archivedAt : task.updatedAt;
+    return hasCompletionEvent || (completedAt ? inPeriod(new Date(completedAt).getTime()) : false);
+  }).slice(0, 12);
+  const inProgress = tasks.filter((task) => !task.isArchived && !isTaskCompletedForAdmin(task, columns)).slice(0, 12);
   const blocked = uniqueTasks([...overdue, ...tasks.filter((task) => !task.assigneeId && !task.assignee?.id)]).slice(0, 12);
   const weekDeadlines = tasks
     .filter((task) => {
