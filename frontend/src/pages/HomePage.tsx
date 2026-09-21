@@ -144,7 +144,7 @@ export default function HomePage() {
             {projectsLoading ? (
               <DashboardLoading label="Загружаем проекты" />
             ) : visibleProjects.length > 0 ? (
-              <div className="-mx-4 flex snap-x gap-3 overflow-x-auto px-4 pb-1 sm:-mx-6 sm:px-6 lg:-mx-7 lg:px-7">
+              <div className="home-project-strip flex snap-x gap-3 overflow-x-auto pb-1">
                 {visibleProjects.slice(0, 8).map((project) => <HomeProjectCard key={project.id} project={project} />)}
               </div>
             ) : (

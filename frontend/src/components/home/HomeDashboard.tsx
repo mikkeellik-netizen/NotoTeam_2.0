@@ -52,21 +52,21 @@ export function QuickActions({ actions }: { actions: QuickAction[] }) {
   };
 
   return (
-    <section className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-label="Быстрые действия">
+    <section className="grid grid-cols-4 gap-2 sm:gap-3" aria-label="Быстрые действия">
       {actions.map((action) => (
         <button
           key={action.id}
           type="button"
           onClick={action.onClick}
           className={cn(
-            'group flex min-h-28 flex-col justify-between rounded-[var(--nt-home-radius-md)] border p-3.5 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:min-h-32',
+            'group flex min-h-28 min-w-0 flex-col items-center justify-between rounded-[var(--nt-home-radius-md)] border p-2 text-center shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:min-h-32 sm:p-3',
             toneClass[action.tone],
           )}
         >
           <span className="flex h-9 w-9 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5 [&>svg]:h-5 [&>svg]:w-5">
             {action.icon}
           </span>
-          <span className="mt-3 text-sm font-bold leading-5 sm:text-[15px]">{action.label}</span>
+          <span className="mt-2 w-full text-[11px] font-bold leading-[0.95rem] sm:text-sm sm:leading-5">{action.label}</span>
         </button>
       ))}
     </section>
@@ -98,7 +98,7 @@ export function HomeProjectCard({ project }: { project: Project }) {
     <button
       type="button"
       onClick={() => navigate(`/project/${project.id}/workspace`)}
-      className="group relative isolate flex min-h-48 w-[min(70vw,15.5rem)] shrink-0 snap-start overflow-hidden rounded-[var(--nt-home-radius-md)] border border-white/10 bg-[var(--nt-home-surface)] p-3.5 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,border-color] hover:-translate-y-0.5 hover:border-white/25 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]"
+      className="group relative isolate flex min-h-44 w-[9.5rem] shrink-0 snap-start overflow-hidden rounded-[var(--nt-home-radius-md)] border border-white/10 bg-[var(--nt-home-surface)] p-3 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,border-color] hover:-translate-y-0.5 hover:border-white/25 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:min-h-48 sm:w-[12.5rem] sm:p-3.5 lg:w-[15.5rem]"
       aria-label={`Открыть проект «${project.title}»`}
     >
       <span
@@ -106,12 +106,12 @@ export function HomeProjectCard({ project }: { project: Project }) {
         style={{ backgroundImage: `url(${heroImage})`, backgroundPosition }}
       />
       <span className="absolute inset-0 -z-10 bg-[linear-gradient(180deg,transparent_15%,rgba(11,18,25,0.72)_45%,rgba(18,27,35,1)_68%)]" />
-      <span className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-black/35 text-white" aria-hidden="true">
-        <MoreVertical size={18} />
+      <span className="absolute right-2.5 top-2.5 flex h-7 w-7 items-center justify-center rounded-full bg-black/35 text-white sm:right-3 sm:top-3 sm:h-8 sm:w-8" aria-hidden="true">
+        <MoreVertical size={17} />
       </span>
       <span className="mt-auto block w-full">
-        <span className="block line-clamp-2 text-base font-bold leading-5 text-white">{project.title}</span>
-        <span className="mt-1 block text-sm text-[var(--nt-home-text-muted)]">
+        <span className="block line-clamp-2 text-sm font-bold leading-4 text-white sm:text-base sm:leading-5">{project.title}</span>
+        <span className="mt-1 block truncate text-xs text-[var(--nt-home-text-muted)] sm:text-sm">
           {formatTaskCount(taskCount)} · {formatMemberCount(members.length)}
         </span>
         <span className="mt-3 flex -space-x-2" aria-label={`Участников: ${members.length}`}>
@@ -120,12 +120,12 @@ export function HomeProjectCard({ project }: { project: Project }) {
               key={member.id}
               user={member.user}
               label={projectMemberLabel(member)}
-              size="sm"
-              className="border-2 border-[var(--nt-home-surface)]"
+              size="xs"
+              className="border-2 border-[var(--nt-home-surface)] sm:h-9 sm:w-9 sm:text-sm"
             />
           ))}
           {members.length > 4 && (
-            <span className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-[var(--nt-home-surface)] bg-[var(--nt-home-pill)] text-xs font-bold text-white">
+            <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--nt-home-surface)] bg-[var(--nt-home-pill)] text-[10px] font-bold text-white sm:h-9 sm:w-9 sm:text-xs">
               +{members.length - 4}
             </span>
           )}
