@@ -80,8 +80,8 @@ export default function HomePage() {
 
   return (
     <div className="h-full overflow-y-auto bg-[var(--nt-color-canvas)] text-white">
-      <div className="mx-auto w-full max-w-[76rem] px-4 pb-8 pt-4 sm:px-6 sm:pt-6 lg:px-8">
-        <header className="mb-5 flex items-center gap-3">
+      <div className="mx-auto w-full max-w-[68rem] px-4 pb-6 pt-3 sm:px-6 sm:pt-4 lg:px-7">
+        <header className="mb-4 flex items-center gap-3">
           <button type="button" onClick={() => navigate('/')} className="flex min-w-0 items-center gap-3 text-left" aria-label="Главная NotoTime">
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[var(--nt-home-radius-md)] bg-[var(--nt-home-accent)] text-2xl font-black text-[var(--nt-home-accent-ink)] shadow-[var(--nt-shadow-sm)]">N</span>
             <span className="min-w-0">
@@ -129,7 +129,7 @@ export default function HomePage() {
           />
         )}
 
-        <div className="space-y-6">
+        <div className="space-y-4 sm:space-y-5">
           <GreetingHero firstName={firstName} />
 
           <QuickActions actions={[
@@ -139,12 +139,12 @@ export default function HomePage() {
             { id: 'event', label: 'Событие', icon: <CalendarDays size={25} />, tone: 'green', onClick: () => navigate('/my-calendar?create=1') },
           ]} />
 
-          <section className="space-y-3">
+          <section className="space-y-2.5">
             <SectionHeader title="Мои проекты" actionLabel="Все проекты" onAction={() => navigate('/projects')} />
             {projectsLoading ? (
               <DashboardLoading label="Загружаем проекты" />
             ) : visibleProjects.length > 0 ? (
-              <div className="-mx-4 flex snap-x gap-3 overflow-x-auto px-4 pb-2 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+              <div className="-mx-4 flex snap-x gap-3 overflow-x-auto px-4 pb-1 sm:-mx-6 sm:px-6 lg:-mx-7 lg:px-7">
                 {visibleProjects.slice(0, 8).map((project) => <HomeProjectCard key={project.id} project={project} />)}
               </div>
             ) : (
@@ -156,7 +156,7 @@ export default function HomePage() {
             )}
           </section>
 
-          <section className="space-y-3">
+          <section className="space-y-2.5">
             <SectionHeader title="Мои задачи" actionLabel="Все задачи" onAction={() => navigate('/my-tasks')} />
             <TaskFilters
               active={taskFilter}
@@ -261,12 +261,12 @@ function QuickTaskModal({ open, projects, currentUserId, onClose, onCreated }: {
 }
 
 function DashboardLoading({ label }: { label: string }) {
-  return <div className="flex min-h-32 items-center justify-center rounded-[var(--nt-home-radius-xl)] border border-white/8 bg-[var(--nt-home-surface)] text-sm text-[var(--nt-home-text-muted)]">{label}...</div>;
+  return <div className="flex min-h-24 items-center justify-center rounded-[var(--nt-home-radius-lg)] border border-white/8 bg-[var(--nt-home-surface)] text-sm text-[var(--nt-home-text-muted)]">{label}...</div>;
 }
 
 function DashboardEmpty({ title, actionLabel, onAction }: { title: string; actionLabel: string; onAction: () => void }) {
   return (
-    <div className="rounded-[var(--nt-home-radius-xl)] border border-white/8 bg-[var(--nt-home-surface)] px-5 py-8 text-center">
+    <div className="rounded-[var(--nt-home-radius-lg)] border border-white/8 bg-[var(--nt-home-surface)] px-5 py-6 text-center">
       <p className="text-sm text-[var(--nt-home-text-muted)]">{title}</p>
       <Button variant="secondary" className="mt-4" onClick={onAction}>{actionLabel}</Button>
     </div>

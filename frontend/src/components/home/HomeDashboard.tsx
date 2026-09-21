@@ -12,7 +12,7 @@ export function GreetingHero({ firstName }: { firstName: string }) {
 
   return (
     <section
-      className="relative isolate min-h-[18rem] overflow-hidden rounded-[var(--nt-home-radius-xl)] border border-white/10 bg-cover bg-center px-5 py-6 shadow-[var(--nt-home-shadow)] sm:min-h-[21rem] sm:px-7 sm:py-8"
+      className="relative isolate min-h-[14rem] overflow-hidden rounded-[var(--nt-home-radius-lg)] border border-white/10 bg-cover bg-center px-5 py-5 shadow-[var(--nt-home-shadow)] sm:min-h-[17rem] sm:px-6 sm:py-6"
       style={{ backgroundImage: `url(${heroImage})` }}
       aria-label={`${greeting}, ${firstName}`}
     >
@@ -20,15 +20,15 @@ export function GreetingHero({ firstName }: { firstName: string }) {
       <div className="absolute inset-x-0 bottom-0 -z-10 h-2/3 bg-[linear-gradient(0deg,rgba(4,10,16,0.9)_0%,transparent_100%)]" />
       <div className="flex h-full max-w-[34rem] flex-col justify-end">
         <p className="text-xs font-semibold uppercase tracking-[0.22em] text-white/70">{greeting},</p>
-        <h1 className="mt-2 font-[var(--nt-font-display)] text-[clamp(2.6rem,8vw,4.8rem)] font-semibold leading-none text-white">
+        <h1 className="mt-1.5 font-[var(--nt-font-display)] text-[clamp(2.25rem,7vw,4rem)] font-semibold leading-none text-white">
           {firstName}!
         </h1>
-        <blockquote className="mt-5 max-w-[22rem] text-base font-medium leading-6 text-white/78 sm:text-lg">
+        <blockquote className="mt-3.5 max-w-[22rem] text-sm font-medium leading-5 text-white/78 sm:text-base sm:leading-6">
           «Всё должно быть благопристойно и чинно»
           <footer className="mt-1 text-sm not-italic text-white/55">1 Кор. 14:40</footer>
         </blockquote>
       </div>
-      <p className="absolute bottom-7 right-6 hidden max-w-40 rotate-[-5deg] text-right font-[var(--nt-font-display)] text-xl italic leading-6 text-[var(--nt-home-accent)] sm:block">
+      <p className="absolute bottom-5 right-5 hidden max-w-36 rotate-[-5deg] text-right font-[var(--nt-font-display)] text-lg italic leading-5 text-[var(--nt-home-accent)] sm:block">
         Делать значимое
       </p>
     </section>
@@ -59,14 +59,14 @@ export function QuickActions({ actions }: { actions: QuickAction[] }) {
           type="button"
           onClick={action.onClick}
           className={cn(
-            'group flex min-h-32 flex-col justify-between rounded-[var(--nt-home-radius-md)] border p-4 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:min-h-40',
+            'group flex min-h-28 flex-col justify-between rounded-[var(--nt-home-radius-md)] border p-3.5 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:min-h-32',
             toneClass[action.tone],
           )}
         >
-          <span className="flex h-11 w-11 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5">
+          <span className="flex h-9 w-9 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5 [&>svg]:h-5 [&>svg]:w-5">
             {action.icon}
           </span>
-          <span className="mt-4 text-base font-bold leading-5">{action.label}</span>
+          <span className="mt-3 text-sm font-bold leading-5 sm:text-[15px]">{action.label}</span>
         </button>
       ))}
     </section>
@@ -76,7 +76,7 @@ export function QuickActions({ actions }: { actions: QuickAction[] }) {
 export function SectionHeader({ title, actionLabel, onAction }: { title: string; actionLabel: string; onAction: () => void }) {
   return (
     <div className="flex items-center justify-between gap-4">
-      <h2 className="text-2xl font-extrabold text-white">{title}</h2>
+      <h2 className="text-xl font-extrabold text-white sm:text-[1.35rem]">{title}</h2>
       <button
         type="button"
         onClick={onAction}
@@ -98,11 +98,11 @@ export function HomeProjectCard({ project }: { project: Project }) {
     <button
       type="button"
       onClick={() => navigate(`/project/${project.id}/workspace`)}
-      className="group relative isolate flex min-h-60 w-[min(76vw,18rem)] shrink-0 snap-start overflow-hidden rounded-[var(--nt-home-radius-lg)] border border-white/10 bg-[var(--nt-home-surface)] p-4 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,border-color] hover:-translate-y-0.5 hover:border-white/25 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]"
+      className="group relative isolate flex min-h-48 w-[min(70vw,15.5rem)] shrink-0 snap-start overflow-hidden rounded-[var(--nt-home-radius-md)] border border-white/10 bg-[var(--nt-home-surface)] p-3.5 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,border-color] hover:-translate-y-0.5 hover:border-white/25 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]"
       aria-label={`Открыть проект «${project.title}»`}
     >
       <span
-        className="absolute inset-x-0 top-0 -z-20 h-[48%] bg-cover opacity-90 transition-transform duration-300 group-hover:scale-105"
+        className="absolute inset-x-0 top-0 -z-20 h-[46%] bg-cover opacity-90 transition-transform duration-300 group-hover:scale-105"
         style={{ backgroundImage: `url(${heroImage})`, backgroundPosition }}
       />
       <span className="absolute inset-0 -z-10 bg-[linear-gradient(180deg,transparent_15%,rgba(11,18,25,0.72)_45%,rgba(18,27,35,1)_68%)]" />
@@ -110,11 +110,11 @@ export function HomeProjectCard({ project }: { project: Project }) {
         <MoreVertical size={18} />
       </span>
       <span className="mt-auto block w-full">
-        <span className="block line-clamp-2 text-lg font-bold leading-6 text-white">{project.title}</span>
+        <span className="block line-clamp-2 text-base font-bold leading-5 text-white">{project.title}</span>
         <span className="mt-1 block text-sm text-[var(--nt-home-text-muted)]">
           {formatTaskCount(taskCount)} · {formatMemberCount(members.length)}
         </span>
-        <span className="mt-4 flex -space-x-2" aria-label={`Участников: ${members.length}`}>
+        <span className="mt-3 flex -space-x-2" aria-label={`Участников: ${members.length}`}>
           {members.slice(0, 4).map((member) => (
             <UserAvatarImage
               key={member.id}
@@ -183,26 +183,26 @@ export function TaskFilters({ active, counts, onChange }: {
 export function HomeTaskList({ tasks, onOpen }: { tasks: Task[]; onOpen: (task: Task) => void }) {
   if (tasks.length === 0) {
     return (
-      <div className="rounded-[var(--nt-home-radius-xl)] border border-white/8 bg-[var(--nt-home-surface)] px-5 py-10 text-center text-sm text-[var(--nt-home-text-muted)]">
+      <div className="rounded-[var(--nt-home-radius-lg)] border border-white/8 bg-[var(--nt-home-surface)] px-5 py-7 text-center text-sm text-[var(--nt-home-text-muted)]">
         В этом разделе задач нет
       </div>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-[var(--nt-home-radius-xl)] border border-white/8 bg-[var(--nt-home-surface)]">
+    <div className="overflow-hidden rounded-[var(--nt-home-radius-lg)] border border-white/8 bg-[var(--nt-home-surface)]">
       {tasks.slice(0, 5).map((task, index) => (
         <button
           key={task.id}
           type="button"
           onClick={() => onOpen(task)}
           className={cn(
-            'grid min-h-[4.5rem] w-full grid-cols-[2.25rem_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:grid-cols-[2.25rem_minmax(0,1fr)_auto_auto]',
+            'grid min-h-[3.75rem] w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:grid-cols-[2rem_minmax(0,1fr)_auto_auto]',
             index > 0 && 'border-t border-white/8',
           )}
         >
           <span className={cn(
-            'flex h-7 w-7 items-center justify-center rounded-full border-2',
+            'flex h-6 w-6 items-center justify-center rounded-full border-2',
             task.completedAt
               ? 'border-[var(--nt-home-success)] bg-[var(--nt-home-success)] text-[#102018]'
               : 'border-[var(--nt-home-text-muted)] text-transparent',
