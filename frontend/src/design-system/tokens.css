@@ -17,6 +17,10 @@
   --nt-color-warning-soft: color-mix(in srgb, var(--nt-color-warning) 14%, var(--nt-color-canvas));
   --nt-color-danger: #d14343;
   --nt-color-danger-soft: color-mix(in srgb, var(--nt-color-danger) 13%, var(--nt-color-canvas));
+  --nt-color-project-blue: #3478f6;
+  --nt-color-project-green: #16845b;
+  --nt-color-project-violet: #8a5bd3;
+  --nt-color-project-amber: #b96b12;
 
   --nt-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --nt-font-display: Georgia, "Times New Roman", serif;

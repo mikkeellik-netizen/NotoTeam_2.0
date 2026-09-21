@@ -1,11 +1,46 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  FolderKanban,
+  KeyRound,
+  ListChecks,
+  LoaderCircle,
+  Plus,
+  Search,
+  ShieldCheck,
+  Users,
+} from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsApi } from '../api/projects';
 import { systemApi } from '../api/system';
 import UserAvatarImage from '../components/UserAvatarImage';
+import { Button, IconButton, Modal, Surface, TextArea, TextField } from '../components/ui';
 import { useAuthStore } from '../store/authStore';
 import { useProjectStore } from '../store/projectStore';
 import type { Project, ProjectMember } from '../types';
+
+type ProjectWithStats = Project & { overdueCount?: number };
+
+const PROJECT_ACCENTS = [
+  {
+    icon: 'text-[var(--nt-color-project-blue)]',
+    background: 'bg-[color-mix(in_srgb,var(--nt-color-project-blue)_16%,var(--nt-color-surface))]',
+  },
+  {
+    icon: 'text-[var(--nt-color-project-green)]',
+    background: 'bg-[color-mix(in_srgb,var(--nt-color-project-green)_16%,var(--nt-color-surface))]',
+  },
+  {
+    icon: 'text-[var(--nt-color-project-violet)]',
+    background: 'bg-[color-mix(in_srgb,var(--nt-color-project-violet)_16%,var(--nt-color-surface))]',
+  },
+  {
+    icon: 'text-[var(--nt-color-project-amber)]',
+    background: 'bg-[color-mix(in_srgb,var(--nt-color-project-amber)_16%,var(--nt-color-surface))]',
+  },
+] as const;
 
 export default function ProjectsPage() {
   const navigate = useNavigate();
@@ -16,11 +51,13 @@ export default function ProjectsPage() {
   const [showJoin, setShowJoin] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [createError, setCreateError] = useState('');
   const [joinCode, setJoinCode] = useState('');
   const [joinStatus, setJoinStatus] = useState('');
   const [joinSubmitted, setJoinSubmitted] = useState(false);
   const [creating, setCreating] = useState(false);
   const [isSystemOwner, setIsSystemOwner] = useState(false);
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     fetchProjects();
@@ -40,15 +77,38 @@ export default function ProjectsPage() {
     setShowJoin(true);
   }, [searchParams]);
 
+  const visibleProjects = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase('ru');
+    if (!normalizedQuery) return projects;
+    return projects.filter((project) => (
+      project.title.toLocaleLowerCase('ru').includes(normalizedQuery)
+      || project.description?.toLocaleLowerCase('ru').includes(normalizedQuery)
+    ));
+  }, [projects, query]);
+
+  const openCreate = () => {
+    setCreateError('');
+    setShowCreate(true);
+  };
+
+  const openJoin = () => {
+    setJoinStatus('');
+    setJoinSubmitted(false);
+    setShowJoin(true);
+  };
+
   const handleCreate = async () => {
     if (!title.trim()) return;
     setCreating(true);
+    setCreateError('');
     try {
-      const project = await createProject({ title: title.trim(), description });
+      const project = await createProject({ title: title.trim(), description: description.trim() });
       setShowCreate(false);
       setTitle('');
       setDescription('');
       navigate(`/project/${project.id}/workspace`);
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : 'Не удалось создать проект.');
     } finally {
       setCreating(false);
     }
@@ -65,7 +125,7 @@ export default function ProjectsPage() {
         user.id,
       );
       setJoinCode('');
-      setJoinStatus('Заявка отправлена владельцу проекта.');
+      setJoinStatus('Владелец проекта получил заявку.');
       setJoinSubmitted(true);
       await fetchProjects();
     } catch (error) {
@@ -75,125 +135,149 @@ export default function ProjectsPage() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-[var(--tg-theme-bg-color)]">
-      <div className="flex items-center justify-between border-b border-[var(--tg-theme-secondary-bg-color)] px-4 py-4">
-        <div>
-          <h1 className="text-xl font-bold text-[var(--tg-theme-text-color)]">Мои проекты</h1>
-          {user && (
-            <p className="mt-0.5 text-xs text-[var(--tg-theme-hint-color)]">
-              @{user.username ?? user.telegramId}
+    <div className="h-full overflow-y-auto bg-[var(--nt-color-canvas)] text-[var(--nt-color-text)]">
+      <div className="mx-auto w-full max-w-[var(--nt-content-lg)] px-4 py-5 sm:px-6 sm:py-6">
+        <header className="flex flex-col gap-4 border-b border-[var(--nt-color-border)] pb-5 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-[var(--nt-color-text-muted)]">Рабочее пространство</p>
+            <h1 className="mt-1 text-2xl font-bold">Мои проекты</h1>
+            <p className="mt-1 text-sm text-[var(--nt-color-text-muted)]">
+              {projects.length > 0 ? `${formatProjectCount(projects.length)} в вашем доступе` : 'Создайте первый проект или подключитесь по коду'}
             </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {isSystemOwner && (
-            <button
-              onClick={() => navigate('/system-admin')}
-              className="h-8 w-8 rounded-full bg-[var(--tg-theme-secondary-bg-color)] text-[var(--tg-theme-link-color)]"
-              aria-label="Системная панель"
-            >
-              ◉
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
-        {isLoading ? (
-          <div className="flex justify-center py-12">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--tg-theme-button-color)] border-t-transparent" />
           </div>
-        ) : projects.length === 0 ? (
-          <EmptyProjectsState onCreate={() => setShowCreate(true)} onJoin={() => setShowJoin(true)} />
-        ) : (
-          projects.map((project) => (
-            <ProjectCard
-              key={project.id}
-              project={project}
-              onClick={() => navigate(`/project/${project.id}/workspace`)}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" startIcon={<KeyRound size={17} />} onClick={openJoin}>
+              По коду
+            </Button>
+            <Button startIcon={<Plus size={18} />} onClick={openCreate}>
+              Новый проект
+            </Button>
+            {isSystemOwner && (
+              <IconButton
+                variant="secondary"
+                aria-label="Открыть системную панель"
+                title="Системная панель"
+                onClick={() => navigate('/system-admin')}
+              >
+                <ShieldCheck size={19} />
+              </IconButton>
+            )}
+          </div>
+        </header>
+
+        {projects.length > 0 && (
+          <div className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <TextField
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Найти проект"
+              aria-label="Поиск проектов"
+              startAdornment={<Search size={16} />}
+              containerClassName="w-full sm:max-w-sm"
             />
-          ))
+            <p className="shrink-0 text-xs text-[var(--nt-color-text-muted)]" aria-live="polite">
+              {query.trim() ? `Найдено: ${visibleProjects.length}` : `Всего: ${projects.length}`}
+            </p>
+          </div>
         )}
+
+        <main className={projects.length > 0 ? '' : 'pt-5'}>
+          {isLoading ? (
+            <LoadingProjectsState />
+          ) : projects.length === 0 ? (
+            <EmptyProjectsState onCreate={openCreate} onJoin={openJoin} />
+          ) : visibleProjects.length === 0 ? (
+            <NoSearchResults query={query} onReset={() => setQuery('')} />
+          ) : (
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 18rem), 1fr))' }}
+            >
+              {visibleProjects.map((project) => (
+                <ProjectCard
+                  key={project.id}
+                  project={project}
+                  onClick={() => navigate(`/project/${project.id}/workspace`)}
+                />
+              ))}
+            </div>
+          )}
+        </main>
       </div>
 
-      <div className="px-4 pb-6 pt-2">
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            onClick={() => setShowCreate(true)}
-            className="rounded-[12px] bg-[var(--tg-theme-button-color)] py-3.5 text-base font-semibold text-[var(--tg-theme-button-text-color)]"
-          >
-            + Создать
-          </button>
-          <button
-            onClick={() => setShowJoin(true)}
-            className="rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3.5 text-base font-semibold text-[var(--tg-theme-text-color)]"
-          >
-            Код проекта
-          </button>
-        </div>
-      </div>
+      <ProjectCreateModal
+        open={showCreate}
+        title={title}
+        description={description}
+        error={createError}
+        creating={creating}
+        onTitleChange={setTitle}
+        onDescriptionChange={setDescription}
+        onCancel={() => setShowCreate(false)}
+        onCreate={handleCreate}
+      />
 
-      {showCreate && (
-        <ProjectCreateSheet
-          title={title}
-          description={description}
-          creating={creating}
-          onTitleChange={setTitle}
-          onDescriptionChange={setDescription}
-          onCancel={() => setShowCreate(false)}
-          onCreate={handleCreate}
-        />
-      )}
+      <JoinProjectModal
+        open={showJoin}
+        code={joinCode}
+        status={joinStatus}
+        submitted={joinSubmitted}
+        onCodeChange={setJoinCode}
+        onCancel={() => {
+          setShowJoin(false);
+          setJoinSubmitted(false);
+        }}
+        onSubmit={handleJoin}
+        onRefresh={fetchProjects}
+      />
+    </div>
+  );
+}
 
-      {showJoin && (
-        <JoinProjectSheet
-          code={joinCode}
-          status={joinStatus}
-          submitted={joinSubmitted}
-          onCodeChange={setJoinCode}
-          onCancel={() => {
-            setShowJoin(false);
-            setJoinSubmitted(false);
-          }}
-          onSubmit={handleJoin}
-          onRefresh={fetchProjects}
-        />
-      )}
+function LoadingProjectsState() {
+  return (
+    <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-[var(--nt-color-text-muted)]" role="status">
+      <LoaderCircle className="animate-spin text-[var(--nt-color-accent)]" size={28} />
+      <p className="text-sm">Загружаем проекты...</p>
     </div>
   );
 }
 
 function EmptyProjectsState({ onCreate, onJoin }: { onCreate: () => void; onJoin: () => void }) {
   return (
-    <div className="py-12">
-      <div className="text-center">
-        <div className="mb-3 text-4xl">📋</div>
-        <p className="text-sm text-[var(--tg-theme-hint-color)]">Проектов пока нет</p>
-        <p className="mt-1 text-xs text-[var(--tg-theme-hint-color)]">
-          Создай личный проект или подключись к командному по коду
-        </p>
+    <Surface tone="raised" padding="lg" className="mx-auto max-w-xl text-center">
+      <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-[var(--nt-radius-control)] bg-[var(--nt-color-success-soft)] text-[var(--nt-color-success)]">
+        <FolderKanban size={25} aria-hidden="true" />
+      </span>
+      <h2 className="mt-4 text-lg font-bold">Начните с первого проекта</h2>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[var(--nt-color-text-muted)]">
+        Создайте собственное рабочее пространство или подключитесь к существующему проекту по коду приглашения.
+      </p>
+      <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">
+        <Button startIcon={<Plus size={18} />} onClick={onCreate}>Создать проект</Button>
+        <Button variant="secondary" startIcon={<KeyRound size={17} />} onClick={onJoin}>Ввести код</Button>
       </div>
-      <div className="mt-6 space-y-3">
-        <button
-          onClick={onCreate}
-          className="w-full rounded-[12px] bg-[var(--tg-theme-button-color)] py-3.5 font-semibold text-[var(--tg-theme-button-text-color)]"
-        >
-          + Создать проект
-        </button>
-        <button
-          onClick={onJoin}
-          className="w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3.5 font-semibold text-[var(--tg-theme-text-color)]"
-        >
-          Ввести код проекта
-        </button>
-      </div>
-    </div>
+    </Surface>
   );
 }
 
-function ProjectCreateSheet(props: {
+function NoSearchResults({ query, onReset }: { query: string; onReset: () => void }) {
+  return (
+    <Surface tone="muted" padding="lg" className="text-center">
+      <Search className="mx-auto text-[var(--nt-color-text-muted)]" size={24} aria-hidden="true" />
+      <h2 className="mt-3 text-base font-bold">Проекты не найдены</h2>
+      <p className="mt-1 text-sm text-[var(--nt-color-text-muted)]">По запросу «{query.trim()}» ничего нет.</p>
+      <Button variant="ghost" className="mt-3" onClick={onReset}>Сбросить поиск</Button>
+    </Surface>
+  );
+}
+
+function ProjectCreateModal(props: {
+  open: boolean;
   title: string;
   description: string;
+  error: string;
   creating: boolean;
   onTitleChange: (value: string) => void;
   onDescriptionChange: (value: string) => void;
@@ -201,46 +285,48 @@ function ProjectCreateSheet(props: {
   onCreate: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end bg-black/50">
-      <div className="w-full animate-slide-up rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5">
-        <h2 className="mb-4 text-lg font-bold text-[var(--tg-theme-text-color)]">Новый проект</h2>
-        <input
+    <Modal
+      open={props.open}
+      onClose={props.onCancel}
+      title="Новый проект"
+      description="Название можно изменить позднее в настройках проекта."
+      size="sm"
+      footer={(
+        <>
+          <Button variant="secondary" onClick={props.onCancel}>Отмена</Button>
+          <Button type="submit" form="create-project-form" loading={props.creating} disabled={!props.title.trim()}>
+            Создать
+          </Button>
+        </>
+      )}
+    >
+      <form id="create-project-form" className="space-y-4" onSubmit={(event) => { event.preventDefault(); props.onCreate(); }}>
+        <TextField
           autoFocus
+          label="Название"
           value={props.title}
           onChange={(event) => props.onTitleChange(event.target.value)}
-          placeholder="Название проекта"
-          className="mb-3 w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-3 text-base text-[var(--tg-theme-text-color)] outline-none placeholder:text-[var(--tg-theme-hint-color)]"
+          placeholder="Например, запуск нового продукта"
           maxLength={100}
+          required
         />
-        <textarea
+        <TextArea
+          label="Описание"
+          hint="Необязательно, до 500 символов"
           value={props.description}
           onChange={(event) => props.onDescriptionChange(event.target.value)}
-          placeholder="Описание, если нужно"
-          rows={3}
-          className="mb-4 w-full resize-none rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-3 text-base text-[var(--tg-theme-text-color)] outline-none placeholder:text-[var(--tg-theme-hint-color)]"
+          placeholder="Коротко о цели проекта"
+          rows={4}
           maxLength={500}
         />
-        <div className="flex gap-3">
-          <button
-            onClick={props.onCancel}
-            className="flex-1 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3 font-medium text-[var(--tg-theme-text-color)]"
-          >
-            Отмена
-          </button>
-          <button
-            onClick={props.onCreate}
-            disabled={!props.title.trim() || props.creating}
-            className="flex-1 rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-50"
-          >
-            {props.creating ? 'Создаю...' : 'Создать'}
-          </button>
-        </div>
-      </div>
-    </div>
+        {props.error && <p className="text-sm text-[var(--nt-color-danger)]" role="alert">{props.error}</p>}
+      </form>
+    </Modal>
   );
 }
 
-function JoinProjectSheet(props: {
+function JoinProjectModal(props: {
+  open: boolean;
   code: string;
   status: string;
   submitted: boolean;
@@ -250,114 +336,121 @@ function JoinProjectSheet(props: {
   onRefresh: () => Promise<void>;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end bg-black/50">
-      <div className="w-full animate-slide-up rounded-t-2xl bg-[var(--tg-theme-bg-color)] p-5">
-        <h2 className="mb-4 text-lg font-bold text-[var(--tg-theme-text-color)]">
-          {props.submitted ? 'Заявка отправлена' : 'Подключиться к проекту'}
-        </h2>
-        {props.submitted ? (
-          <div className="mb-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4">
-            <p className="text-sm text-[var(--tg-theme-text-color)]">
-              Владелец проекта получил заявку. Когда он подтвердит доступ, проект появится в списке.
-            </p>
-          </div>
-        ) : (
-          <input
+    <Modal
+      open={props.open}
+      onClose={props.onCancel}
+      title={props.submitted ? 'Заявка отправлена' : 'Подключиться к проекту'}
+      description={props.submitted ? undefined : 'Введите код, который вы получили от владельца проекта.'}
+      size="sm"
+      footer={props.submitted ? (
+        <>
+          <Button variant="secondary" onClick={props.onCancel}>Закрыть</Button>
+          <Button onClick={props.onRefresh}>Обновить проекты</Button>
+        </>
+      ) : (
+        <>
+          <Button variant="secondary" onClick={props.onCancel}>Отмена</Button>
+          <Button type="submit" form="join-project-form" disabled={!props.code.trim()}>Отправить заявку</Button>
+        </>
+      )}
+    >
+      {props.submitted ? (
+        <div className="flex gap-3">
+          <CheckCircle2 className="mt-0.5 shrink-0 text-[var(--nt-color-success)]" size={22} aria-hidden="true" />
+          <p className="text-sm leading-6 text-[var(--nt-color-text-muted)]">
+            {props.status || 'После подтверждения владельцем проект появится в вашем списке.'}
+          </p>
+        </div>
+      ) : (
+        <form id="join-project-form" className="space-y-3" onSubmit={(event) => { event.preventDefault(); props.onSubmit(); }}>
+          <TextField
             autoFocus
+            label="Код проекта"
             value={props.code}
             onChange={(event) => props.onCodeChange(event.target.value.toUpperCase())}
-            placeholder="Код проекта"
-            className="mb-3 w-full rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] px-4 py-3 text-base text-[var(--tg-theme-text-color)] outline-none placeholder:text-[var(--tg-theme-hint-color)]"
+            placeholder="Например, P1-8W13TF"
+            autoCapitalize="characters"
+            spellCheck={false}
+            required
           />
-        )}
-        {props.status && <p className="mb-3 text-sm text-[var(--tg-theme-hint-color)]">{props.status}</p>}
-        <div className="flex gap-3">
-          <button
-            onClick={props.onCancel}
-            className="flex-1 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] py-3 font-medium text-[var(--tg-theme-text-color)]"
-          >
-            {props.submitted ? 'Закрыть' : 'Отмена'}
-          </button>
-          {props.submitted ? (
-            <button
-              onClick={props.onRefresh}
-              className="flex-1 rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)]"
-            >
-              Обновить
-            </button>
-          ) : (
-            <button
-              onClick={props.onSubmit}
-              disabled={!props.code.trim()}
-              className="flex-1 rounded-[12px] bg-[var(--tg-theme-button-color)] py-3 font-semibold text-[var(--tg-theme-button-text-color)] disabled:opacity-50"
-            >
-              Отправить заявку
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+          {props.status && <p className="text-sm text-[var(--nt-color-danger)]" role="alert">{props.status}</p>}
+        </form>
+      )}
+    </Modal>
   );
 }
 
-function ProjectCard({ project, onClick }: { project: Project & { overdueCount?: number }; onClick: () => void }) {
+function ProjectCard({ project, onClick }: { project: ProjectWithStats; onClick: () => void }) {
   const members = project.members ?? [];
   const taskCount = project._count?.tasks ?? 0;
-  const overdueCount = (project as any).overdueCount ?? 0;
+  const overdueCount = project.overdueCount ?? 0;
+  const accent = PROJECT_ACCENTS[Math.abs(Number(project.id) || 0) % PROJECT_ACCENTS.length];
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="w-full cursor-pointer rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4 text-left transition-transform active:scale-[0.98]"
+      className="group flex min-h-48 w-full flex-col rounded-[var(--nt-radius-surface)] border border-[var(--nt-color-border)] bg-[var(--nt-color-surface-raised)] p-4 text-left shadow-[var(--nt-shadow-sm)] transition-[border-color,background-color,transform,box-shadow] duration-[var(--nt-motion-fast)] hover:border-[var(--nt-color-border-strong)] hover:bg-[var(--nt-color-surface)] focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.99]"
+      aria-label={`Открыть проект «${project.title}»`}
     >
-      <div className="mb-2 flex items-start justify-between">
-        <h3 className="mr-2 flex-1 text-base font-semibold leading-tight text-[var(--tg-theme-text-color)]">
-          {project.title}
-        </h3>
-        <span className="shrink-0 text-xs text-[var(--tg-theme-hint-color)]">›</span>
+      <div className="flex w-full items-start gap-3">
+        <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--nt-radius-control)] ${accent.background} ${accent.icon}`}>
+          <FolderKanban size={22} aria-hidden="true" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 className="line-clamp-2 text-base font-bold leading-5">{project.title}</h2>
+          <p className="mt-1 line-clamp-2 text-sm leading-5 text-[var(--nt-color-text-muted)]">
+            {project.description?.trim() || 'Рабочее пространство проекта'}
+          </p>
+        </div>
+        <ArrowRight className="mt-1 shrink-0 text-[var(--nt-color-text-muted)] transition-transform group-hover:translate-x-0.5" size={18} aria-hidden="true" />
       </div>
 
-      {project.description && (
-        <p className="mb-3 line-clamp-2 text-sm text-[var(--tg-theme-hint-color)]">
-          {project.description}
-        </p>
-      )}
-
-      <div className="flex items-center gap-3 text-xs">
-        <span className="text-[var(--tg-theme-hint-color)]">📋 {taskCount} задач</span>
+      <div className="mt-auto flex w-full flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--nt-color-border)] pt-4 text-xs text-[var(--nt-color-text-muted)]">
+        <span className="inline-flex items-center gap-1.5">
+          <ListChecks size={15} aria-hidden="true" />
+          {formatTaskCount(taskCount)}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <Users size={15} aria-hidden="true" />
+          {formatMemberCount(members.length)}
+        </span>
         {overdueCount > 0 && (
-          <span className="font-medium text-red-500">🔴 {overdueCount} просрочено</span>
-        )}
-        {members.length > 0 && (
-          <div className="ml-auto flex -space-x-1">
-            {members.slice(0, 4).map((member) => (
-              <UserAvatarImage
-                key={member.id}
-                user={member.user}
-                label={projectMemberLabel(member)}
-                size="xs"
-                className="border-2 border-[var(--tg-theme-secondary-bg-color)]"
-              />
-            ))}
-            {members.length > 4 && (
-              <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--tg-theme-secondary-bg-color)] bg-[var(--tg-theme-hint-color)] text-xs text-white">
-                +{members.length - 4}
-              </div>
-            )}
-          </div>
+          <span className="inline-flex items-center gap-1.5 font-semibold text-[var(--nt-color-danger)]">
+            <AlertTriangle size={15} aria-hidden="true" />
+            {overdueCount} просрочено
+          </span>
         )}
       </div>
+
+      {members.length > 0 && (
+        <div className="mt-3 flex -space-x-1.5" aria-label={`Участников: ${members.length}`}>
+          {members.slice(0, 5).map((member) => (
+            <UserAvatarImage
+              key={member.id}
+              user={member.user}
+              label={projectMemberLabel(member)}
+              size="xs"
+              className="border-2 border-[var(--nt-color-surface-raised)]"
+            />
+          ))}
+          {members.length > 5 && (
+            <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--nt-color-surface-raised)] bg-[var(--nt-color-surface-hover)] text-[10px] font-bold text-[var(--nt-color-text-muted)]">
+              +{members.length - 5}
+            </span>
+          )}
+        </div>
+      )}
     </button>
   );
 }
 
 function getInviteCodeFromParams(searchParams: URLSearchParams) {
   const raw =
-    searchParams.get('join') ??
-    searchParams.get('code') ??
-    searchParams.get('startapp') ??
-    searchParams.get('tgWebAppStartParam');
+    searchParams.get('join')
+    ?? searchParams.get('code')
+    ?? searchParams.get('startapp')
+    ?? searchParams.get('tgWebAppStartParam');
 
   if (!raw) return '';
   return raw.trim().replace(/^join[_-]/i, '').toUpperCase();
@@ -366,9 +459,30 @@ function getInviteCodeFromParams(searchParams: URLSearchParams) {
 function projectMemberLabel(member: ProjectMember) {
   const user = member.user;
   return (
-    [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
-    user?.username ||
-    user?.telegramId ||
-    '?'
+    [user?.firstName, user?.lastName].filter(Boolean).join(' ')
+    || user?.username
+    || user?.telegramId
+    || '?'
   );
+}
+
+function formatProjectCount(count: number) {
+  return `${count} ${pluralize(count, 'проект', 'проекта', 'проектов')}`;
+}
+
+function formatTaskCount(count: number) {
+  return `${count} ${pluralize(count, 'задача', 'задачи', 'задач')}`;
+}
+
+function formatMemberCount(count: number) {
+  return `${count} ${pluralize(count, 'участник', 'участника', 'участников')}`;
+}
+
+function pluralize(count: number, one: string, few: string, many: string) {
+  const mod100 = Math.abs(count) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 >= 11 && mod100 <= 19) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }
