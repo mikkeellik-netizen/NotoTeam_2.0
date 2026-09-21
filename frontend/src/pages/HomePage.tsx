@@ -90,28 +90,30 @@ export default function HomePage() {
             </span>
           </button>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-1.5">
             <IconButton
+              size="sm"
               variant="ghost"
               aria-label={searchOpen ? 'Закрыть поиск' : 'Открыть поиск'}
               title={searchOpen ? 'Закрыть поиск' : 'Поиск'}
-              className="rounded-full border border-white/8 bg-white/8 text-white hover:bg-white/14"
+              className="h-9 min-h-9 w-9 rounded-full border border-white/8 bg-white/8 text-white hover:bg-white/14 [&>span]:overflow-visible [&_svg]:block [&_svg]:h-4 [&_svg]:w-4"
               onClick={() => { setSearchOpen((current) => !current); if (searchOpen) setQuery(''); }}
             >
-              {searchOpen ? <X size={20} /> : <Search size={20} />}
+              {searchOpen ? <X size={16} /> : <Search size={16} />}
             </IconButton>
             <IconButton
+              size="sm"
               variant="ghost"
               aria-label="Открыть экран сегодня"
               title="Сегодня"
-              className="relative rounded-full border border-white/8 bg-white/8 text-white hover:bg-white/14"
+              className="relative h-9 min-h-9 w-9 rounded-full border border-white/8 bg-white/8 text-white hover:bg-white/14 [&>span]:overflow-visible [&_svg]:block [&_svg]:h-4 [&_svg]:w-4"
               onClick={() => navigate('/today')}
             >
-              <Bell size={20} />
-              {alertCount > 0 && <span className="absolute -right-1 -top-1 flex min-h-5 min-w-5 items-center justify-center rounded-full bg-[var(--nt-home-danger)] px-1 text-[10px] font-bold text-white">{Math.min(alertCount, 99)}</span>}
+              <Bell size={16} />
+              {alertCount > 0 && <span className="absolute -right-0.5 -top-0.5 flex min-h-4 min-w-4 items-center justify-center rounded-full bg-[var(--nt-home-danger)] px-1 text-[9px] font-bold text-white">{Math.min(alertCount, 99)}</span>}
             </IconButton>
             <button type="button" onClick={() => navigate('/settings')} className="rounded-full focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]" aria-label="Открыть профиль">
-              {user && <UserAvatarImage user={user} label={displayName} size="sm" className="border-2 border-white/15" />}
+              {user && <UserAvatarImage user={user} label={displayName} size="xs" className="h-8 w-8 border-2 border-white/15 text-sm" />}
             </button>
           </div>
         </header>

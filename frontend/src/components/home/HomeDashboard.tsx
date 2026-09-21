@@ -23,14 +23,10 @@ export function GreetingHero({ firstName }: { firstName: string }) {
         <h1 className="mt-1.5 font-[var(--nt-font-display)] text-[clamp(2.25rem,7vw,4rem)] font-semibold leading-none text-white">
           {firstName}!
         </h1>
-        <blockquote className="mt-3.5 max-w-[22rem] text-sm font-medium leading-5 text-white/78 sm:text-base sm:leading-6">
-          «Всё должно быть благопристойно и чинно»
-          <footer className="mt-1 text-sm not-italic text-white/55">1 Кор. 14:40</footer>
-        </blockquote>
+        <p className="mt-4 w-fit origin-left -rotate-[5deg] font-[var(--nt-font-display)] text-xl italic leading-6 text-[var(--nt-home-accent)] sm:mt-5 sm:text-2xl">
+          Делать значимое
+        </p>
       </div>
-      <p className="absolute bottom-5 right-5 hidden max-w-36 rotate-[-5deg] text-right font-[var(--nt-font-display)] text-lg italic leading-5 text-[var(--nt-home-accent)] sm:block">
-        Делать значимое
-      </p>
     </section>
   );
 }
@@ -59,14 +55,14 @@ export function QuickActions({ actions }: { actions: QuickAction[] }) {
           type="button"
           onClick={action.onClick}
           className={cn(
-            'group flex min-h-28 min-w-0 flex-col items-center justify-between rounded-[var(--nt-home-radius-md)] border p-2 text-center shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:min-h-32 sm:p-3',
+            'group flex aspect-square min-h-0 min-w-0 flex-col items-center justify-between rounded-[var(--nt-home-radius-md)] border p-1.5 text-center shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:aspect-auto sm:min-h-28 sm:p-3',
             toneClass[action.tone],
           )}
         >
-          <span className="flex h-9 w-9 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5 [&>svg]:h-5 [&>svg]:w-5">
+          <span className="flex h-8 w-8 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5 sm:h-9 sm:w-9 [&>svg]:h-4 [&>svg]:w-4 sm:[&>svg]:h-5 sm:[&>svg]:w-5">
             {action.icon}
           </span>
-          <span className="mt-2 w-full text-[11px] font-bold leading-[0.95rem] sm:text-sm sm:leading-5">{action.label}</span>
+          <span className="mt-1.5 w-full text-[10px] font-bold leading-[0.85rem] sm:mt-2 sm:text-sm sm:leading-5">{action.label}</span>
         </button>
       ))}
     </section>
