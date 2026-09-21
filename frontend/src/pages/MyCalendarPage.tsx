@@ -13,7 +13,7 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { calendarApi, type CalendarEventInput } from '../api/calendar';
 import { useAuthStore } from '../store/authStore';
 import type { Calendar, CalendarCategory, CalendarEvent, CalendarEventType, ExternalCalendarConnection, Task } from '../types';
@@ -65,6 +65,7 @@ type EventDraft = {
 
 export default function MyCalendarPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { projectId } = useParams<{ projectId: string }>();
   const currentUserId = useAuthStore((state) => state.user?.id);
   const [calendars, setCalendars] = useState<Calendar[]>([]);
@@ -221,6 +222,14 @@ export default function MyCalendarPage() {
       notificationAt: toLocalInputValue(new Date(start.getTime() - 30 * 60 * 1000)),
     });
   };
+
+  useEffect(() => {
+    if (searchParams.get('create') !== '1' || !writableCalendars.length || draft) return;
+    openCreate();
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('create');
+    setSearchParams(nextParams, { replace: true });
+  }, [draft, searchParams, setSearchParams, writableCalendars.length]);
 
   const openEdit = (event: CalendarEvent) => {
     setSelectedEvent(null);

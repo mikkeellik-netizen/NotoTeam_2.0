@@ -77,6 +77,12 @@ export default function ProjectsPage() {
     setShowJoin(true);
   }, [searchParams]);
 
+  useEffect(() => {
+    if (searchParams.get('create') !== '1') return;
+    setCreateError('');
+    setShowCreate(true);
+  }, [searchParams]);
+
   const visibleProjects = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('ru');
     if (!normalizedQuery) return projects;

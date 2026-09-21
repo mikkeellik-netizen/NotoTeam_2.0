@@ -9,6 +9,7 @@ import { Button, Surface } from './components/ui';
 import PersonalAppShell from './components/layout/PersonalAppShell';
 
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
+const HomePage = lazy(() => import('./pages/HomePage'));
 const BoardPage = lazy(() => import('./pages/BoardPage'));
 const WorkspacePage = lazy(() => import('./pages/WorkspacePage'));
 const MyTasksPage = lazy(() => import('./pages/MyTasksPage'));
@@ -102,7 +103,8 @@ export default function App() {
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route element={<PersonalAppShell />}>
-            <Route path="/" element={<ProjectsPage />} />
+            <Route path="/" element={<HomePage />} />
+            <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/my-calendar" element={<MyCalendarPage />} />
             <Route path="/today" element={<TodayPage />} />
             <Route path="/my-tasks" element={<MyTasksPage />} />
@@ -147,7 +149,7 @@ function isAllowedWebAppTarget(target: string) {
   if (!target.startsWith('/') || target.startsWith('//')) return false;
   const url = new URL(target, window.location.origin);
   if (url.origin !== window.location.origin) return false;
-  if (['/', '/my-calendar', '/today', '/my-tasks', '/settings', '/system-admin'].includes(url.pathname)) return true;
+  if (['/', '/projects', '/my-calendar', '/today', '/my-tasks', '/settings', '/system-admin'].includes(url.pathname)) return true;
   if (/^\/board\/[^/]+$/.test(url.pathname)) return true;
   return /^\/project\/[^/]+\/(workspace(?:\/page\/[^/]+)?|inbox|notifications|reminders|calendar|members|settings|archive)$/.test(url.pathname);
 }

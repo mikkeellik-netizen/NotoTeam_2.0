@@ -73,6 +73,41 @@
   --nt-shadow-modal: 0 28px 80px rgb(0 0 0 / 48%);
 }
 
+.nt-home-theme {
+  --nt-color-canvas: #0d1319;
+  --nt-color-surface: #141b22;
+  --nt-color-surface-raised: #18212a;
+  --nt-color-surface-hover: #202b35;
+  --nt-color-text: #ffffff;
+  --nt-color-text-muted: #a3adba;
+  --nt-color-accent: #f2dcc0;
+  --nt-color-accent-text: #241a10;
+  --nt-color-link: #9fc4e8;
+  --nt-color-border: rgb(255 255 255 / 8%);
+  --nt-color-border-strong: rgb(255 255 255 / 18%);
+  --nt-color-success: #75c997;
+  --nt-color-warning: #d39a5b;
+  --nt-color-danger: #ff6b61;
+  --nt-home-surface: #141b22;
+  --nt-home-pill: #181f27;
+  --nt-home-text-muted: #a3adba;
+  --nt-home-accent: #f2dcc0;
+  --nt-home-accent-ink: #241a10;
+  --nt-home-link: #9fc4e8;
+  --nt-home-blue: #24394d;
+  --nt-home-blue-soft: #314c64;
+  --nt-home-amber: #4d3823;
+  --nt-home-green: #2e4c37;
+  --nt-home-success: #75c997;
+  --nt-home-danger: #ff6b61;
+  --nt-home-danger-soft: #3f282b;
+  --nt-home-radius-sm: 12px;
+  --nt-home-radius-md: 16px;
+  --nt-home-radius-lg: 20px;
+  --nt-home-radius-xl: 24px;
+  --nt-home-shadow: 0 24px 72px rgb(0 0 0 / 32%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --nt-motion-fast: 0ms;

@@ -1,5 +1,5 @@
-import { CalendarDays, FolderKanban, ListChecks, SunMedium, UserRound, type LucideIcon } from 'lucide-react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { CalendarDays, FolderKanban, Home, ListChecks, UserRound, type LucideIcon } from 'lucide-react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import UserAvatarImage from '../UserAvatarImage';
 import { useAuthStore } from '../../store/authStore';
 import { cn } from '../ui';
@@ -13,20 +13,24 @@ type NavigationItem = {
 };
 
 const NAVIGATION_ITEMS: NavigationItem[] = [
-  { to: '/', label: 'Проекты', shortLabel: 'Проекты', icon: FolderKanban, end: true },
-  { to: '/today', label: 'Сегодня', shortLabel: 'Сегодня', icon: SunMedium },
+  { to: '/', label: 'Главная', shortLabel: 'Главная', icon: Home, end: true },
+  { to: '/projects', label: 'Проекты', shortLabel: 'Проекты', icon: FolderKanban },
   { to: '/my-calendar', label: 'Календарь', shortLabel: 'Календарь', icon: CalendarDays },
   { to: '/my-tasks', label: 'Мои задачи', shortLabel: 'Задачи', icon: ListChecks },
   { to: '/settings', label: 'Профиль', shortLabel: 'Профиль', icon: UserRound },
 ];
 
 export default function PersonalAppShell() {
+  const location = useLocation();
   const user = useAuthStore((state) => state.user);
   const displayName = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || user?.username || user?.telegramId || 'Пользователь';
   const username = user?.username ? `@${user.username}` : user?.telegramId ? `ID ${user.telegramId}` : '';
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] bg-[var(--nt-color-canvas)] text-[var(--nt-color-text)] md:grid-cols-[var(--nt-shell-sidebar-width)_minmax(0,1fr)] md:grid-rows-1">
+    <div className={cn(
+      'grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] bg-[var(--nt-color-canvas)] text-[var(--nt-color-text)] md:grid-cols-[var(--nt-shell-sidebar-width)_minmax(0,1fr)] md:grid-rows-1',
+      location.pathname === '/' && 'nt-home-theme',
+    )}>
       <aside className="relative z-20 hidden min-h-0 flex-col border-r border-[var(--nt-color-border)] bg-[var(--nt-color-surface)] md:flex" aria-label="Основная навигация">
         <div className="flex h-16 items-center gap-3 border-b border-[var(--nt-color-border)] px-4">
           <span className="flex h-9 w-9 items-center justify-center rounded-[var(--nt-radius-control)] bg-[var(--nt-color-accent)] text-lg font-bold text-[var(--nt-color-accent-text)]" aria-hidden="true">N</span>
