@@ -14,7 +14,7 @@ import {
 } from '../components/home/HomeDashboard';
 import TaskModal from '../components/task/TaskModal';
 import UserAvatarImage from '../components/UserAvatarImage';
-import { Button, IconButton, Modal, Select, TextField } from '../components/ui';
+import { Button, Modal, Select, TextField } from '../components/ui';
 import { useAuthStore } from '../store/authStore';
 import { useProjectStore } from '../store/projectStore';
 import { useTaskStore } from '../store/taskStore';
@@ -82,36 +82,34 @@ export default function HomePage() {
     <div className="h-full overflow-y-auto bg-[var(--nt-color-canvas)] text-white">
       <div className="mx-auto w-full max-w-[68rem] px-4 pb-6 pt-3 sm:px-6 sm:pt-4 lg:px-7">
         <header className="mb-4 flex items-center gap-3">
-          <button type="button" onClick={() => navigate('/')} className="flex min-w-0 items-center gap-3 text-left" aria-label="Главная NotoTime">
+          <button type="button" onClick={() => navigate('/')} className="flex min-w-0 items-center gap-3 text-left" aria-label="Главная NotoTeam">
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[var(--nt-home-radius-md)] bg-[var(--nt-home-accent)] text-2xl font-black text-[var(--nt-home-accent-ink)] shadow-[var(--nt-shadow-sm)]">N</span>
             <span className="min-w-0">
-              <span className="block truncate text-lg font-extrabold text-white">NotoTime</span>
+              <span className="block truncate text-lg font-extrabold text-white">NotoTeam</span>
               <span className="block truncate text-xs font-medium text-[var(--nt-home-text-muted)]">Больше, чем задачи</span>
             </span>
           </button>
 
           <div className="ml-auto flex items-center gap-1.5">
-            <IconButton
-              size="sm"
-              variant="ghost"
+            <button
+              type="button"
               aria-label={searchOpen ? 'Закрыть поиск' : 'Открыть поиск'}
               title={searchOpen ? 'Закрыть поиск' : 'Поиск'}
-              className="h-9 min-h-9 w-9 rounded-full border border-white/8 bg-white/8 text-white hover:bg-white/14 [&>span]:overflow-visible [&_svg]:block [&_svg]:h-4 [&_svg]:w-4"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-white/20 bg-white/8 p-0 text-white transition-colors hover:bg-white/14 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]"
               onClick={() => { setSearchOpen((current) => !current); if (searchOpen) setQuery(''); }}
             >
               {searchOpen ? <X size={16} /> : <Search size={16} />}
-            </IconButton>
-            <IconButton
-              size="sm"
-              variant="ghost"
+            </button>
+            <button
+              type="button"
               aria-label="Открыть экран сегодня"
               title="Сегодня"
-              className="relative h-9 min-h-9 w-9 rounded-full border border-white/8 bg-white/8 text-white hover:bg-white/14 [&>span]:overflow-visible [&_svg]:block [&_svg]:h-4 [&_svg]:w-4"
+              className="relative grid h-9 w-9 shrink-0 place-items-center rounded-full border border-white/20 bg-white/8 p-0 text-white transition-colors hover:bg-white/14 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]"
               onClick={() => navigate('/today')}
             >
               <Bell size={16} />
               {alertCount > 0 && <span className="absolute -right-0.5 -top-0.5 flex min-h-4 min-w-4 items-center justify-center rounded-full bg-[var(--nt-home-danger)] px-1 text-[9px] font-bold text-white">{Math.min(alertCount, 99)}</span>}
-            </IconButton>
+            </button>
             <button type="button" onClick={() => navigate('/settings')} className="rounded-full focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)]" aria-label="Открыть профиль">
               {user && <UserAvatarImage user={user} label={displayName} size="xs" className="h-8 w-8 border-2 border-white/15 text-sm" />}
             </button>

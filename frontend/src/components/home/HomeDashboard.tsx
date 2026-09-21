@@ -12,21 +12,21 @@ export function GreetingHero({ firstName }: { firstName: string }) {
 
   return (
     <section
-      className="relative isolate min-h-[14rem] overflow-hidden rounded-[var(--nt-home-radius-lg)] border border-white/10 bg-cover bg-center px-5 py-5 shadow-[var(--nt-home-shadow)] sm:min-h-[17rem] sm:px-6 sm:py-6"
+      className="relative isolate h-48 overflow-hidden rounded-[var(--nt-home-radius-lg)] bg-cover bg-center px-5 py-5 shadow-[var(--nt-home-shadow)] sm:h-60 sm:px-6 sm:py-6"
       style={{ backgroundImage: `url(${heroImage})` }}
       aria-label={`${greeting}, ${firstName}`}
     >
       <div className="absolute inset-0 -z-10 bg-[linear-gradient(90deg,rgba(4,10,16,0.94)_0%,rgba(4,10,16,0.7)_44%,rgba(4,10,16,0.16)_100%)]" />
       <div className="absolute inset-x-0 bottom-0 -z-10 h-2/3 bg-[linear-gradient(0deg,rgba(4,10,16,0.9)_0%,transparent_100%)]" />
-      <div className="flex h-full max-w-[34rem] flex-col justify-end">
+      <div className="flex h-full max-w-[34rem] flex-col justify-start">
         <p className="text-xs font-semibold uppercase tracking-[0.22em] text-white/70">{greeting},</p>
         <h1 className="mt-1.5 font-[var(--nt-font-display)] text-[clamp(2.25rem,7vw,4rem)] font-semibold leading-none text-white">
           {firstName}!
         </h1>
-        <p className="mt-4 w-fit origin-left -rotate-[5deg] font-[var(--nt-font-display)] text-xl italic leading-6 text-[var(--nt-home-accent)] sm:mt-5 sm:text-2xl">
-          Делать значимое
-        </p>
       </div>
+      <p className="absolute bottom-4 right-5 origin-right -rotate-[5deg] text-right font-[var(--nt-font-display)] text-xl italic leading-6 text-[var(--nt-home-accent)] sm:bottom-5 sm:right-6 sm:text-2xl">
+        Делать значимое
+      </p>
     </section>
   );
 }
@@ -55,14 +55,14 @@ export function QuickActions({ actions }: { actions: QuickAction[] }) {
           type="button"
           onClick={action.onClick}
           className={cn(
-            'group flex aspect-square min-h-0 min-w-0 flex-col items-center justify-between rounded-[var(--nt-home-radius-md)] border p-1.5 text-center shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:aspect-auto sm:min-h-28 sm:p-3',
+            'group flex h-[4.75rem] min-h-0 min-w-0 flex-col items-center justify-center gap-1.5 rounded-[var(--nt-home-radius-md)] border p-1.5 text-center shadow-[var(--nt-shadow-sm)] transition-[transform,filter] duration-[var(--nt-motion-fast)] hover:brightness-110 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] active:scale-[0.98] sm:h-24 sm:gap-2 sm:p-3',
             toneClass[action.tone],
           )}
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5 sm:h-9 sm:w-9 [&>svg]:h-4 [&>svg]:w-4 sm:[&>svg]:h-5 sm:[&>svg]:w-5">
+          <span className="flex h-8 w-8 items-center justify-center rounded-[var(--nt-home-radius-sm)] bg-white/16 transition-transform group-hover:-translate-y-0.5 sm:h-10 sm:w-10 [&>svg]:h-5 [&>svg]:w-5 sm:[&>svg]:h-6 sm:[&>svg]:w-6">
             {action.icon}
           </span>
-          <span className="mt-1.5 w-full text-[10px] font-bold leading-[0.85rem] sm:mt-2 sm:text-sm sm:leading-5">{action.label}</span>
+          <span className="w-full text-[10px] font-bold leading-[0.8rem] sm:text-sm sm:leading-5">{action.label}</span>
         </button>
       ))}
     </section>
@@ -94,7 +94,7 @@ export function HomeProjectCard({ project }: { project: Project }) {
     <button
       type="button"
       onClick={() => navigate(`/project/${project.id}/workspace`)}
-      className="group relative isolate flex min-h-44 w-[9.5rem] shrink-0 snap-start overflow-hidden rounded-[var(--nt-home-radius-md)] border border-white/10 bg-[var(--nt-home-surface)] p-3 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,border-color] hover:-translate-y-0.5 hover:border-white/25 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:min-h-48 sm:w-[12.5rem] sm:p-3.5 lg:w-[15.5rem]"
+      className="group relative isolate flex min-h-40 w-[8.75rem] shrink-0 snap-start overflow-hidden rounded-[var(--nt-home-radius-md)] border border-white/10 bg-[var(--nt-home-surface)] p-2.5 text-left shadow-[var(--nt-shadow-sm)] transition-[transform,border-color] hover:-translate-y-0.5 hover:border-white/25 focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:min-h-44 sm:w-[11.5rem] sm:p-3 lg:w-56"
       aria-label={`Открыть проект «${project.title}»`}
     >
       <span
