@@ -101,6 +101,8 @@ const SECURITY_EVENT_LIMIT = envPositiveNumber("SECURITY_EVENT_LIMIT", 5000);
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 дней
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 минут
 const AUTH_CODE_MAX_ATTEMPTS = envPositiveNumber("AUTH_CODE_MAX_ATTEMPTS", 5);
+const PROJECT_PRESENCE_ONLINE_MS = envPositiveNumber("PROJECT_PRESENCE_ONLINE_MS", 45_000);
+const PROJECT_PRESENCE_MAX_SESSIONS = 8;
 const AI_CONNECTOR_TOKEN_PREFIX = "noto_ai_";
 const AI_CONNECTOR_TOKEN_DEFAULT_TTL_DAYS = envPositiveNumber("AI_CONNECTOR_TOKEN_DEFAULT_TTL_DAYS", 90);
 const AI_CONNECTOR_TOKEN_MAX_TTL_DAYS = envPositiveNumber("AI_CONNECTOR_TOKEN_MAX_TTL_DAYS", 365);
@@ -2814,6 +2816,59 @@ async function handle(req, res) {
       return send(res, 200, users.map((user) => userForResponse(auth, user)).filter(Boolean));
     }
 
+    params = route(method, pathname, { method: "GET", path: /^\/projects\/(?<id>[^/]+)\/presence$/ });
+    if (params) {
+      const project = findProjectById(db, params.id);
+      if (!project) return send(res, 404, { error: "Project not found" });
+      const timestamp = Date.now();
+      return send(res, 200, (project.members ?? []).map((member) => {
+        const presence = normalizeProjectMemberPresence(member.projectPresence, timestamp);
+        return {
+          userId: member.userId,
+          lastSeenAt: presence.lastSeenAt,
+          online: Object.values(presence.sessions).some((expiresAt) => new Date(expiresAt).getTime() > timestamp),
+        };
+      }));
+    }
+
+    params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<id>[^/]+)\/presence$/ });
+    if (params) {
+      const body = await parseBody(req);
+      const project = findProjectById(db, params.id);
+      if (!project) return send(res, 404, { error: "Project not found" });
+      const actorUserId = actorFor(auth);
+      const member = (project.members ?? []).find((item) => String(item.userId) === String(actorUserId));
+      if (!member) return send(res, 403, { error: "Access denied" });
+      const sessionId = normalizePresenceSessionId(body.sessionId);
+      if (!sessionId) return send(res, 400, { error: "sessionId is required" });
+      const timestamp = Date.now();
+      const presence = normalizeProjectMemberPresence(member.projectPresence, timestamp);
+      presence.lastSeenAt = new Date(timestamp).toISOString();
+      presence.sessions[sessionId] = new Date(timestamp + PROJECT_PRESENCE_ONLINE_MS).toISOString();
+      presence.sessions = Object.fromEntries(
+        Object.entries(presence.sessions)
+          .sort(([, left], [, right]) => new Date(right).getTime() - new Date(left).getTime())
+          .slice(0, PROJECT_PRESENCE_MAX_SESSIONS),
+      );
+      member.projectPresence = presence;
+      await writeJson(db);
+      return send(res, 200, { userId: member.userId, lastSeenAt: presence.lastSeenAt, online: true });
+    }
+
+    params = route(method, pathname, { method: "DELETE", path: /^\/projects\/(?<id>[^/]+)\/presence$/ });
+    if (params) {
+      const body = await parseBody(req);
+      const project = findProjectById(db, params.id);
+      if (!project) return send(res, 404, { error: "Project not found" });
+      const actorUserId = actorFor(auth);
+      const member = (project.members ?? []).find((item) => String(item.userId) === String(actorUserId));
+      if (!member) return send(res, 403, { error: "Access denied" });
+      const sessionId = normalizePresenceSessionId(body.sessionId);
+      if (sessionId && member.projectPresence?.sessions) delete member.projectPresence.sessions[sessionId];
+      await writeJson(db);
+      return send(res, 200, { ok: true });
+    }
+
     params = route(method, pathname, { method: "POST", path: /^\/projects\/(?<id>[^/]+)\/members$/ });
     if (params) {
       const body = await parseBody(req);
@@ -5033,7 +5088,7 @@ function hydrateProject(db, project) {
     ...safeProject,
     columns: db.columns.filter((column) => column.projectId === project.id).sort((a, b) => a.position - b.position),
     members: (project.members ?? []).map((member) => {
-      const { adminNotes: _adminNotes, ...safeMember } = member;
+      const { adminNotes: _adminNotes, projectPresence: _projectPresence, ...safeMember } = member;
       return {
         ...safeMember,
         user: publicUserProfile(db.users.find((user) => user.id === member.userId)),
@@ -6162,6 +6217,21 @@ function actorFor(auth, provided) {
   return asRef(provided);
 }
 
+function normalizePresenceSessionId(value) {
+  const sessionId = String(value ?? "").trim();
+  return /^[A-Za-z0-9_-]{8,100}$/.test(sessionId) ? sessionId : "";
+}
+
+function normalizeProjectMemberPresence(value, timestamp = Date.now()) {
+  const sessions = Object.fromEntries(
+    Object.entries(value?.sessions ?? {}).filter(([, expiresAt]) => new Date(expiresAt).getTime() > timestamp),
+  );
+  return {
+    lastSeenAt: value?.lastSeenAt,
+    sessions,
+  };
+}
+
 function isProjectMember(db, projectId, userId) {
   const project = db.projects.find((item) => String(item.id) === String(projectId));
   if (!project) return true; // проект не найден — пусть эндпоинт вернёт 404
@@ -6260,6 +6330,7 @@ function authorizeRequest(auth, method, pathname, db) {
 
 function requiredProjectPermissionForRequest(method, pathname) {
   if (method === "GET") {
+    if (/^\/projects\/[^/]+\/presence$/.test(pathname)) return "manageMembers";
     if (/^\/projects\/[^/]+\/admin-summary$/.test(pathname)) return "viewAnalytics";
     if (/^\/projects\/[^/]+\/activity$/.test(pathname)) return "viewAnalytics";
     if (/^\/projects\/[^/]+\/ai-context(?:\/changes)?$/.test(pathname)) return "exportProject";

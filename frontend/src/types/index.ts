@@ -180,6 +180,12 @@ export interface ProjectMember {
   role?: Role;
 }
 
+export interface ProjectMemberPresence {
+  userId: number;
+  lastSeenAt?: string;
+  online: boolean;
+}
+
 export interface ProjectJoinRequest {
   id: number;
   projectId: number;

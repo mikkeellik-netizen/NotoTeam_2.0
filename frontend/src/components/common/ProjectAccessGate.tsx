@@ -1,5 +1,6 @@
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { projectsApi } from '../../api/projects';
 import { useAuthStore } from '../../store/authStore';
 import { useProjectStore } from '../../store/projectStore';
 import type { RolePermissions } from '../../types';
@@ -27,6 +28,7 @@ export default function ProjectAccessGate({
   const fetchProject = useProjectStore((state) => state.fetchProject);
   const [status, setStatus] = useState<AccessStatus>('idle');
   const [message, setMessage] = useState('');
+  const presenceSessionId = useRef(createPresenceSessionId());
   const pid = Number(projectId);
 
   useEffect(() => {
@@ -72,6 +74,31 @@ export default function ProjectAccessGate({
   );
   const hasMembership = isOwner || isMember;
 
+  useEffect(() => {
+    if (status !== 'ready' || !hasMembership || !currentUser?.id) return;
+
+    let stopped = false;
+    const sessionId = presenceSessionId.current;
+    const touch = () => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      void projectsApi.touchPresence(pid, sessionId).catch(() => undefined);
+    };
+    const onVisibilityChange = () => touch();
+
+    touch();
+    const intervalId = window.setInterval(touch, 20_000);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', touch);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', touch);
+      void projectsApi.leavePresence(pid, sessionId).catch(() => undefined);
+    };
+  }, [currentUser?.id, hasMembership, pid, status]);
+
   if (status === 'loading' || status === 'idle' || (status === 'ready' && !project)) {
     return <ProjectAccessLoading />;
   }
@@ -116,6 +143,13 @@ export default function ProjectAccessGate({
   }
 
   return <>{children}</>;
+}
+
+function createPresenceSessionId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `presence_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
 }
 
 function ProjectAccessLoading() {

@@ -1,4 +1,4 @@
-import type { Project, ProjectJoinRequest, ResponsibilityArea } from '../types';
+import type { Project, ProjectJoinRequest, ProjectMemberPresence, ResponsibilityArea } from '../types';
 import { apiRequest, normalizeArray, normalizeNumberId } from './httpClient';
 
 export const projectsApi = {
@@ -43,6 +43,26 @@ export const projectsApi = {
 
   async getAllColumns(projectId: number) {
     return normalizeArray(await apiRequest<any[]>(`/projects/${projectId}/columns?allBoards=1`));
+  },
+
+  async getPresence(projectId: number): Promise<ProjectMemberPresence[]> {
+    const items = await apiRequest<ProjectMemberPresence[]>(`/projects/${projectId}/presence`);
+    return items.map((item) => ({ ...item, userId: Number(item.userId) }));
+  },
+
+  async touchPresence(projectId: number, sessionId: string): Promise<ProjectMemberPresence> {
+    const item = await apiRequest<ProjectMemberPresence>(`/projects/${projectId}/presence`, {
+      method: 'POST',
+      body: { sessionId },
+    });
+    return { ...item, userId: Number(item.userId) };
+  },
+
+  async leavePresence(projectId: number, sessionId: string): Promise<{ ok: true }> {
+    return apiRequest<{ ok: true }>(`/projects/${projectId}/presence`, {
+      method: 'DELETE',
+      body: { sessionId },
+    });
   },
 
   async createColumn(projectId: number, title: string, pageId?: string) {

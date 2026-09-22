@@ -257,6 +257,39 @@ try {
     },
   });
 
+  const viewerPresence = await request(`/projects/${project.id}/presence`, {
+    method: "POST",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { sessionId: "smoke_viewer_session" },
+  });
+  assert(viewerPresence.online === true && viewerPresence.lastSeenAt, "Project presence heartbeat was not recorded");
+  await request(`/projects/${project.id}/presence`, {
+    auth: "tma",
+    initData: viewerInitData,
+    expected: 403,
+  });
+  const ownerPresence = await request(`/projects/${project.id}/presence`);
+  const visibleViewerPresence = ownerPresence.find((item) => String(item.userId) === String(viewerMember.userId));
+  assert(visibleViewerPresence?.online === true, "Project admin cannot see online member presence");
+  const hydratedProjectAfterPresence = await request(`/projects/${project.id}`);
+  assert(
+    hydratedProjectAfterPresence.members.every((member) => !Object.prototype.hasOwnProperty.call(member, "projectPresence")),
+    "Hydrated project leaked member presence",
+  );
+  const exportedProjectAfterPresence = await request(`/projects/${project.id}/export?format=json&token=${encodeURIComponent(sessionToken)}`, { auth: "none" });
+  assertProjectExportIsSanitized(exportedProjectAfterPresence, "Project export with member presence");
+  await request(`/projects/${project.id}/presence`, {
+    method: "DELETE",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { sessionId: "smoke_viewer_session" },
+  });
+  const ownerPresenceAfterLeave = await request(`/projects/${project.id}/presence`);
+  const viewerPresenceAfterLeave = ownerPresenceAfterLeave.find((item) => String(item.userId) === String(viewerMember.userId));
+  assert(viewerPresenceAfterLeave?.online === false, "Leaving a project did not end the current presence session");
+  assert(viewerPresenceAfterLeave?.lastSeenAt === viewerPresence.lastSeenAt, "Leaving a project erased the last visit time");
+
   const ownerCalendars = await request("/me/calendars");
   const ownerPersonalCalendar = ownerCalendars.find((calendar) => calendar.type === "PERSONAL");
   const projectCalendar = ownerCalendars.find(
@@ -446,6 +479,20 @@ try {
     body: { title: "Private Smoke Project", ownerId: user.id },
     expected: 201,
   });
+  await request(`/projects/${privateProject.id}/presence`, {
+    method: "POST",
+    auth: "tma",
+    initData: viewerInitData,
+    body: { sessionId: "forbidden_private_session" },
+    expected: 403,
+  });
+  await request(`/projects/${privateProject.id}/presence`, {
+    method: "POST",
+    body: { sessionId: "owner_private_session" },
+  });
+  const firstProjectPresenceAfterPrivateVisit = await request(`/projects/${project.id}/presence`);
+  const ownerPresenceInFirstProject = firstProjectPresenceAfterPrivateVisit.find((item) => String(item.userId) === String(user.id));
+  assert(!ownerPresenceInFirstProject?.lastSeenAt, "A visit to another project leaked into this project's presence");
   await request(`/projects/${privateProject.id}/members`, { auth: "tma", initData: viewerInitData, expected: 403 });
   await request(`/projects/${project.id}/activity`, {
     method: "POST",
@@ -1216,6 +1263,7 @@ function assertProjectExportIsSanitized(payload, label) {
   assert(!Object.prototype.hasOwnProperty.call(payload.project ?? {}, "inviteCode"), `${label} leaked inviteCode`);
   assert(!Object.prototype.hasOwnProperty.call(payload.project ?? {}, "botSettings"), `${label} leaked botSettings`);
   assert((payload.project?.members ?? []).every((member) => !Object.prototype.hasOwnProperty.call(member, "adminNotes")), `${label} leaked member admin notes`);
+  assert((payload.project?.members ?? []).every((member) => !Object.prototype.hasOwnProperty.call(member, "projectPresence")), `${label} leaked member presence`);
   assert(
     (payload.project?.members ?? []).every((member) => !Object.prototype.hasOwnProperty.call(member.user ?? {}, "telegramId")),
     `${label} leaked member telegramId`,

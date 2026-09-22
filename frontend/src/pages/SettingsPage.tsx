@@ -36,6 +36,7 @@ import type {
   ProjectBotSettings,
   ProjectJoinRequest,
   ProjectMember,
+  ProjectMemberPresence,
   ProjectRoleName,
   ResponsibilityArea,
   Task,
@@ -1503,6 +1504,7 @@ function AdminPanel({
   const [openUserIds, setOpenUserIds] = useState<Set<number>>(new Set());
   const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>(initialTab);
   const [selectedMember, setSelectedMember] = useState<ProjectMember | null>(null);
+  const [memberPresence, setMemberPresence] = useState<Record<string, ProjectMemberPresence>>({});
   const [responsibilityAreas, setResponsibilityAreas] = useState<ResponsibilityArea[]>(project.responsibilityAreas ?? []);
   const [editingResponsibilityArea, setEditingResponsibilityArea] = useState<ResponsibilityArea | null>(null);
   const [responsibilityFormOpen, setResponsibilityFormOpen] = useState(false);
@@ -1547,6 +1549,30 @@ function AdminPanel({
   const [meetingEndDate, setMeetingEndDate] = useState(() => formatDateInput(new Date()));
   const [meetingDecisionText, setMeetingDecisionText] = useState('');
   const [meetingDecisionStatus, setMeetingDecisionStatus] = useState<'idle' | 'saved'>('idle');
+
+  useEffect(() => {
+    if (activeAdminTab !== 'people') return;
+    let cancelled = false;
+
+    const loadPresence = async () => {
+      try {
+        const items = await projectsApi.getPresence(project.id);
+        if (!cancelled) {
+          setMemberPresence(Object.fromEntries(items.map((item) => [String(item.userId), item])));
+        }
+      } catch {
+        if (!cancelled) setMemberPresence({});
+      }
+    };
+
+    void loadPresence();
+    const intervalId = window.setInterval(loadPresence, 20_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeAdminTab, project.id]);
+
   const aiTokenAccessPresetId = useMemo(() => {
     return AI_CONNECTOR_ACCESS_PRESETS.find((preset) => sameAiContextOptions(aiTokenAccessPolicy, preset.policy))?.id ?? 'custom';
   }, [aiTokenAccessPolicy]);
@@ -3533,24 +3559,38 @@ function AdminPanel({
         <section className={`${activeAdminTab === 'people' ? 'block' : 'hidden'} mt-4 rounded-[12px] bg-[var(--tg-theme-secondary-bg-color)] p-4`}>
           <h3 className="mb-2 text-sm font-semibold text-[var(--tg-theme-text-color)]">Активность пользователей</h3>
           <div className="space-y-2">
-            {byUser.map((item) => (
-              <button
-                key={item.member.id}
-                onClick={() => setSelectedMember(item.member)}
-                className="block w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-left text-sm active:scale-[0.99]"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="font-medium text-[var(--tg-theme-text-color)]">{memberName(item.member)}</p>
-                  <span className="text-xs text-[var(--tg-theme-hint-color)]">{Math.round((item.significance / maxWeightedLoad) * 100)}% веса</span>
-                </div>
-                <p className="text-xs text-[var(--tg-theme-hint-color)]">
-                  задач: {item.total} · вес: {item.significance} · просрочка: {item.overdueSignificance} · скоро дедлайн: {item.dueSoon}
-                </p>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--tg-theme-secondary-bg-color)]">
-                  <div className="h-full rounded-full bg-[var(--tg-theme-button-color)]" style={{ width: `${Math.round((item.significance / maxWeightedLoad) * 100)}%` }} />
-                </div>
-              </button>
-            ))}
+            {byUser.map((item) => {
+              const presence = memberPresence[String(item.member.userId)];
+              return (
+                <button
+                  key={item.member.id}
+                  onClick={() => setSelectedMember(item.member)}
+                  className="block w-full rounded-[10px] bg-[var(--tg-theme-bg-color)] px-3 py-2 text-left text-sm active:scale-[0.99]"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {presence?.online && (
+                        <span
+                          className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.14)]"
+                          aria-label="Сейчас в проекте"
+                        />
+                      )}
+                      <p className="truncate font-medium text-[var(--tg-theme-text-color)]">{memberName(item.member)}</p>
+                    </div>
+                    <span className="shrink-0 text-xs text-[var(--tg-theme-hint-color)]">{Math.round((item.significance / maxWeightedLoad) * 100)}% веса</span>
+                  </div>
+                  <p className={`mt-0.5 text-xs ${presence?.online ? 'text-emerald-500' : 'text-[var(--tg-theme-hint-color)]'}`}>
+                    {formatProjectPresence(presence)}
+                  </p>
+                  <p className="text-xs text-[var(--tg-theme-hint-color)]">
+                    задач: {item.total} · вес: {item.significance} · просрочка: {item.overdueSignificance} · скоро дедлайн: {item.dueSoon}
+                  </p>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--tg-theme-secondary-bg-color)]">
+                    <div className="h-full rounded-full bg-[var(--tg-theme-button-color)]" style={{ width: `${Math.round((item.significance / maxWeightedLoad) * 100)}%` }} />
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </section>
 
@@ -5823,6 +5863,20 @@ function groupActivityByUser(events: ActivityEvent[], members: ProjectMember[]) 
 
 function memberName(member: ProjectMember) {
   return member.user?.firstName ?? member.user?.username ?? `ID ${member.userId}`;
+}
+
+function formatProjectPresence(presence?: ProjectMemberPresence) {
+  if (presence?.online) return 'Сейчас в проекте';
+  if (!presence?.lastSeenAt) return 'Ещё не заходил в проект';
+  const date = new Date(presence.lastSeenAt);
+  if (Number.isNaN(date.getTime())) return 'Последний заход неизвестен';
+  return `Последний заход: ${date.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`;
 }
 
 function userDisplayName(user: Pick<User, 'firstName' | 'lastName' | 'username' | 'telegramId'>) {

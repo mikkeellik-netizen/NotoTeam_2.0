@@ -128,7 +128,7 @@ function exportProject(project, db) {
   return {
     ...safeProject,
     members: (project.members || []).map((member) => {
-      const { adminNotes: _adminNotes, ...safeMember } = member;
+      const { adminNotes: _adminNotes, projectPresence: _projectPresence, ...safeMember } = member;
       return {
         ...safeMember,
         user: publicUser((db.users || []).find((user) => String(user.id) === String(member.userId))),
