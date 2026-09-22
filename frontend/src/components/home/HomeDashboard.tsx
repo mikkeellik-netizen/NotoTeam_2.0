@@ -152,7 +152,7 @@ export function TaskFilters({ active, counts, onChange }: {
           type="button"
           onClick={() => onChange(item.id)}
           className={cn(
-            'flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-full px-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:px-4 sm:text-sm',
+            'flex h-9 min-h-0 min-w-0 items-center justify-center gap-1.5 rounded-full px-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:shadow-[var(--nt-focus-ring)] sm:px-4 sm:text-sm',
             active === item.id
               ? 'bg-[var(--nt-home-accent)] text-[var(--nt-home-accent-ink)]'
               : 'bg-[var(--nt-home-pill)] text-[var(--nt-home-text-muted)] hover:text-white',
@@ -161,7 +161,7 @@ export function TaskFilters({ active, counts, onChange }: {
         >
           <span className="truncate">{item.label}</span>
           <span className={cn(
-            'flex min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 py-0.5 text-xs font-bold',
+            'flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full px-1 text-[11px] font-bold',
             item.danger
               ? 'bg-[var(--nt-home-danger-soft)] text-[var(--nt-home-danger)]'
               : active === item.id
