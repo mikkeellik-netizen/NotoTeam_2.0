@@ -12,7 +12,7 @@ export function GreetingHero({ firstName }: { firstName: string }) {
 
   return (
     <section
-      className="relative isolate h-48 overflow-hidden rounded-[var(--nt-home-radius-lg)] bg-cover bg-center px-5 py-5 shadow-[var(--nt-home-shadow)] sm:h-60 sm:px-6 sm:py-6"
+      className="relative isolate h-40 overflow-hidden rounded-[var(--nt-home-radius-lg)] bg-cover bg-center px-5 py-4 shadow-[var(--nt-home-shadow)] sm:h-52 sm:px-6 sm:py-5"
       style={{ backgroundImage: `url(${heroImage})` }}
       aria-label={`${greeting}, ${firstName}`}
     >
