@@ -1,0 +1,95 @@
+name: Quality checks
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "codex/**"
+      - "claude/**"
+      - "feature/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  backend-api:
+    name: Backend API tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend-api/package-lock.json
+      - run: npm ci
+      - run: npm run smoke
+      - run: npm run test:file-storage
+
+  backend-bot:
+    name: Telegram bot build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend-bot/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  ai-connector:
+    name: AI Connector checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-connector-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run check
+      - run: npm run smoke
+
+  speech-recognition:
+    name: Speech service syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile speech-recognition/app.py

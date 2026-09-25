@@ -40,6 +40,7 @@ speech-recognition/models/
 .codex-remote-attachments/
 .agents/
 !doctype.html
+.devcontainer/runtime/
 
 # OS and editor files
 .DS_Store
