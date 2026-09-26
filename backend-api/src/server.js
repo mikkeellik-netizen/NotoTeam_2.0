@@ -188,13 +188,31 @@ function isLocalHostname(value) {
   return host === "localhost" || host === "127.0.0.1" || host === "::1";
 }
 
+function codespacesFrontendHostname() {
+  const name = String(process.env.CODESPACE_NAME ?? "").trim().toLowerCase();
+  const domain = String(process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\.+/, "");
+  if (!name || !domain) return "";
+  return `${name}-5175.${domain}`;
+}
+
 function isLocalDevRequest(req) {
   if (process.env.LOCAL_DEV_LOGIN !== "1") return false;
   if (isProductionRuntime()) return false;
   const hostName = hostnameFromHeader(req.headers.host);
   const origin = requestOrigin(req);
   const originHost = origin ? hostnameFromHeader(origin) : hostName;
-  return isLocalHostname(hostName) && isLocalHostname(originHost);
+  if (isLocalHostname(hostName) && isLocalHostname(originHost)) return true;
+
+  const codespacesHost = codespacesFrontendHostname();
+  return Boolean(
+    codespacesHost &&
+      origin?.toLowerCase().startsWith("https://") &&
+      originHost === codespacesHost &&
+      (isLocalHostname(hostName) || hostName === codespacesHost)
+  );
 }
 
 function corsForRequest(req) {
