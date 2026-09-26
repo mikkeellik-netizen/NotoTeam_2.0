@@ -32,7 +32,7 @@ try {
       WORKSPACE_STORAGE: workspaceStorage,
       DATABASE_URL: "",
       WORKSPACE_NORMALIZED_TABLES: normalizedTables,
-      CORS_ORIGIN: "http://127.0.0.1:5174,http://localhost:5174",
+      CORS_ORIGIN: "http://127.0.0.1:5174,http://localhost:5174,https://smoke-space-5175.app.github.dev,https://preview.example",
       BOT_TOKEN: botToken,
       TELEGRAM_BOT_TOKEN: botToken,
       INTERNAL_API_TOKEN: authToken,
@@ -41,6 +41,9 @@ try {
       AUTH_IP_BLOCK_MS: "60000",
       API_MAX_BODY_BYTES: "16384",
       DB_FLUSH_DEBOUNCE_MS: String(flushDebounceMs),
+      LOCAL_DEV_LOGIN: "1",
+      CODESPACE_NAME: "smoke-space",
+      GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: "app.github.dev",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -80,6 +83,23 @@ try {
     },
   });
   assertApiContract("authenticatedUser", user);
+
+  const codespacesLocalDev = await requestResponse("/auth/dev-local", {
+    method: "POST",
+    auth: "none",
+    headers: { Origin: "https://smoke-space-5175.app.github.dev" },
+    body: {},
+    expected: 404,
+  });
+  assert(codespacesLocalDev.payload?.error === "Local user not found", "Codespaces origin did not pass the local-login request gate");
+  const foreignLocalDev = await requestResponse("/auth/dev-local", {
+    method: "POST",
+    auth: "none",
+    headers: { Origin: "https://preview.example" },
+    body: {},
+    expected: 404,
+  });
+  assert(foreignLocalDev.payload?.error === "Not found", "Foreign origin passed the local-login request gate");
 
   await request("/auth/request-code", {
     method: "POST",
