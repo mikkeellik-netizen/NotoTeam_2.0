@@ -59,7 +59,6 @@ export default function LoginPage() {
     setError(null);
     try {
       await loginLocalDev();
-      if (getStoredSessionToken()) window.location.replace('/');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Local login failed');
     } finally {
