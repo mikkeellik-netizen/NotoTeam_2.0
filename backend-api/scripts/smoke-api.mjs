@@ -89,9 +89,14 @@ try {
     auth: "none",
     headers: { Origin: "https://smoke-space-5175.app.github.dev" },
     body: {},
-    expected: 404,
   });
-  assert(codespacesLocalDev.payload?.error === "Local user not found", "Codespaces origin did not pass the local-login request gate");
+  assert(codespacesLocalDev.payload?.token, "Codespaces local login did not return a session token");
+  assert(codespacesLocalDev.payload?.user?.telegramId === "local-dev", "Codespaces local login did not create the local user");
+  const localDevProfile = await request("/auth/me", {
+    auth: "ai",
+    bearerToken: codespacesLocalDev.payload.token,
+  });
+  assert(localDevProfile?.telegramId === "local-dev", "Codespaces local user was not retained for the next request");
   const foreignLocalDev = await requestResponse("/auth/dev-local", {
     method: "POST",
     auth: "none",
@@ -241,7 +246,7 @@ try {
   const projects = await request(`/users/${user.id}/projects`);
   assert(projects.some((item) => item.id === project.id), "Created project is not returned for owner");
 
-  await request("/telegram/users", {
+  const viewerUser = await request("/telegram/users", {
     method: "POST",
     auth: "bot",
     body: {
@@ -255,7 +260,7 @@ try {
     method: "POST",
     body: { username: "smoke_viewer" },
   });
-  const viewerMember = withViewer.members.find((member) => String(member.userId) === "3");
+  const viewerMember = withViewer.members.find((member) => String(member.userId) === String(viewerUser.id));
   assert(viewerMember, "Smoke viewer was not added to the project");
   await request(`/projects/${project.id}/members/${viewerMember.id}/role`, {
     method: "POST",

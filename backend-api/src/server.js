@@ -746,6 +746,26 @@ function migrateLocalDevProjects(db, newUser) {
   }
 }
 
+function ensureLocalDevUser(db) {
+  let user = db.users.find(
+    (item) => item.telegramId === "local-dev" || item.username?.toLowerCase() === "local_user",
+  );
+  if (user) return user;
+
+  user = {
+    id: idFor(db.users),
+    telegramId: "local-dev",
+    username: "local_user",
+    firstName: "Local",
+    lastName: "User",
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  db.users.push(user);
+  db._dirty = true;
+  return user;
+}
+
 // Удаляет local-dev пользователя если у него больше нет проектов
 // (то есть после миграции или если его никогда и не было).
 function purgeLocalDevUser(db) {
@@ -1407,7 +1427,7 @@ async function readJson() {
   db.aiConnectorAccessEvents ??= [];
   db.projectFiles ??= [];
   const repairedTasks = normalizeDatabaseIds(db);
-  const removedLocalDev = purgeLocalDevUser(db);
+  const removedLocalDev = process.env.LOCAL_DEV_LOGIN === "1" ? false : purgeLocalDevUser(db);
   if (repairedTasks > 0 || removedLocalDev) {
     await writeJson(db);
   }
@@ -2080,10 +2100,8 @@ async function handle(req, res) {
     // ===== АУТЕНТИФИКАЦИЯ =====
     if (method === "POST" && pathname === "/auth/dev-local") {
       if (!isLocalDevRequest(req)) return send(res, 404, { error: "Not found" });
-      const localUser = db.users.find(
-        (item) => item.telegramId === "local-dev" || item.username?.toLowerCase() === "local_user",
-      );
-      if (!localUser || localUser.isBlocked) return send(res, 404, { error: "Local user not found" });
+      const localUser = ensureLocalDevUser(db);
+      if (localUser.isBlocked) return send(res, 404, { error: "Local user not found" });
       const token = createSessionForUser(db, localUser);
       logSecurityEvent(db, {
         type: "auth_dev_local",
